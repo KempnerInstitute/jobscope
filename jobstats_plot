@@ -1,0 +1,355 @@
+#!/usr/bin/python3.12
+# jobstats_plot - render jobstats_history CSV as terminal graphs.
+#
+# Reads the CSV that `jobstats_history` already emits and draws it: utilization
+# bar gauges, a distribution histogram, a colored heatmap table, or a time-series
+# line chart. This keeps plotting OUT of the core tool -- jobstats_history stays
+# dependency-free and fast on its own interpreter; all the plotting deps (plotext
+# + rich, Python 3.12) live here and are only paid for when you actually plot.
+#
+# The view is auto-detected from the CSV columns; override with --kind.
+#   jobstats_history --gpu  --csv  -D 7      | jobstats_plot     # histogram (many jobs)
+#   jobstats_history --gpu  --csv  JOBID     | jobstats_plot     # bar gauges (one job)
+#   jobstats_history --dcgm --csv  JOBID...  | jobstats_plot     # heatmap (jobs/GPUs x metrics)
+#   jobstats_history --dcgm --ts --csv JOBID | jobstats_plot     # time-series line + sparklines
+#   jobstats_plot -f saved.csv --kind heat                       # from a saved file
+#
+# Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner Institute, Harvard
+
+import os, sys, csv, argparse
+
+# Columns that identify a row rather than carry a plottable metric.
+ID_COLS = {"JOBID", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
+           "DUR_S", "RUNTIME", "EPOCH", "TIME"}
+
+# Red cutoff per %-metric (higher is better): value < RED -> red, < 2*RED -> yellow,
+# else green. %-metrics not listed here use DEFAULT_RED. Non-% columns (POWER_W,
+# *_GB, *_MHz, TEMP_C, ...) are shown as plain values, never graded. --config can
+# override GPU%/GMEM%/CPU%/MEM% from the jobstats config.
+DEFAULT_RED = 15          # DCGM utilization %: idle/underfed band (matches DIAG cutoffs)
+RED = {"GPU%": 25, "DUTY%": 25, "GMEM%": 20, "CPU%": 25, "MEM%": 25}
+
+BLOCKS = "▁▂▃▄▅▆▇█"       # sparkline ramp
+HEAT_MAX_ROWS = 40
+
+# Time-series line chart: which metrics to draw by default (if present), unless
+# --metric/--all widen it. Kept small so the chart stays readable.
+TS_DEFAULT = ["SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
+
+
+def die(msg):
+  sys.exit("ERROR: " + msg)
+
+
+def load_libs():
+  """Import plotext + rich on demand, with an actionable message if missing."""
+  try:
+    import plotext as plt
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+    return plt, Console, Table, Text
+  except ImportError as e:
+    die("jobstats_plot needs plotext and rich (missing: %s).\n"
+        "       Install: /usr/bin/python3.12 -m pip install --user plotext rich\n"
+        "       (jobstats_history itself needs none of this -- only plotting does.)"
+        % getattr(e, "name", e))
+
+
+def load_config_red():
+  """Best-effort: pull GPU/MEM red cutoffs from the jobstats config (opt-in via
+  --config). Never prints anything from the module (it holds a secret)."""
+  for p in ("/usr/local/bin", "/usr/bin"):
+    if p not in sys.path:
+      sys.path.append(p)
+  try:
+    import config
+  except Exception as e:
+    die("--config: could not import the jobstats config: %s" % e)
+  for key, attr in (("GPU%", "GPU_UTIL_RED"), ("GMEM%", "GPU_MEM_UTIL_RED"),
+                    ("CPU%", "CPU_UTIL_RED"), ("MEM%", "CPU_MEM_UTIL_RED")):
+    v = getattr(config, attr, None)
+    if isinstance(v, (int, float)):
+      RED[key] = v
+
+
+# --- CSV parsing -------------------------------------------------------------
+def parse_csv(fobj):
+  """Return (columns, rows) from a jobstats_history CSV. Skips the leading context
+  rows (User,.. / Select,..) up to the header row (first cell 'JOBID'), and drops
+  the trailing 'Mean' summary row. rows are dicts keyed by column."""
+  columns, rows = None, []
+  for rec in csv.reader(fobj):
+    if not rec:
+      continue
+    if columns is None:
+      if rec[0] == "JOBID":           # the real header row
+        columns = rec
+      continue                        # still in the context block
+    if rec[0] == "Mean":              # summary mean row -- not a job
+      continue
+    rows.append({columns[i]: (rec[i] if i < len(rec) else "") for i in range(len(columns))})
+  if columns is None:
+    die("no 'JOBID' header row found -- is this jobstats_history --csv output? "
+        "(pipe without -n so the header is included)")
+  return columns, rows
+
+
+def to_float(s):
+  """'-'/'' -> None; otherwise float, or None if unparseable."""
+  if s is None or s in ("-", ""):
+    return None
+  try:
+    return float(s)
+  except ValueError:
+    return None
+
+
+def metric_cols(columns):
+  """Plottable metric columns, in CSV order (everything that isn't an id column)."""
+  return [c for c in columns if c not in ID_COLS]
+
+
+def is_pct(header):
+  return header.endswith("%")
+
+
+def grade(header, v):
+  """Color name for a %-metric value (rich/plotext share these names)."""
+  if v is None or not is_pct(header):
+    return "white"
+  red = RED.get(header, DEFAULT_RED)
+  if v < red:
+    return "red"
+  if v < 2 * red:
+    return "yellow"
+  return "green"
+
+
+def detect_kind(columns):
+  if "EPOCH" in columns and "TIME" in columns:
+    return "line"
+  if {"NODE", "GPU", "DUR_S"} <= set(columns):
+    return "heat"
+  return "summary"   # JOBID x metrics; bars (1 job) or hist (many)
+
+
+# --- renderers ---------------------------------------------------------------
+def render_bars(columns, rows, args, Console, Text):
+  """Horizontal utilization gauges: one bar per %-metric (mean over rows if >1),
+  threshold-colored; non-% metrics shown as plain values."""
+  console = Console(no_color=args.no_color)
+  mcols = metric_cols(columns)
+  title = args.title or ("utilization" + (" (mean of %d jobs)" % len(rows) if len(rows) > 1 else
+                         ("  %s" % rows[0].get("JOBID", "")) if rows else ""))
+  console.print("[bold]%s[/bold]" % title) if not args.no_color else print(title)
+  width = 34
+  for c in mcols:
+    vals = [to_float(r.get(c)) for r in rows]
+    vals = [v for v in vals if v is not None]
+    if not vals:
+      continue
+    v = sum(vals) / len(vals)
+    if is_pct(c):
+      filled = max(0, min(width, int(round(v / 100.0 * width))))
+      t = Text()
+      t.append("%9s " % c)
+      t.append("█" * filled, style=grade(c, v))
+      t.append("░" * (width - filled), style="grey37")
+      t.append(" %5.1f%%" % v)
+      console.print(t)
+    else:
+      console.print("%9s  %g" % (c, v))
+
+
+def render_hist(columns, rows, args, plt):
+  """Distribution of one metric across the selection (plotext histogram)."""
+  mcols = [c for c in metric_cols(columns) if is_pct(c)]
+  metric = args.metric or next((m for m in ("GPU%", "CPU%") if m in mcols), (mcols[0] if mcols else None))
+  if not metric:
+    die("no %%-metric column to histogram (try --metric)")
+  if metric not in columns:
+    die("metric %r not in CSV columns: %s" % (metric, ", ".join(metric_cols(columns))))
+  vals = [to_float(r.get(metric)) for r in rows]
+  vals = [v for v in vals if v is not None]
+  if not vals:
+    die("no numeric values for %s" % metric)
+  plt.clear_figure()
+  plt.theme("clear")
+  if args.width and args.height:
+    plt.plotsize(args.width, args.height)
+  plt.hist(vals, bins=min(15, max(5, len(set(vals)))))
+  plt.xlim(0, 100)
+  plt.title(args.title or ("%s distribution (%d jobs)" % (metric, len(vals))))
+  plt.xlabel(metric); plt.ylabel("jobs")
+  plt.show()
+
+
+def render_heat(columns, rows, args, Console, Table, Text):
+  """Jobs (or GPUs) x metrics, cell background colored by value."""
+  console = Console(no_color=args.no_color)
+  mcols = metric_cols(columns)
+  per_gpu = {"NODE", "GPU"} <= set(columns)
+  label_hdr = "NODE:GPU" if per_gpu else "JOBID"
+  capped = rows[:args.max_rows]
+  base = "per-GPU metrics" if per_gpu else "per-job metrics"
+  table = Table(title=args.title or (base + (" (first %d of %d)" % (args.max_rows, len(rows))
+                                     if len(rows) > args.max_rows else "")),
+                header_style="bold")
+  table.add_column(label_hdr, no_wrap=True)
+  for c in mcols:
+    table.add_column(c, justify="right")
+  for r in capped:
+    label = ("%s:%s" % (r.get("NODE", "?"), r.get("GPU", "?"))) if per_gpu else r.get("JOBID", "?")
+    cells = [label]
+    for c in mcols:
+      raw = r.get(c, "-")
+      v = to_float(raw)
+      if v is not None and is_pct(c) and not args.no_color:
+        cells.append(Text(raw, style="black on %s" % grade(c, v)))
+      else:
+        cells.append(raw)
+    table.add_row(*cells)
+  console.print(table)
+  if len(rows) > args.max_rows:
+    print("note: showing %d of %d rows; narrow the selection or raise --max-rows"
+          % (args.max_rows, len(rows)), file=sys.stderr)
+
+
+def spark(vals):
+  vals = [v for v in vals if v is not None]
+  if not vals:
+    return ""
+  lo, hi = min(vals), max(vals)
+  rng = (hi - lo) or 1.0
+  return "".join(BLOCKS[min(len(BLOCKS) - 1, int((v - lo) / rng * (len(BLOCKS) - 1)))] for v in vals)
+
+
+def render_line(columns, rows, args, plt, Console):
+  """Time-series line chart over the job's window + a per-metric sparkline summary.
+  x = minutes since the first sample; one line per (GPU, metric)."""
+  console = Console(no_color=args.no_color)
+  mcols = [c for c in metric_cols(columns) if is_pct(c) or c in ("POWER_W",)]
+  if args.all:
+    metrics = mcols
+  elif args.metric:
+    metrics = [m for m in args.metric.split(",") if m in columns] or die("none of --metric in CSV")
+  else:
+    metrics = [m for m in TS_DEFAULT if m in columns] or mcols[:4]
+  # group samples by GPU, preserving time order
+  gpus = {}
+  t0 = None
+  for r in rows:
+    ep = to_float(r.get("EPOCH"))
+    if ep is None:
+      continue
+    t0 = ep if t0 is None else min(t0, ep)
+  for r in rows:
+    ep = to_float(r.get("EPOCH"))
+    if ep is None:
+      continue
+    key = (r.get("NODE", "?"), r.get("GPU", "?"))
+    gpus.setdefault(key, []).append((ep, r))
+  if not gpus:
+    die("no timestamped samples (need --dcgm --ts --csv output)")
+  jid = rows[0].get("JOBID", "?")
+  running = any(r.get("STATE", "") == "RUNNING" for r in rows)
+
+  plt.clear_figure()
+  plt.theme("clear")
+  if args.width and args.height:
+    plt.plotsize(args.width, args.height)
+  for (node, gpu), samples in sorted(gpus.items()):
+    samples.sort(key=lambda x: x[0])
+    xs = [(ep - t0) / 60.0 for ep, _ in samples]
+    for m in metrics:
+      ys = [to_float(r.get(m)) for _, r in samples]
+      if not any(y is not None for y in ys):
+        continue
+      ys = [y if y is not None else 0.0 for y in ys]
+      lbl = ("%s gpu%s" % (m, gpu)) if len(gpus) > 1 else m
+      plt.plot(xs, ys, label=lbl)
+  plt.title(args.title or ("job %s  DCGM over time%s" % (jid, "  (running)" if running else "")))
+  plt.xlabel("minutes since start"); plt.ylabel("value")
+  plt.show()
+
+  # compact sparkline summary (per GPU, per metric)
+  print()
+  for (node, gpu), samples in sorted(gpus.items()):
+    samples.sort(key=lambda x: x[0])
+    tag = ("%s gpu%s  " % (node, gpu)) if len(gpus) > 1 else ""
+    for m in metrics:
+      ys = [to_float(r.get(m)) for _, r in samples]
+      if any(y is not None for y in ys):
+        nums = [y for y in ys if y is not None]
+        print("  %s%-9s %s  (%.0f-%.0f)" % (tag, m, spark(ys), min(nums), max(nums)))
+
+
+def main():
+  ap = argparse.ArgumentParser(
+      formatter_class=argparse.RawDescriptionHelpFormatter,
+      description="Render jobstats_history --csv output as a terminal graph.\n"
+                  "Pipe it in:  jobstats_history <view> --csv | jobstats_plot\n"
+                  "Kinds: bars (gauges), hist (distribution), heat (jobs x metrics),\n"
+                  "line (--dcgm --ts time series). 'auto' picks from the CSV columns.")
+  ap.add_argument("file", nargs="?", help="CSV file (default: stdin)")
+  ap.add_argument("-f", "--file", dest="file_opt", help="CSV file (alternative to the positional arg)")
+  ap.add_argument("--kind", choices=["auto", "bars", "heat", "hist", "line"], default="auto",
+                  help="chart type (default: auto-detect from the CSV columns)")
+  ap.add_argument("--metric", help="metric column for hist (one) or line (comma-separated)")
+  ap.add_argument("--all", action="store_true", help="line: draw every metric, not just the default set")
+  ap.add_argument("--title", help="override the chart title")
+  ap.add_argument("--width", type=int, help="plot width in chars (plotext charts)")
+  ap.add_argument("--height", type=int, help="plot height in chars (plotext charts)")
+  ap.add_argument("--max-rows", dest="max_rows", type=int, default=HEAT_MAX_ROWS,
+                  help="heatmap row cap (default %d)" % HEAT_MAX_ROWS)
+  ap.add_argument("--no-color", action="store_true", help="disable color (also respects $NO_COLOR)")
+  ap.add_argument("--config", action="store_true",
+                  help="pull GPU/CPU red thresholds from the jobstats config module")
+  args = ap.parse_args()
+  if os.environ.get("NO_COLOR"):
+    args.no_color = True
+
+  path = args.file_opt or args.file
+  if path:
+    try:
+      fobj = open(path, newline="")
+    except OSError as e:
+      die("cannot open %s: %s" % (path, e))
+  else:
+    if sys.stdin.isatty():
+      die("no input -- pipe jobstats_history --csv in, or pass a CSV file.")
+    fobj = sys.stdin
+
+  if args.config:
+    load_config_red()
+
+  columns, rows = parse_csv(fobj)
+  if not rows:
+    die("no data rows in the CSV (empty selection?).")
+
+  kind = args.kind
+  if kind == "auto":
+    k = detect_kind(columns)
+    kind = ("bars" if len(rows) == 1 else "hist") if k == "summary" else k
+
+  # validate explicit kinds against the CSV shape
+  if kind == "line" and not ("EPOCH" in columns and "TIME" in columns):
+    die("--kind line needs a time series: jobstats_history --dcgm --ts --csv")
+  if kind == "hist" and len(rows) == 1:
+    print("note: histogram needs multiple jobs; showing bars instead", file=sys.stderr)
+    kind = "bars"
+
+  plt, Console, Table, Text = load_libs()
+  if kind == "bars":
+    render_bars(columns, rows, args, Console, Text)
+  elif kind == "hist":
+    render_hist(columns, rows, args, plt)
+  elif kind == "heat":
+    render_heat(columns, rows, args, Console, Table, Text)
+  elif kind == "line":
+    render_line(columns, rows, args, plt, Console)
+
+
+if __name__ == "__main__":
+  main()

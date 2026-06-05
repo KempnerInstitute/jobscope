@@ -164,6 +164,35 @@ Default columns:
 `--ext` adds the full catalog (ENGINE/HMMA/IMMA/DFMA/FP16/FP32/FP64/MEMCP/PWRmax/
 ENERGY/FB_*/PCIE_*/NVLINK/clocks/temps/ENC/DEC).
 
+## Plotting (optional): `jobstats_plot`
+
+`jobstats_plot` turns any `jobstats_history --csv` output into a terminal graph. It
+is a **separate, optional** tool: `jobstats_history` stays dependency-free and is not
+affected by it. Pipe the CSV in (without `-n`, so the header is included):
+
+```bash
+./jobstats_history --gpu  --csv JOBID       | ./jobstats_plot   # bar gauges (one job)
+./jobstats_history --gpu  --csv -D 7        | ./jobstats_plot   # GPU% histogram (many jobs)
+./jobstats_history --dcgm --csv -D 7        | ./jobstats_plot   # heatmap (jobs x metrics)
+./jobstats_history --dcgm --ts --csv JOBID  | ./jobstats_plot   # time-series line + sparklines
+./jobstats_plot -f saved.csv --kind heat                        # from a saved CSV file
+```
+
+The chart type is auto-detected from the columns; override with `--kind
+auto|bars|heat|hist|line`. Other options: `--metric NAME` (histogram metric / line
+metrics), `--all` (line: every metric), `--width`/`--height`, `--max-rows` (heatmap
+cap), `--no-color` (also honors `$NO_COLOR`), `--config` (pull color thresholds from
+the jobstats config). `--help` for the full list.
+
+**Requirements:** `jobstats_plot` needs Python 3.12 with `plotext` and `rich`:
+
+```bash
+/usr/bin/python3.12 -m pip install --user plotext rich
+```
+
+(A Singularity container bundling these is a planned secondary option — it only needs
+`plotext`/`rich` and reads the CSV on stdin, so it requires no Slurm/Prometheus access.)
+
 ## Requirements
 
 - Run this tool on a system where `jobstats` is installed.
