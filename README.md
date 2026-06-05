@@ -187,15 +187,15 @@ per metric, own scale), `--all` (line: every metric),
 `$NO_COLOR`), `--config` (pull color thresholds from the jobstats config).
 `--help` for the full list.
 
-By default `--dcgm --ts` gives **each metric its own panel and y-axis**, so metrics
-in similar ranges (e.g. OCC% vs SM_ACT%) don't overlap. With multiple GPUs, each
-metric panel draws a line per GPU; `--by gpu` flips to one panel per GPU (all
-metrics sharing an axis). A **multi-node** job facets by node (one panel per node,
-a line per GPU, single metric). Narrow large jobs with `--node NODE` (drill into one
-node) and/or `--gpu N` — these filters also apply to the heatmap — or a single
-`--metric`. Stacked panels are capped (a note tells you when). For a dense
-overview, `--compact` collapses each metric to a single braille sparkline row
-(its own scale + min-max range) instead of full-height panels.
+By default `--dcgm --ts` draws **one panel per GPU** with all metrics on a shared
+axis (`--by gpu`). Use `--by metric` to give **each metric its own panel and
+y-axis** (so metrics in similar ranges, e.g. OCC% vs SM_ACT%, don't overlap; with
+multiple GPUs each metric panel draws a line per GPU). A **multi-node** job facets
+by node (one panel per node, a line per GPU, single metric). Narrow large jobs with
+`--node NODE` (drill into one node) and/or `--gpu N` — these filters also apply to
+the heatmap — or a single `--metric`. Stacked panels are capped (a note tells you
+when). For a dense overview, `--compact` collapses each metric to a single braille
+sparkline row (its own scale + min-max range) instead of full-height panels.
 
 **Requirements:** `jobstats_plot` needs Python 3.12 with `plotext` and `rich`:
 

@@ -248,10 +248,11 @@ def render_heat(columns, rows, args, Console, Table, Text):
 
 def render_line(columns, rows, args, plt, Console):
   """Time-series line chart over the job's window + a per-metric stats summary.
-  x = minutes since the first sample. Each metric gets its OWN panel/y-axis by
-  default (--by metric) so metrics in similar ranges don't overlap:
-    single GPU          -> one panel per metric (one line each)
-    one node, many GPUs -> one panel per metric, a line per GPU (--by gpu flips it)
+  x = minutes since the first sample. By default each GPU gets one panel with all
+  metrics on a shared axis (--by gpu); --by metric gives one panel per metric
+  (own y-axis, avoids overlap), and --compact gives one sparkline row per metric.
+    single GPU          -> one panel, all metrics (--by metric: one per metric)
+    one node, many GPUs -> one panel per GPU (--by metric: one per metric, line per GPU)
     many nodes          -> one panel per NODE, a line per GPU, of a single metric
   A single --metric collapses to one panel. Narrow huge jobs with --node/--gpu."""
   console = Console(no_color=args.no_color)
@@ -404,9 +405,10 @@ def main():
   ap.add_argument("--all", action="store_true", help="line: draw every metric, not just the default set")
   ap.add_argument("--marker", choices=["braille", "dot", "hd", "fhd"], default="braille",
                   help="line marker (default braille = thin lines; hd = thick blocks; dot = sparse)")
-  ap.add_argument("--by", choices=["metric", "gpu"], default="metric",
-                  help="line: facet by 'metric' (default; one panel per metric, own y-axis) or "
-                       "'gpu' (one panel per GPU, all metrics sharing the axis)")
+  ap.add_argument("--by", choices=["metric", "gpu"], default="gpu",
+                  help="line: facet by 'gpu' (default; one panel per GPU, all metrics on a shared "
+                       "axis) or 'metric' (one panel per metric, own y-axis -- avoids overlap when "
+                       "metrics share a range; see also --compact)")
   ap.add_argument("--compact", action="store_true",
                   help="line: one braille sparkline row per metric (own scale + min-max), "
                        "instead of full-height panels")
