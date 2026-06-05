@@ -8,6 +8,9 @@ Two command-line tools for reviewing Slurm job efficiency after a job finishes.
 Both tools use the same jobstats data sources, so their numbers should line up
 with `jobstats`.
 
+These are for finished jobs. For live monitoring, use
+[KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse).
+
 ## Quick Start
 
 Start with a GPU summary for recent jobs:
@@ -21,7 +24,7 @@ This shows GPU jobs from the last 5 days and adds DCGM utilization columns.
 Then inspect one job in detail:
 
 ```bash
-./jobstats_dcgm --all 17487044
+./jobstats_dcgm 17487044
 ```
 
 Add a simple advisory label:
@@ -157,11 +160,9 @@ Run the full help at any time:
 
 ## References
 
-- FASRC jobstats documentation:
-  <https://docs.rc.fas.harvard.edu/kb/jobstats/>
-- Princeton jobstats:
-  <https://princetonuniversity.github.io/jobstats/>
-- KempnerPulse for live monitoring:
-  <https://github.com/KempnerInstitute/kempnerpulse>
+- [FASRC jobstats documentation](https://docs.rc.fas.harvard.edu/kb/jobstats/)
+- [Princeton jobstats](https://princetonuniversity.github.io/jobstats/)
+- [KempnerPulse for live monitoring](https://github.com/KempnerInstitute/kempnerpulse)
 
-
+Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner
+Institute, Harvard.
