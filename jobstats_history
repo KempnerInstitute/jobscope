@@ -1,0 +1,815 @@
+#!/usr/bin/python3
+# jobstats_history - compact per-job utilization summary (CPU%/MEM%/GPU%/GMEM%),
+# same table as jobstats_summary but computed in BULK from each job's sacct
+# AdminComment blob (the data jobstats itself stores) -- ONE sacct query, no
+# per-job `jobstats` calls and no job-count cap. For completed jobs the metrics
+# match `jobstats` exactly (it decodes the same blob); running jobs may differ by
+# ~1% since jobstats re-reads live data while the blob is the last snapshot.
+#
+# Jobs are selected for the user (default $USER), optionally narrowed by account
+# (-A) and/or partition (-p) and/or state (-t), over a time scope:
+#   - explicit JOBID(s)        -> exactly those jobs
+#   - -N/--lastn N             -> the most recent N jobs
+#   - -D/--days N              -> jobs in the last N days
+#   - -S/-E                    -> jobs in an explicit window
+#   - -t completed/failed      -> that state (over the window / default last day)
+#   - (nothing)                -> the last 1 day
+#
+# Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner Institute, Harvard
+
+import os, sys, re, signal, subprocess, getpass, time, argparse, csv, json, gzip, base64
+from concurrent.futures import ThreadPoolExecutor
+
+PATTERN = '%Y-%m-%dT%H:%M:%S'
+GIB = 1073741824
+
+
+def default_user():
+  """Current user from $USER, falling back to getpass; None if undeterminable."""
+  u = os.environ.get("USER")
+  if not u:
+    try:
+      u = getpass.getuser()
+    except Exception:
+      u = None
+  return u
+
+
+def days_to_window(days):
+  """(start, end) sacct timestamps for the last `days` days ending now."""
+  now = time.time()
+  return (time.strftime(PATTERN, time.localtime(now - days * 86400)),
+          time.strftime(PATTERN, time.localtime(now)))
+
+
+def fmt_context(label, val):
+  """A '  Label:     value' context line."""
+  return f"  {label + ':':<11}{val}"
+
+
+def run_capture(cmd, timeout, what, soft=False):
+  """Run cmd, capture stdout, hard timeout (process-group kill so a child holding
+  the pipe cannot hang us). timeout=None disables it. soft=True returns None on
+  timeout/non-zero instead of aborting (used for per-job jobstats)."""
+  try:
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True, start_new_session=True)
+  except FileNotFoundError:
+    sys.exit(f"ERROR: command not found: {cmd[0]}")
+  try:
+    out, err = proc.communicate(timeout=timeout)
+  except subprocess.TimeoutExpired:
+    try:
+      os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+      proc.kill()
+    try:
+      proc.communicate(timeout=5)
+    except Exception:
+      pass
+    if soft:
+      return None
+    sys.exit(
+        f"ERROR: {what} timed out after {timeout:g}s -- the selection likely spans too\n"
+        f"many jobs for sacct to return in time. Narrow it (in increasing order of help):\n"
+        f"  -N N             fewer jobs   -- your most recent N (e.g. -N 50)\n"
+        f"  -D N             fewer days   -- the last N days     (e.g. -D 3)\n"
+        f"  -S DATE -E DATE  a narrow explicit window (best) -- e.g.\n"
+        f"                   -S 2026-05-26 -E 2026-06-02\n"
+        f"Or raise/disable the cap with --timeout SECONDS (--timeout 0 disables it).")
+  if proc.returncode != 0:
+    if soft:
+      return None
+    sys.exit(f"ERROR: {what} failed (exit {proc.returncode}): {(err or '').strip()}")
+  return out
+
+
+# sacct state set treated as "failed" for -t failed.
+FAILED_STATES = "FAILED,TIMEOUT,OUT_OF_MEMORY,NODE_FAIL,CANCELLED,DEADLINE,BOOT_FAIL,PREEMPTED"
+
+# Summary table layout (kept identical to the original jobstats_summary.sh).
+# Summary columns: (header, cell-format, group). 'id' always shown; 'cpu'/'gpu'
+# columns are shown per --cpu / --gpu / --full.
+SUMCOLS = [
+    ("JOBID",   "{:<12}", 'id'),
+    ("STATE",   "{:<9}",  'id'),
+    ("NODES",   "{:<5}",  'cpu'),
+    ("GPUS",    "{:<4}",  'gpu'),
+    ("CPU%",    "{:<6}",  'cpu'),
+    ("MEM%",    "{:<6}",  'cpu'),
+    ("GPU%",    "{:<6}",  'gpu'),
+    ("GMEM%",   "{:<7}",  'gpu'),
+    ("SM_ACT%", "{:<8}",  'dcgm'),
+    ("OCC%",    "{:<7}",  'dcgm'),
+    ("TENSOR%", "{:<8}",  'dcgm'),
+    ("DRAM%",   "{:<7}",  'dcgm'),
+    ("POWER_W", "{:<8}",  'dcgm'),
+    ("DIAG",    "{:<22}", 'diag'),
+    ("RUNTIME", "{:<12}", 'id'),
+    ("NAME",    "{}",     'id'),
+]
+# Per-node/GPU detail columns: (header, fmt, group, index into a parse_detail row).
+DETCOLS = [
+    ("NODE",    "{:<16}", 'id',  0),
+    ("GPU",     "{:<4}",  'gpu', 1),
+    ("CPU%",    "{:<7}",  'cpu', 2),
+    ("CPU-MEM", "{:<16}", 'cpu', 3),
+    ("GPU%",    "{:<7}",  'gpu', 4),
+    ("GPU-MEM", "{:<16}", 'gpu', 5),
+    ("GMEM%",   "{:<7}",  'gpu', 6),
+    ("SM_ACT%", "{:<8}",  'dcgm', 7),
+    ("OCC%",    "{:<7}",  'dcgm', 8),
+    ("TENSOR%", "{:<8}",  'dcgm', 9),
+    ("DRAM%",   "{:<7}",  'dcgm', 10),
+    ("POWER_W", "{:<8}",  'dcgm', 11),
+    ("DIAG",    "{:<22}", 'diag', 12),
+]
+
+
+def cols_for(specs, view, dcgm=False, diagnose=False):
+    """Column specs to show for the chosen metric view (cpu / gpu / full).
+    DCGM/DIAG columns appear only with --dcgm/--diagnose and only in a
+    GPU-bearing view."""
+    out = []
+    for c in specs:
+        g = c[2]
+        if g == 'id' \
+           or (g == 'cpu' and view in ('cpu', 'full')) \
+           or (g == 'gpu' and view in ('gpu', 'full')) \
+           or (g == 'dcgm' and dcgm and view in ('gpu', 'full')) \
+           or (g == 'diag' and diagnose and view in ('gpu', 'full')):
+            out.append(c)
+    return out
+
+
+# --- AdminComment blob decoding & metrics ------------------------------------
+# The jobstats data is stored per job in sacct's AdminComment as "JS1:<base64 gzip
+# JSON>". The JSON has nodes[node]{total_time(cpu-sec), cpus, used_memory,
+# total_memory, gpu_utilization{}, gpu_used_memory{}, gpu_total_memory{}} and a
+# top-level total_time(elapsed). jobstats computes its numbers from exactly this.
+def get_stats_dict(ss64):
+  s = str(ss64)
+  if (not ss64) or s in ('JS1:Short', 'JS1:None') or not s.startswith('JS1:'):
+    return {}
+  try:
+    return json.loads(gzip.decompress(base64.b64decode(s[4:])))
+  except Exception:
+    return {}
+
+def gpu_from_tres(s):
+  """Number of GPUs from an AllocTRES string (gres/gpu=N)."""
+  m = re.search(r'gres/gpu=(\d+)', str(s))
+  return int(m.group(1)) if m else 0
+
+def gb(b):
+  """Bytes -> GiB string labelled GB (matching jobstats), trailing zeros trimmed."""
+  return f"{b / GIB:.1f}".rstrip('0').rstrip('.') + "GB"
+
+def blob_metrics(js):
+  """Overall (cpu%, mem%, gpu%, gmem%) for a job, or None if the blob is empty.
+  gpu%/gmem% are None for CPU-only jobs. Matches jobstats's overall bars."""
+  if not js or 'nodes' not in js:
+    return None
+  nodes = list(js['nodes'].values())
+  rt = js.get('total_time', 0) or 0
+  cput = sum(n.get('total_time', 0) for n in nodes)
+  cpus = sum(n.get('cpus', 0) for n in nodes)
+  cpu = 100 * cput / (rt * cpus) if rt and cpus else 0
+  um = sum(n.get('used_memory', 0) for n in nodes)
+  tm = sum(n.get('total_memory', 0) for n in nodes)
+  mem = 100 * um / tm if tm else 0
+  gut = [v for n in nodes for v in n.get('gpu_utilization', {}).values()]
+  gpu = sum(gut) / len(gut) if gut else None
+  gum = sum(v for n in nodes for v in n.get('gpu_used_memory', {}).values())
+  gtm = sum(v for n in nodes for v in n.get('gpu_total_memory', {}).values())
+  gmem = 100 * gum / gtm if gtm else None
+  return (round(cpu), round(mem),
+          round(gpu) if gpu is not None else None,
+          round(gmem) if gmem is not None else None)
+
+def blob_detail(js):
+  """Per-node / per-GPU rows (node, gpu, cpu%, cpu-mem, gpu%, gpu-mem, gmem%),
+  matching jobstats's Detailed Utilization layout."""
+  rows = []
+  if not js or 'nodes' not in js:
+    return rows
+  rt = js.get('total_time', 0) or 0
+  for nd, n in js['nodes'].items():
+    cpus = n.get('cpus', 0)
+    eff = 100 * n.get('total_time', 0) / (rt * cpus) if rt and cpus else 0
+    cmem = f"{gb(n.get('used_memory', 0))}/{gb(n.get('total_memory', 0))}"
+    gutil, gused, gtot = (n.get('gpu_utilization', {}), n.get('gpu_used_memory', {}),
+                          n.get('gpu_total_memory', {}))
+    if gutil or gtot:
+      for g in sorted(gutil or gtot, key=str):
+        used, tot = gused.get(g, 0), gtot.get(g, 0)
+        gmp = 100 * used / tot if tot else 0
+        rows.append((nd, str(g), f"{eff:.1f}%", cmem,
+                     f"{gutil.get(g, 0):g}%", f"{gb(used)}/{gb(tot)}", f"{gmp:.1f}%"))
+    else:
+      rows.append((nd, '-', f"{eff:.1f}%", cmem, '-', '-', '-'))
+  return rows
+
+
+# --- DCGM profiling metrics (opt-in via --dcgm) ------------------------------
+# These are NOT in the AdminComment blob; they come from the same Prometheus
+# jobstats uses. Endpoint + sampling period are imported lazily from the
+# jobstats `config` module so credentials live in exactly one place. Each value
+# is the time-average over the job's [start,end] window (avg_over_time subquery)
+# -- the same method jobstats uses for the duty cycle. GPUs are joined to the
+# job by UUID (the DCGM `gpu` index and slurm `minor_number` disagree; only the
+# UUID is stable across the two exporters), via the nvidia_gpu_jobId companion.
+DCGM_METRICS = [
+    # header,    metric,                                uuidlbl, reducer, scale, dec, agg
+    ("SM_ACT%",  "DCGM_FI_PROF_SM_ACTIVE",              "UUID", "avg", 100, 1, "mean"),
+    ("OCC%",     "DCGM_FI_PROF_SM_OCCUPANCY",           "UUID", "avg", 100, 1, "mean"),
+    ("TENSOR%",  "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE",     "UUID", "avg", 100, 1, "mean"),
+    ("DRAM%",    "DCGM_FI_PROF_DRAM_ACTIVE",            "UUID", "avg", 100, 1, "mean"),
+    ("POWER_W",  "DCGM_FI_DEV_POWER_USAGE",             "UUID", "avg", 1,   0, "mean"),
+]
+DCGM_HEADERS = [m[0] for m in DCGM_METRICS]
+_PROM = {}
+
+
+def prom_setup():
+  """Lazily import PROM_SERVER/SAMPLING_PERIOD/requests from the jobstats install.
+  Only called on the --dcgm path, so non-GPU/blob-only use never needs them."""
+  if _PROM:
+    return _PROM
+  for p in ("/usr/local/bin", "/usr/bin"):
+    if p not in sys.path:
+      sys.path.append(p)
+  try:
+    from config import PROM_SERVER
+  except Exception as e:
+    sys.exit("ERROR: --dcgm needs the jobstats `config` (PROM_SERVER): %s\n"
+             "       Run this where the `jobstats` command lives." % e)
+  try:
+    from config import SAMPLING_PERIOD as sp
+  except Exception:
+    sp = 60
+  try:
+    import requests
+  except Exception:
+    sys.exit("ERROR: --dcgm needs the `requests` module (it ships with jobstats).")
+  _PROM.update(server=PROM_SERVER, sp=sp, req=requests)
+  return _PROM
+
+
+def epoch(s):
+  """sacct timestamp -> int epoch; 'Unknown'/'' -> None."""
+  if not s or s == "Unknown":
+    return None
+  try:
+    return int(time.mktime(time.strptime(s, PATTERN)))
+  except Exception:
+    return None
+
+
+def prom_query(query, at, timeout):
+  """Instant query at epoch `at`; returns the result list (raises on error)."""
+  P = prom_setup()
+  r = P['req'].get(P['server'] + '/api/v1/query',
+                   params={'query': query, 'time': at}, timeout=timeout)
+  j = r.json()
+  if j.get('status') != 'success':
+    raise RuntimeError(j.get('error', 'prometheus query failed'))
+  return j['data']['result']
+
+
+def _dcgm_query(metric, reducer, uuidlbl, uuids, dur):
+  rx = "^(" + "|".join(uuids) + ")$"   # UUIDs are hex+hyphen, RE2-safe as-is
+  sel = "%s{%s=~\"%s\"}" % (metric, uuidlbl, rx)
+  if reducer == 'avg':
+    return "avg_over_time((%s)[%ds:])" % (sel, dur)
+  if reducer == 'max':
+    return "max_over_time((%s)[%ds:])" % (sel, dur)
+  return "(max_over_time((%s)[%ds:]) - min_over_time((%s)[%ds:]))" % (sel, dur, sel, dur)
+
+
+def dcgm_for_job(d, timeout):
+  """(overall{header:val}, per_gpu{(node,minor):{header:val}}) for one job, or
+  ({},{}) when it has no GPUs / no samples. Joins DCGM series to the job on UUID
+  via nvidia_gpu_jobId (the same job->GPU mapping jobstats uses)."""
+  if not d.get('gpus') or not d.get('jobidraw') or not d.get('dur'):
+    return {}, {}
+  try:
+    cl = "slurm_cluster='%s'" % d['cluster'] if d.get('cluster') else ''
+    disc = prom_query("max_over_time((nvidia_gpu_jobId{%s} == %s)[%ds:])"
+                      % (cl, d['jobidraw'], d['dur']), d['end'], timeout)
+  except Exception:
+    return {}, {}
+  gpus, uuids = [], []
+  for s in disc:
+    m = s['metric']
+    u = m.get('uuid')
+    if u:
+      gpus.append((m.get('host', '?').split(':')[0], str(m.get('minor_number', '?')), u))
+      uuids.append(u)
+  if not uuids:
+    return {}, {}
+  per_uuid = {u: {} for u in uuids}
+  for header, metric, uuidlbl, reducer, scale, dec, agg in DCGM_METRICS:
+    try:
+      res = prom_query(_dcgm_query(metric, reducer, uuidlbl, uuids, d['dur']),
+                       d['end'], timeout)
+    except Exception:
+      continue
+    for s in res:
+      u = s['metric'].get(uuidlbl) or s['metric'].get('uuid') or s['metric'].get('UUID')
+      try:
+        if u in per_uuid:
+          per_uuid[u][header] = float(s['value'][1]) * scale
+      except (TypeError, ValueError):
+        pass
+  per_gpu = {(node, minor): per_uuid.get(u, {}) for node, minor, u in gpus}
+  overall = {}
+  for header, metric, uuidlbl, reducer, scale, dec, agg in DCGM_METRICS:
+    vals = [per_uuid[u][header] for u in uuids if header in per_uuid[u]]
+    if vals:
+      overall[header] = (sum(vals) if agg == 'sum'
+                         else max(vals) if agg == 'max'
+                         else sum(vals) / len(vals))
+  return overall, per_gpu
+
+
+def dcgm_fmt(header, v):
+  """Format one DCGM cell ('-' when missing), using the metric's decimals."""
+  if v is None:
+    return '-'
+  dec = next((m[5] for m in DCGM_METRICS if m[0] == header), 1)
+  return ("{:.%df}" % dec).format(v) if dec else str(int(round(v)))
+
+
+# --- diagnosis (opt-in via --diagnose) ---------------------------------------
+# Advisory tags from the 4 DCGM utilization metrics (no extra queries beyond the
+# --dcgm fetch, which --diagnose triggers). Heuristic and window-averaged, so a
+# multi-phase job blurs; descriptive, not a verdict. Several legitimately-low-util
+# workloads (inference, sampling, sparse HPC, data prep) read as "underfed"
+# without being wasteful -- confirm against intent. KEEP IN SYNC with the copy in
+# jobstats_dcgm. Thresholds are percent (SM_ACT/OCC/TENSOR/DRAM are 0-100).
+DIAG_IDLE, DIAG_UNDERFED, DIAG_BUSY = 5, 15, 40
+DIAG_LOWOCC, DIAG_MEM, DIAG_TENSOR = 20, 40, 1
+
+DIAG_LEGEND = """\
+DIAG -- advisory tag(s) from the utilization metrics (heuristic, not a verdict;
+window-averaged, so multi-phase jobs blur). Several legitimately-low-util
+workloads (inference, sampling, sparse HPC, data prep) read as "underfed".
+  idle       SM_ACT < %d%%                    GPU essentially never ran a kernel
+  underfed   SM_ACT < %d%%                   resident but cores mostly idle (host/input bound)
+  low-occ    SM_ACT >= %d%%, OCC < %d%%        SMs busy but warp slots underfilled
+  mem-bound  DRAM >= %d%% and >= SM_ACT       HBM bandwidth is the limiter
+  no-tensor  SM_ACT >= %d%%, TENSOR < %d%%       tensor cores idle (e.g. fp32 ML)
+  ok         SM_ACT >= %d%%, none of above    healthy compute use
+  short      ran under --min-runtime         averages are sampling noise""" % (
+    DIAG_IDLE, DIAG_UNDERFED, DIAG_BUSY, DIAG_LOWOCC, DIAG_MEM,
+    DIAG_BUSY, DIAG_TENSOR, DIAG_BUSY)
+
+
+def diagnose(smact, occ, tensor, dram, dur, min_runtime):
+  """One or more advisory tags from SM_ACT%/OCC%/TENSOR%/DRAM% (each 0-100, or
+  None if unavailable). Comma-joined; 'short' if the job ran under min_runtime,
+  '-' when there is no clear signal or no data. Tags: idle / underfed / low-occ
+  / mem-bound / no-tensor / ok."""
+  if dur is not None and min_runtime and dur < min_runtime:
+    return "short"
+  if smact is None:
+    return "-"
+  if smact < DIAG_IDLE:
+    return "idle"
+  if smact < DIAG_UNDERFED:
+    return "underfed"
+  tags = []
+  if occ is not None and smact >= DIAG_BUSY and occ < DIAG_LOWOCC:
+    tags.append("low-occ")
+  if dram is not None and dram >= DIAG_MEM and dram >= smact:
+    tags.append("mem-bound")
+  if tensor is not None and smact >= DIAG_BUSY and tensor < DIAG_TENSOR:
+    tags.append("no-tensor")
+  if not tags and smact >= DIAG_BUSY:
+    tags.append("ok")
+  return ",".join(tags) if tags else "-"
+
+
+def diag_from_dcgm(dvals, dur, min_runtime):
+  """Diagnose one GPU (or the overall dict) from a {header: value} DCGM dict."""
+  return diagnose(dvals.get('SM_ACT%'), dvals.get('OCC%'), dvals.get('TENSOR%'),
+                  dvals.get('DRAM%'), dur, min_runtime)
+
+
+# Column descriptions for --describe / --explain: (header, source, text), in
+# display order. CPU/MEM/GPU/GMEM come from the sacct blob; the rest need --dcgm.
+DESCRIPTIONS = [
+  ("CPU%",    "blob (cgroup CPU-seconds)",
+   "Average CPU-core utilization: 100 x CPU-seconds used / (elapsed x allocated cores). "
+   "100% means every allocated core was busy for the whole job."),
+  ("MEM%",    "blob (cgroup RSS)",
+   "Peak host (CPU) memory used / memory allocated, as a percent."),
+  ("GPU%",    "blob (nvidia_gpu_duty_cycle)",
+   "GPU duty cycle averaged over the job's GPUs: fraction of time at least one kernel ran. "
+   "Coarse -- says the GPU was occupied in time, not how hard. Use SM_ACT%/OCC% (--dcgm) for that."),
+  ("GMEM%",   "blob (nvidia_gpu_memory_used)",
+   "Peak GPU memory used / total, summed over the job's GPUs. A high-water mark, not a time-average."),
+  ("SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE (--dcgm)",
+   "Fraction of time at least one warp was resident on an SM, averaged across all SMs. Low while "
+   "GPU% is high means the GPU was barely loaded (parked / underfed)."),
+  ("OCC%",    "DCGM_FI_PROF_SM_OCCUPANCY (--dcgm)",
+   "SM occupancy: fraction of warp slots filled, averaged over SMs and time. Low occupancy means "
+   "kernels under-fill the GPU -- small launches, or register / shared-memory limits."),
+  ("TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE (--dcgm)",
+   "Fraction of time the tensor-core pipe was active. High only for mixed-precision matmul work "
+   "(fp16/bf16/tf32); ~0 means the tensor cores sat idle."),
+  ("DRAM%",   "DCGM_FI_PROF_DRAM_ACTIVE (--dcgm)",
+   "Fraction of time the device-memory (HBM) interface was busy. High while SM_ACT% is low suggests "
+   "the job is memory-bound."),
+  ("POWER_W", "DCGM_FI_DEV_POWER_USAGE (--dcgm)",
+   "Mean board power draw over the run, in watts. Near-idle watts mean the GPU was not really working."),
+]
+
+
+def describe(args):
+  """Print a plain-English description of each column and exit (no job needed)."""
+  import textwrap
+  print("jobstats_history columns. CPU/MEM/GPU/GMEM come from the sacct blob (no")
+  print("network); the DCGM columns (--dcgm) and DIAG (--diagnose) are pulled from")
+  print("Prometheus. For the full DCGM metric set, see `jobstats_dcgm --describe --all`.\n")
+  for header, source, text in DESCRIPTIONS:
+    print("  %-9s %s" % (header, source))
+    for ln in textwrap.wrap(text, width=74):
+      print("      " + ln)
+    print()
+  if args.diagnose:
+    print(DIAG_LEGEND)
+
+
+def extend_detail_row(r, per_gpu, dur=None, min_runtime=None, diagnose_on=False):
+  """Append the DCGM cells (indices 7-11) and, with diagnose_on, the DIAG cell
+  (index 12) to a blob_detail row, matched on (node, gpu)."""
+  vals = per_gpu.get((r[0], str(r[1])), {})
+  out = tuple(r) + tuple(dcgm_fmt(h, vals.get(h)) for h in DCGM_HEADERS)
+  if diagnose_on:
+    out = out + (diag_from_dcgm(vals, dur, min_runtime),)
+  return out
+
+
+def compute_dcgm(jobids, data, timeout, workers):
+  """Run dcgm_for_job for every GPU job, concurrently -> {jid: (overall, per_gpu)}.
+  The per-job queries are network I/O-bound (each thread mostly waits on the
+  Prometheus round-trip; the GIL is released during that wait), so a thread pool
+  overlaps them and speeds up wide selections even on a single CPU core. The 6
+  queries *within* one job stay sequential -- the parallelism is across jobs."""
+  gpu_jids = [j for j in jobids if data.get(j, {}).get('gpus')]
+  if not gpu_jids:
+    return {}
+  prom_setup()   # initialise the shared _PROM once, before any worker runs
+  workers = max(1, min(workers, len(gpu_jids)))
+  if workers == 1:
+    return {j: dcgm_for_job(data[j], timeout) for j in gpu_jids}
+  results = {}
+  with ThreadPoolExecutor(max_workers=workers) as ex:
+    futs = {ex.submit(dcgm_for_job, data[j], timeout): j for j in gpu_jids}
+    for fut, j in futs.items():
+      try:
+        results[j] = fut.result()
+      except Exception:
+        results[j] = ({}, {})
+  return results
+
+
+# --- job selection & bulk fetch ----------------------------------------------
+def select_jobs(args, timeout):
+  """Return (jobids, description). Per-job data is fetched in bulk afterwards."""
+  if args.jobids:
+    return list(args.jobids), f"{len(args.jobids)} job ID(s)"
+
+  # sacct query over a window. start/end are always set by the time it gets here:
+  # an explicit -S/-E, -D, or the default last 1 day; -N uses a now-30days lookback.
+  s = args.starttime or 'now-30days'
+  e = args.endtime or 'now'
+  cmd = ['sacct', '-u', args.user, '-X', '-S', s, '-E', e, '--noheader', '-P', '-o', 'JobID,State']
+  if args.account:   cmd += ['-A', args.account]
+  if args.partition: cmd += ['-r', args.partition]
+  if args.state == 'completed': cmd += ['-s', 'COMPLETED']
+  elif args.state == 'failed':  cmd += ['-s', FAILED_STATES]
+  out = run_capture(cmd, timeout, "sacct query")
+  ids = []
+  for line in out.splitlines():
+    parts = line.split('|', 1)
+    if len(parts) == 2 and not parts[1].startswith('PENDING'):
+      ids.append(parts[0])
+  if args.lastn is not None:
+    ids = ids[-args.lastn:]  # sacct lists ascending by jobid -> last N = most recent
+  if args.lastn is not None:   desc = f"last {args.lastn} jobs"
+  elif args.days is not None:  desc = f"last {args.days} day" + ("s" if args.days != 1 else "")
+  else:                        desc = f"{s} .. {e}"
+  if args.state != 'all':      desc += f", {args.state}"
+  return ids, desc
+
+
+def query_jobid(j):
+  """JobID to pass to `sacct -j`. Array jobs cancelled/pending before expansion
+  appear as 'BASE_[range%throttle]' (e.g. '18114115_[0-719%64]'); sacct -j cannot
+  parse that element spec and dies with "Bad job array element specified", so query
+  the base id instead -- it returns the very same record (keyed back as the bracket
+  form). Plain ids and expanded tasks ('BASE_N') pass through unchanged."""
+  return j.split('_', 1)[0] if '_[' in j else j
+
+
+def fetch(jobids, timeout):
+  """ONE bulk sacct query for all jobs -> {jid: {state,name,runtime,nodes,gpus,js}}.
+  This replaces per-job `jobstats` calls; js is the decoded AdminComment blob."""
+  data = {}
+  if not jobids:
+    return data
+  qids, seen = [], set()  # de-bracket array ids (above); dedupe so a base isn't queried twice
+  for j in jobids:
+    q = query_jobid(j)
+    if q not in seen:
+      seen.add(q); qids.append(q)
+  # AdminComment is the base64 blob (no '|'), so it stays last and we split with
+  # a fixed maxsplit. Start/End/JobIDRaw/Cluster are only used by --dcgm; adding
+  # them keeps this a single bulk query.
+  out = run_capture(['sacct', '-j', ','.join(qids), '-X', '-P', '-n', '--units=G',
+                     '-o', 'JobID,State,JobName,Elapsed,NNodes,AllocTRES,'
+                           'Start,End,JobIDRaw,Cluster,User,AdminComment'],
+                    timeout, "sacct query")
+  for line in out.splitlines():
+    p = line.split('|', 11)
+    if len(p) < 12:
+      continue
+    jid, state, name, elapsed, nnodes, alloctres, start, end, jidraw, cluster, user, admin = p
+    s = epoch(start)
+    e = epoch(end) or int(time.time())   # running job -> now
+    data[jid] = {'state': (state.split() or ['?'])[0], 'name': name or '?',
+                 'runtime': elapsed or '-', 'nodes': nnodes or '-',
+                 'gpus': gpu_from_tres(alloctres), 'js': get_stats_dict(admin),
+                 'start': s, 'end': e, 'dur': (max(e - s, 1) if s else None),
+                 'jobidraw': jidraw, 'cluster': cluster, 'user': user or '?'}
+  return data
+
+
+# --- output ------------------------------------------------------------------
+def context_pairs(args, desc, data=None):
+  # With explicit JOBIDs, selection is bypassed -- the -u/-A/-p filters are NOT
+  # applied, so echoing args.user (the default $USER) would be misleading. Show
+  # the jobs' actual owner(s) from sacct instead, and drop the filter lines.
+  if args.jobids:
+    owners = sorted({d.get('user') for d in (data or {}).values() if d.get('user')})
+    user_val = ", ".join(owners) if owners else "(explicit job IDs)"
+    return [("User", user_val), ("Select", desc)]
+  pairs = [("User", args.user)]
+  if args.account:   pairs.append(("Account", args.account))
+  if args.partition: pairs.append(("Partition", args.partition))
+  pairs.append(("Select", desc))
+  return pairs
+
+
+def summarize(jobids, args, desc, data, dcgm_data):
+  do_dcgm = (args.dcgm or args.diagnose) and args.metrics in ('gpu', 'full')
+  if args.metrics == 'gpu':   # GPU view -> only jobs that requested GPUs
+    jobids = [j for j in jobids if data.get(j, {}).get('gpus')]
+  cols = cols_for(SUMCOLS, args.metrics, args.dcgm, args.diagnose)
+  headers = [c[0] for c in cols]
+  ctx = context_pairs(args, desc, data)
+  writer = csv.writer(sys.stdout, lineterminator='\n') if args.csv else None
+
+  def line(rowd):
+    return " ".join(c[1].format(str(rowd.get(c[0], ''))) for c in cols)
+
+  if args.header:
+    if args.csv:
+      for label, val in ctx: writer.writerow([label, val])
+      writer.writerow(headers)
+    else:
+      for label, val in ctx: print(fmt_context(label, val))
+      hdr = line({c[0]: c[0] for c in cols})
+      print(hdr)
+      print("-" * len(hdr))
+
+  if not jobids:
+    if args.header and not args.csv:
+      print("  (no GPU jobs in this selection)")
+    return
+
+  sums = {k: [0, 0] for k in ('cpu', 'mem', 'gpu', 'gmem')}  # [total, count]
+  sums_d = {h: [0.0, 0] for h in DCGM_HEADERS}
+  for jid in jobids:
+    d = data.get(jid, {})
+    rowd = {'JOBID': jid, 'STATE': d.get('state', '?'),
+            'NODES': d.get('nodes', '-'), 'GPUS': str(d['gpus']) if d.get('gpus') else '-',
+            'RUNTIME': d.get('runtime', '-'),
+            'NAME': d.get('name', '(job not found)')}
+    m = blob_metrics(d.get('js'))
+    if m is None:
+      for c in ('CPU%', 'MEM%', 'GPU%', 'GMEM%'):
+        rowd[c] = '-'
+    else:
+      for k, col, v in zip(('cpu', 'mem', 'gpu', 'gmem'), ('CPU%', 'MEM%', 'GPU%', 'GMEM%'), m):
+        rowd[col] = '-' if v is None else str(v)
+        if v is not None:
+          sums[k][0] += v; sums[k][1] += 1
+    if do_dcgm:
+      overall = dcgm_data.get(jid, ({}, {}))[0]
+      for h in DCGM_HEADERS:
+        v = overall.get(h)
+        rowd[h] = dcgm_fmt(h, v)
+        if v is not None:
+          sums_d[h][0] += v; sums_d[h][1] += 1
+      if args.diagnose:
+        rowd['DIAG'] = diag_from_dcgm(overall, d.get('dur'), args.min_runtime)
+    if args.csv:
+      writer.writerow([rowd[h] for h in headers])
+    else:
+      print(line(rowd))
+
+  # Mean row (unweighted mean of the % columns over jobs that reported them).
+  if len(jobids) > 1:
+    def mean(k):
+      t, n = sums[k]
+      return str(round(t / n)) if n else '-'
+    mrowd = {c[0]: '' for c in SUMCOLS}
+    mrowd['CPU%'], mrowd['MEM%'] = mean('cpu'), mean('mem')
+    mrowd['GPU%'], mrowd['GMEM%'] = mean('gpu'), mean('gmem')
+    if do_dcgm:
+      for h in DCGM_HEADERS:
+        t, n = sums_d[h]
+        mrowd[h] = dcgm_fmt(h, t / n) if n else '-'
+    if args.csv:
+      mrowd['JOBID'] = 'Mean'
+      writer.writerow([mrowd[h] for h in headers])
+    else:
+      mrowd['JOBID'] = 'Mean:'
+      if args.header:
+        print("-" * len(line({c[0]: c[0] for c in cols})))
+      print(line(mrowd))
+
+
+def detail(jobids, args, desc, data, dcgm_data):
+  do_dcgm = (args.dcgm or args.diagnose) and args.metrics in ('gpu', 'full')
+  if args.metrics == 'gpu':   # GPU view -> only jobs that requested GPUs
+    jobids = [j for j in jobids if data.get(j, {}).get('gpus')]
+  dcols = cols_for(DETCOLS, args.metrics, args.dcgm, args.diagnose)
+  DHDR = ("NODE", "GPU", "CPU%", "CPU-MEM", "GPU%", "GPU-MEM", "GMEM%",
+          "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "DIAG")
+
+  def dline(cells):
+    return " ".join(c[1].format(str(cells[c[3]])) for c in dcols)
+
+  def rows_for(jid, d):
+    rows = blob_detail(d.get('js'))
+    if do_dcgm:
+      per_gpu = dcgm_data.get(jid, ({}, {}))[1]
+      rows = [extend_detail_row(r, per_gpu, d.get('dur'), args.min_runtime, args.diagnose)
+              for r in rows]
+    return rows
+
+  # CSV: per-(job,node,GPU) rows, identifiable by a leading JOBID column.
+  if args.csv:
+    writer = csv.writer(sys.stdout, lineterminator='\n')
+    if args.header:
+      for label, val in context_pairs(args, desc, data):
+        writer.writerow([label, val])
+      writer.writerow(["JOBID"] + [c[0] for c in dcols])
+    for jid in jobids:
+      d = data.get(jid, {})
+      for r in rows_for(jid, d):
+        writer.writerow([jid] + [r[c[3]] for c in dcols])
+    return
+
+  if args.header:
+    for label, val in context_pairs(args, desc, data):
+      print(fmt_context(label, val))
+    print()
+  if not jobids:
+    print("(no GPU jobs in this selection)")
+    return
+  for jid in jobids:
+    d = data.get(jid, {})
+    print(f"Job {jid}  [{d.get('state', '?')}]  {d.get('name', '?')}")
+    rows = rows_for(jid, d)
+    if not rows:
+      print("  (no jobstats data)\n"); continue
+    print("  " + dline(DHDR))
+    print("  " + "-" * len(dline(DHDR)))
+    for r in rows:
+      print("  " + dline(r))
+    print()
+
+
+if __name__ == "__main__":
+  desc = (
+  """
+  jobstats_history  (companion to stotal_kempner / seff_history)
+  -----------------
+
+  Compact per-job utilization summary (CPU%/MEM%/GPU%/GMEM%), computed in BULK
+  from each job's sacct AdminComment blob -- ONE sacct query, no per-job jobstats
+  calls and no job-count cap. For completed jobs the numbers match `jobstats`.
+  Selects the user's jobs (default $USER), optionally narrowed by -A/account,
+  -p/partition and -t/state, over a time scope (-N last N jobs, -D last N days,
+  -S/-E window). With no scope at all it defaults to the last 1 day. Give explicit
+  JOBIDs to bypass selection.
+  Pick columns with --cpu/--gpu/--full; -d adds the per-node/GPU breakdown.
+  --dcgm adds time-averaged DCGM profiling columns (SM_ACT%/OCC%/TENSOR%/DRAM%/
+  POWER_W) pulled live from the jobstats Prometheus (GPU jobs only; one extra
+  set of queries per GPU job). --diagnose adds an advisory DIAG column
+  (idle/underfed/low-occ/mem-bound/no-tensor/ok) from the same data. --csv works
+  for both the summary and -d views.
+  -----------------
+  """
+  )
+  parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+                                   description=desc)
+  parser.add_argument("jobids", nargs="*", help="specific job IDs (bypass time selection)")
+  parser.add_argument("-u", "--user", dest="user", default=None, help="user (default: current user, $USER)")
+  parser.add_argument("-A", "--account", dest="account", default=None, help="narrow to this account")
+  parser.add_argument("-p", "--partition", dest="partition", default=None, help="narrow to this partition")
+  parser.add_argument("-t", "--state", dest="state", choices=["all", "completed", "failed"],
+                      default="all", help="job state filter (default: all; completed/failed default to -D 1)")
+  parser.add_argument("-N", "--lastn", dest="lastn", type=int, default=None, help="the most recent N jobs")
+  parser.add_argument("-D", "--days", dest="days", type=int, default=None, help="jobs in the last N days")
+  parser.add_argument("-S", "--starttime", dest="starttime", default=None, help="window start (sacct format)")
+  parser.add_argument("-E", "--endtime", dest="endtime", default=None, help="window end (sacct format)")
+  parser.add_argument("-d", "--details", dest="details", action="store_true", help="per-node / per-GPU breakdown")
+  mg = parser.add_mutually_exclusive_group()
+  mg.add_argument("--cpu", action="store_const", const="cpu", dest="metrics", help="show CPU columns only")
+  mg.add_argument("--gpu", action="store_const", const="gpu", dest="metrics", help="show GPU columns only")
+  mg.add_argument("--full", action="store_const", const="full", dest="metrics", help="show all columns (default)")
+  parser.add_argument("--dcgm", dest="dcgm", action="store_true",
+                      help="add time-averaged DCGM profiling columns (SM_ACT%%/OCC%%/TENSOR%%/DRAM%%/"
+                           "POWER_W) from Prometheus; GPU jobs only, adds per-job queries")
+  parser.add_argument("--workers", dest="workers", type=int, default=8,
+                      help="max concurrent --dcgm Prometheus query-sets (default 8; the queries are "
+                           "I/O-bound so >1 helps even on a single CPU). Use 1 to serialize")
+  parser.add_argument("--diagnose", dest="diagnose", action="store_true",
+                      help="add an advisory DIAG column (idle/underfed/low-occ/mem-bound/no-tensor/ok); "
+                           "GPU jobs only, fetches DCGM data like --dcgm")
+  parser.add_argument("--min-runtime", dest="min_runtime", type=int, default=180,
+                      help="jobs shorter than this many seconds get DIAG=short (default 180; sampling noise)")
+  parser.add_argument("--describe", "--description", "--explain", dest="describe", action="store_true",
+                      help="print a plain-English description of each column and exit (no job needed; "
+                           "add --diagnose for the DIAG legend)")
+  parser.add_argument("-n", "--noheader", dest="header", action="store_false", help="suppress the header/context block")
+  parser.add_argument("--csv", dest="csv", action="store_true", help="machine-readable output (summary or -d view)")
+  parser.add_argument("--timeout", dest="timeout", type=float, default=60.0,
+                      help="seconds per sacct call (default 60; 0 disables)")
+  args = parser.parse_args()
+
+  if args.describe:   # static reference; no sacct/Prometheus, no job selection
+    describe(args)
+    sys.exit(0)
+
+  # Defaults and validation (mirroring stotal_kempner).
+  if args.user is None:
+    args.user = default_user()
+    if not args.user:
+      parser.error("could not determine the current user from $USER; pass -u/--user")
+  # Default to the last 1 day when no time scope (-N/-D/-S/-E) or JOBIDs is given.
+  if args.lastn is None and args.days is None \
+     and not args.starttime and not args.endtime and not args.jobids:
+    args.days = 1
+  if args.days is not None:
+    if args.days <= 0:
+      parser.error("-D/--days must be a positive integer")
+    if args.lastn is not None:
+      parser.error("-D/--days cannot be combined with -N/--lastn")
+    if args.starttime or args.endtime:
+      parser.error("-D/--days sets the window; do not also pass -S/-E")
+    args.starttime, args.endtime = days_to_window(args.days)
+  if args.lastn is not None and args.lastn <= 0:
+    parser.error("-N/--lastn must be a positive integer")
+
+  # Metric columns: --cpu/--gpu/--full, else prompt interactively, else full.
+  if args.metrics is None:
+    if sys.stdin.isatty():
+      ans = input("Show metrics? [c]pu / [g]pu / [f]ull (default full): ").strip().lower()
+      args.metrics = {'c': 'cpu', 'cpu': 'cpu', 'g': 'gpu', 'gpu': 'gpu',
+                      'f': 'full', 'full': 'full'}.get(ans, 'full')
+    else:
+      args.metrics = 'full'
+
+  if (args.dcgm or args.diagnose) and args.metrics == 'cpu':
+    print("note: --dcgm/--diagnose have no effect with --cpu (GPU metrics only)", file=sys.stderr)
+  if args.workers < 1:
+    parser.error("--workers must be a positive integer")
+
+  timeout = args.timeout if args.timeout and args.timeout > 0 else None
+
+  jobids, sel_desc = select_jobs(args, timeout)
+
+  if not jobids:
+    print(f"No matching jobs for user '{args.user}' ({sel_desc}).", file=sys.stderr)
+    sys.exit(0)
+
+  data = fetch(jobids, timeout)  # ONE bulk sacct query; no per-job calls
+
+  # Precompute the DCGM metrics for all GPU jobs concurrently (opt-in; the only
+  # network path). Triggered by --dcgm or --diagnose (which derives from the same
+  # data); skipped entirely otherwise or in the cpu-only view.
+  do_dcgm = (args.dcgm or args.diagnose) and args.metrics in ('gpu', 'full')
+  dcgm_data = compute_dcgm(jobids, data, timeout, args.workers) if do_dcgm else {}
+
+  if args.details:
+    detail(jobids, args, sel_desc, data, dcgm_data)
+  else:
+    summarize(jobids, args, sel_desc, data, dcgm_data)
