@@ -11,7 +11,7 @@ For live monitoring, use
 
 ## Screenshots
 
-Per-job time series — `kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot --by metric`:
+Per-job time series — `kempner_jobstats JOBID --dcgm --csv --ts | jobstats_plot`:
 
 ![per-job DCGM time series](docs/timeseries.svg)
 

@@ -18,9 +18,9 @@ TS_JOB="${TS_JOB:-19375791}"
 AGG_DAYS="${AGG_DAYS:-2}"
 
 echo "[1/2] time series  (job $TS_JOB)"
-FORCE_COLOR=1 kempner_jobstats --dcgm --ts --csv "$TS_JOB" \
-  | FORCE_COLOR=1 jobstats_plot --by metric --width 74 --height 7 \
-  | ansi2svg docs/timeseries.svg "kempner_jobstats --dcgm --ts --csv $TS_JOB | jobstats_plot --by metric"
+FORCE_COLOR=1 kempner_jobstats "$TS_JOB" --dcgm --csv --ts \
+  | FORCE_COLOR=1 jobstats_plot \
+  | ansi2svg docs/timeseries.svg "kempner_jobstats $TS_JOB --dcgm --csv --ts | jobstats_plot"
 
 echo "[2/2] aggregated heatmap  (last $AGG_DAYS days)"
 FORCE_COLOR=1 kempner_jobstats --dcgm --csv -D "$AGG_DAYS" \
