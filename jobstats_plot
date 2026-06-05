@@ -280,15 +280,20 @@ def render_line(columns, rows, args, plt, Console):
             file=sys.stderr)
     return items[:PANEL_CAP]
 
-  def panel(specs):
-    """specs: list of (label, color, samples, metric). Draw each as a line."""
+  W = args.width or shutil.get_terminal_size((100, 30)).columns
+
+  def figure(specs, title, ylabel, h):
+    """Render ONE chart as its own plotext figure (independent height, so stacked
+    panels never starve each other -- plt.subplots divides one terminal-bounded
+    figure and silently drops overflow panels). Panels print in sequence."""
+    plt.clear_figure(); plt.theme("clear"); plt.plotsize(W, h)
     for lbl, col, samp, m in specs:
       xs, ys = series(samp, m)
       if ys:
         plt.plot(xs, ys, label=lbl, **pkw(col))
+    plt.title(title); plt.xlabel("minutes since start"); plt.ylabel(ylabel)
+    plt.show(); print()
 
-  W = args.width or shutil.get_terminal_size((100, 30)).columns
-  plt.clear_figure()
   multinode = len(nodes) > 1
   K, M = len(keys), len(metrics)
   lines_are_gpus = False     # whether each line is a GPU (color/label by GPU) vs a metric
@@ -300,50 +305,33 @@ def render_line(columns, rows, args, plt, Console):
     if M > 1:
       print("note: multi-node view charts one metric (%s); use --node NODE to see all metrics for a node"
             % m, file=sys.stderr)
-    pn = cap(nodes, "nodes")
-    plt.subplots(len(pn), 1)
-    for i, node in enumerate(pn):
-      plt.subplot(i + 1, 1); plt.theme("clear"); plt.plotsize(W, args.height or 7)
-      panel([("gpu%s" % g, gcolor[g], gpus[(node, g)], m) for g in gpu_ids if (node, g) in gpus])
-      plt.title("%s  %s" % (node, m)); plt.xlabel("minutes since start"); plt.ylabel(m)
-    plt.show()
+    for node in cap(nodes, "nodes"):
+      figure([("gpu%s" % g, gcolor[g], gpus[(node, g)], m) for g in gpu_ids if (node, g) in gpus],
+             "%s  %s" % (node, m), m, args.height or 9)
   elif M == 1:
     # one metric: one panel, a line per GPU (single line if just one GPU)
     m = metrics[0]; stat_metrics = [m]; lines_are_gpus = K > 1
-    plt.theme("clear"); plt.plotsize(W, args.height or 18)
     if K > 1:
-      panel([("gpu%s" % g, gcolor[g], gpus[(n, g)], m) for n, g in keys])
-      plt.title("%s  --  %s" % (m, base))
+      figure([("gpu%s" % g, gcolor[g], gpus[(n, g)], m) for n, g in keys],
+             "%s  --  %s" % (m, base), m, args.height or 15)
     else:
-      panel([(m, mcolor[m], gpus[keys[0]], m)])
-      plt.title(base)
-    plt.ylabel(m); plt.xlabel("minutes since start")
-    plt.show()
+      figure([(m, mcolor[m], gpus[keys[0]], m)], base, m, args.height or 15)
   elif args.by == "gpu":
-    # facet by GPU: one panel per GPU, all metrics in it (metrics share the panel axis)
-    pk = cap(keys, "GPUs")
-    plt.subplots(len(pk), 1)
-    for i, key in enumerate(pk):
-      plt.subplot(i + 1, 1); plt.theme("clear"); plt.plotsize(W, args.height or 8)
-      panel([(m, mcolor[m], gpus[key], m) for m in metrics])
-      plt.title("%s gpu%s" % key); plt.xlabel("minutes since start"); plt.ylabel("value")
-    plt.show()
+    # facet by GPU: one panel per GPU, all metrics in it (metrics share that panel's axis)
+    for key in cap(keys, "GPUs"):
+      figure([(m, mcolor[m], gpus[key], m) for m in metrics],
+             "%s gpu%s" % key, "value", args.height or 10)
   else:
     # DEFAULT (--by metric): one panel per metric (own y-axis), a line per GPU within
     lines_are_gpus = K > 1
-    pm = cap(metrics, "metrics")
-    plt.subplots(len(pm), 1)
-    for i, m in enumerate(pm):
-      plt.subplot(i + 1, 1); plt.theme("clear"); plt.plotsize(W, args.height or 8)
+    for m in cap(metrics, "metrics"):
       if K > 1:
-        panel([("gpu%s" % g, gcolor[g], gpus[(n, g)], m) for n, g in keys])
+        figure([("gpu%s" % g, gcolor[g], gpus[(n, g)], m) for n, g in keys], m, m, args.height or 10)
       else:
-        panel([(m, mcolor[m], gpus[keys[0]], m)])
-      plt.title(m); plt.xlabel("minutes since start"); plt.ylabel(m)
-    plt.show()
+        figure([(m, mcolor[m], gpus[keys[0]], m)], m, m, args.height or 10)
 
   # per-(node,GPU) stats for the charted metric(s) -- the numbers the chart doesn't label, tinted
-  print()
+  console.rule("min / mean / max / last", style="dim", characters="-")
   for key in keys:
     tag = ("%s gpu%s  " % key) if len(keys) > 1 else ""
     for m in stat_metrics:
