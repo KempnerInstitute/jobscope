@@ -9,6 +9,18 @@ Both tools use the same jobstats data sources, so their numbers should line up
 with `jobstats`.  For live monitoring, use
 [KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse). These two tools are for rxtracting CPU and GPU metrics of finished jobs.
 
+## Setup
+
+Update your local checkout before running the tools:
+
+```bash
+git clone https://github.com/KempnerInstitute/kempner-jobstats
+cd kempner-jobstats
+```
+If you don't want to install, set up the path
+```bash
+export PATH=$PATH:/n/holylfs06/LABS/kempner_shared/Everyone/cluster_scripts/job_eff/kempner-jobstats
+```
 ## Quick Start
 
 Start with a GPU summary for recent jobs:
