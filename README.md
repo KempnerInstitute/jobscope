@@ -10,13 +10,16 @@ kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot # Plot the JOBID GPU me
 
 ## Screenshots
 
-Per-job DCGM time series:
-
-<img src="docs/timeseries.svg" alt="per-job DCGM time series" width="850">
-
-Aggregated utilization across jobs:
-
-<img src="docs/aggregated.svg" alt="aggregated mean-utilization bars" width="850">
+<table>
+  <tr>
+    <td><strong>Per-job DCGM time series</strong></td>
+    <td><strong>Aggregated utilization across jobs</strong></td>
+  </tr>
+  <tr>
+    <td><img src="docs/timeseries.svg" alt="per-job DCGM time series" width="420"></td>
+    <td><img src="docs/aggregated.svg" alt="aggregated mean-utilization bars" width="420"></td>
+  </tr>
+</table>
 
 Regenerate these with `bash setup/make_screenshots.sh`.
 
