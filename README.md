@@ -30,10 +30,9 @@ source setup/env.sh          # add kempner_jobstats + jobstats_plot to $PATH (th
 ```
 
 `source setup/env.sh` puts the repo root and `plot_util/` on `$PATH`, so you can run
-`kempner_jobstats` and `jobstats_plot` by name. For a permanent setup, symlinks, or an
-Lmod module, run `bash setup/install.sh`. The optional `jobstats_plot` also needs
-Python 3.12 + plotext + rich — see
-[Installing the plot dependencies](#installing-the-plot-dependencies).
+`kempner_jobstats` and `jobstats_plot` by name. For a permanent setup (`~/.bashrc` or
+symlinks) and the plot dependencies (uv / pip / container), see
+**[`setup/README.md`](setup/README.md)** for the full walk-through.
 
 On the cluster you can use the shared deploy instead of cloning:
 
@@ -187,7 +186,10 @@ ENERGY/FB_*/PCIE_*/NVLINK/clocks/temps/ENC/DEC).
 
 `jobstats_plot` turns any `kempner_jobstats --csv` output into a terminal graph. It
 is a **separate, optional** tool: `kempner_jobstats` stays dependency-free and is not
-affected by it. Pipe the CSV in (without `-n`, so the header is included):
+affected by it. The summary below covers the essentials; for the full option
+reference (chart kinds, faceting, multi-node, filters) see
+**[`plot_util/README.md`](plot_util/README.md)**. Pipe the CSV in (without `-n`,
+so the header is included):
 
 ```bash
 kempner_jobstats --gpu  --csv JOBID       | jobstats_plot   # bar gauges (one job)
