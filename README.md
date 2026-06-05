@@ -122,7 +122,7 @@ Useful options:
 | `--diagnose` | Add an advisory `DIAG` label (implies `--gpu`). |
 | `--dcgm` | Per-GPU DCGM profiling table (one row per GPU). Its own view; overrides `--cpu/--gpu/--cgpu` and `-d`. See below. |
 | `--ext` | With `--dcgm`, show the full 28-metric catalog instead of the default 6. |
-| `--ts` | With `--dcgm`, emit the raw per-scrape time series as CSV. |
+| `--ts` | With `--dcgm`, emit the raw per-scrape time series as CSV for a single job (pass exactly one JOBID). |
 | `-d`, `--details` | Show per-node / per-GPU details. |
 | `--csv` | Print machine-readable CSV. |
 | `--describe` | Explain output columns and exit (add `--dcgm`/`--ext` for the DCGM catalog). |
@@ -138,14 +138,15 @@ Run the full help at any time:
 Use this after the summary points to a job worth investigating. `--dcgm` switches
 to a per-GPU table (one row per GPU) of time-averaged DCGM profiling metrics. It
 follows the same job selection as the rest of `jobstats_history` (a JOBID, `-N`,
-`-D`, `-S/-E`, `-A`, `-p`, ...), not just explicit job IDs.
+`-D`, `-S/-E`, `-A`, `-p`, ...), not just explicit job IDs. The one exception is
+`--ts`, which profiles a single job and requires exactly one JOBID.
 
 ```bash
 ./jobstats_history --dcgm JOBID1 JOBID2     # default 6 metrics, per GPU
 ./jobstats_history --dcgm --ext JOBID       # full 28-metric catalog
 ./jobstats_history --dcgm -D 1              # every GPU job from the last day
 ./jobstats_history --dcgm --csv JOBID > out.csv  # one row per job/GPU
-./jobstats_history --dcgm --ts JOBID > ts.csv    # raw per-scrape time series
+./jobstats_history --dcgm --ts JOBID > ts.csv    # raw time series (single job only)
 ./jobstats_history --dcgm --describe --ext  # explain all metrics
 ```
 

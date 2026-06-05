@@ -929,11 +929,11 @@ def dcgm_report(jobids, args, desc, data, dcgm_data, specs):
 
 
 def dcgm_timeseries(jobids, data, specs, args, timeout):
-  """--dcgm --ts: emit the RAW per-scrape DCGM time series over each job's window
-  as CSV (one row per job/GPU/timestamp), instead of the window average. Metrics
-  are de-duplicated by Prometheus name (so POWER_W/PWRmax_W collapse to one
-  column); each cell is the raw sampled value, scaled for display."""
-  jobids = [j for j in jobids if data.get(j, {}).get('gpus')]
+  """--dcgm --ts: emit the RAW per-scrape DCGM time series over the job's window
+  as CSV (one row per GPU/timestamp), instead of the window average. Restricted to
+  a single job by the caller. Metrics are de-duplicated by Prometheus name (so
+  POWER_W/PWRmax_W collapse to one column); each cell is the raw sampled value,
+  scaled for display."""
   seen, tspecs = set(), []
   for s in specs:                       # dedupe by prometheus metric name
     if s[2] not in seen:
@@ -1004,7 +1004,8 @@ if __name__ == "__main__":
   --dcgm switches to a per-GPU DCGM profiling table (one row per GPU):
   DUTY%/SM_ACT%/OCC%/TENSOR%/DRAM%/POWER_W by default, --ext for the full 28-metric
   catalog. --dcgm --csv emits one CSV row per job/GPU; --dcgm --ts emits the raw
-  per-scrape time series. --dcgm follows the same job selection as above.
+  per-scrape time series for a single job (one JOBID). --dcgm otherwise follows
+  the same job selection as above.
   -----------------
   """
   )
@@ -1036,8 +1037,9 @@ if __name__ == "__main__":
                       help="with --dcgm, show the full extended metric catalog (ENGINE/HMMA/IMMA/DFMA/"
                            "FP16/FP32/FP64/MEMCP/PWRmax/ENERGY/FB_*/PCIE_*/NVLINK/clocks/temps/ENC/DEC)")
   parser.add_argument("--ts", "--timeseries", dest="ts", action="store_true",
-                      help="with --dcgm, emit the RAW per-scrape time series over each job's window as "
-                           "CSV (JOBID,EPOCH,TIME,NODE,GPU,<metrics>) instead of the window average")
+                      help="with --dcgm, emit the RAW per-scrape time series over the job's window as "
+                           "CSV (JOBID,EPOCH,TIME,NODE,GPU,<metrics>) instead of the window average; "
+                           "one job at a time (pass exactly one JOBID)")
   parser.add_argument("--workers", dest="workers", type=int, default=8,
                       help="max concurrent DCGM Prometheus query-sets for the --gpu view (default 8; "
                            "the queries are I/O-bound so >1 helps even on a single CPU). Use 1 to serialize")
@@ -1065,6 +1067,11 @@ if __name__ == "__main__":
     else:
       describe(args)
     sys.exit(0)
+
+  # The raw time series is meant for plotting one job's profile, so restrict it to
+  # a single explicit JOBID -- not a (potentially many-job) time/account selection.
+  if args.ts and len(args.jobids) != 1:
+    parser.error("--dcgm --ts profiles one job at a time: pass exactly one JOBID")
 
   # Defaults and validation (mirroring stotal_kempner).
   if args.user is None:
