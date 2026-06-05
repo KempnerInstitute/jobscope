@@ -15,9 +15,9 @@ Per-job time series — `kempner_jobstats JOBID --dcgm --csv --ts | jobstats_plo
 
 ![per-job DCGM time series](docs/timeseries.svg)
 
-Aggregated per-GPU metrics across recent jobs — `kempner_jobstats --dcgm --csv -D 2 | jobstats_plot`:
+Aggregated utilization (mean across jobs) — `kempner_jobstats -D3 --csv | jobstats_plot --kind bars`:
 
-![aggregated per-GPU metrics heatmap](docs/aggregated.svg)
+![aggregated mean-utilization bars](docs/aggregated.svg)
 
 (Regenerate with `bash setup/make_screenshots.sh`.)
 
