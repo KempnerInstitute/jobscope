@@ -32,6 +32,10 @@ RED = {"GPU%": 25, "DUTY%": 25, "GMEM%": 20, "CPU%": 25, "MEM%": 25}
 BLOCKS = "▁▂▃▄▅▆▇█"       # sparkline ramp
 HEAT_MAX_ROWS = 40
 
+# Distinct line colors for the --ts chart (plotext names + 256-color codes), one
+# per metric so each metric reads as its own color.
+PALETTE = ["red", "green", "blue", "orange", "magenta", "cyan", 226, 129, 244, 39]
+
 # Time-series line chart: which metrics to draw by default (if present), unless
 # --metric/--all widen it. Kept small so the chart stays readable.
 TS_DEFAULT = ["SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
@@ -259,6 +263,7 @@ def render_line(columns, rows, args, plt, Console):
   plt.theme("clear")
   if args.width and args.height:
     plt.plotsize(args.width, args.height)
+  colors = {m: PALETTE[i % len(PALETTE)] for i, m in enumerate(metrics)}
   for (node, gpu), samples in sorted(gpus.items()):
     samples.sort(key=lambda x: x[0])
     xs = [(ep - t0) / 60.0 for ep, _ in samples]
@@ -268,7 +273,8 @@ def render_line(columns, rows, args, plt, Console):
         continue
       ys = [y if y is not None else 0.0 for y in ys]
       lbl = ("%s gpu%s" % (m, gpu)) if len(gpus) > 1 else m
-      plt.plot(xs, ys, label=lbl)
+      kw = {} if args.no_color else {"color": colors[m]}
+      plt.plot(xs, ys, label=lbl, **kw)
   plt.title(args.title or ("job %s  DCGM over time%s" % (jid, "  (running)" if running else "")))
   plt.xlabel("minutes since start"); plt.ylabel("value")
   plt.show()
