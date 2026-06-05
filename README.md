@@ -174,7 +174,7 @@ affected by it. Pipe the CSV in (without `-n`, so the header is included):
 ./jobstats_history --gpu  --csv JOBID       | ./jobstats_plot   # bar gauges (one job)
 ./jobstats_history --gpu  --csv -D 7        | ./jobstats_plot   # GPU% histogram (many jobs)
 ./jobstats_history --dcgm --csv -D 7        | ./jobstats_plot   # heatmap (jobs x metrics)
-./jobstats_history --dcgm --ts --csv JOBID  | ./jobstats_plot   # time-series line + sparklines
+./jobstats_history --dcgm --ts --csv JOBID  | ./jobstats_plot   # time-series line + per-metric stats
 ./jobstats_plot -f saved.csv --kind heat                        # from a saved CSV file
 ```
 

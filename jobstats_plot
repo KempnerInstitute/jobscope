@@ -11,7 +11,7 @@
 #   jobstats_history --gpu  --csv  -D 7      | jobstats_plot     # histogram (many jobs)
 #   jobstats_history --gpu  --csv  JOBID     | jobstats_plot     # bar gauges (one job)
 #   jobstats_history --dcgm --csv  JOBID...  | jobstats_plot     # heatmap (jobs/GPUs x metrics)
-#   jobstats_history --dcgm --ts --csv JOBID | jobstats_plot     # time-series line + sparklines
+#   jobstats_history --dcgm --ts --csv JOBID | jobstats_plot     # time-series line + per-metric stats
 #   jobstats_plot -f saved.csv --kind heat                       # from a saved file
 #
 # Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner Institute, Harvard
@@ -29,12 +29,11 @@ ID_COLS = {"JOBID", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
 DEFAULT_RED = 15          # DCGM utilization %: idle/underfed band (matches DIAG cutoffs)
 RED = {"GPU%": 25, "DUTY%": 25, "GMEM%": 20, "CPU%": 25, "MEM%": 25}
 
-BLOCKS = "▁▂▃▄▅▆▇█"       # sparkline ramp
 HEAT_MAX_ROWS = 40
 
 # Distinct 256-color codes for the --ts chart, one per metric so each metric reads
 # as its own color. Integer codes (not names) so the plotext line and the
-# rich-tinted sparkline summary render the exact same color.
+# rich-tinted per-metric stats summary render the exact same color.
 PALETTE = [196, 46, 33, 208, 201, 51, 226, 129, 244, 39]
 
 # Time-series line chart: which metrics to draw by default (if present), unless
@@ -221,18 +220,9 @@ def render_heat(columns, rows, args, Console, Table, Text):
           % (args.max_rows, len(rows)), file=sys.stderr)
 
 
-def spark(vals):
-  vals = [v for v in vals if v is not None]
-  if not vals:
-    return ""
-  lo, hi = min(vals), max(vals)
-  rng = (hi - lo) or 1.0
-  return "".join(BLOCKS[min(len(BLOCKS) - 1, int((v - lo) / rng * (len(BLOCKS) - 1)))] for v in vals)
-
-
 def render_line(columns, rows, args, plt, Console):
-  """Time-series line chart over the job's window + a per-metric sparkline summary.
-  x = minutes since the first sample; one line per (GPU, metric)."""
+  """Time-series line chart over the job's window + a per-metric stats summary
+  (min/mean/max/last). x = minutes since the first sample; one line per (GPU, metric)."""
   console = Console(no_color=args.no_color)
   mcols = [c for c in metric_cols(columns) if is_pct(c) or c in ("POWER_W",)]
   if args.all:
@@ -280,17 +270,18 @@ def render_line(columns, rows, args, plt, Console):
   plt.xlabel("minutes since start"); plt.ylabel("value")
   plt.show()
 
-  # compact sparkline summary (per GPU, per metric), tinted to match the chart line
+  # per-metric stats the shared-axis chart doesn't label (range/mean/last), tinted to match
   print()
   for (node, gpu), samples in sorted(gpus.items()):
     samples.sort(key=lambda x: x[0])
     tag = ("%s gpu%s  " % (node, gpu)) if len(gpus) > 1 else ""
     for m in metrics:
-      ys = [to_float(r.get(m)) for _, r in samples]
-      if any(y is not None for y in ys):
-        nums = [y for y in ys if y is not None]
-        line = "  %s%-9s %s  (%.0f-%.0f)" % (tag, m, spark(ys), min(nums), max(nums))
-        console.print(line, style="color(%d)" % colors[m], markup=False, highlight=False)
+      nums = [v for v in (to_float(r.get(m)) for _, r in samples) if v is not None]
+      if not nums:
+        continue
+      line = "  %s%-9s min %6.1f   mean %6.1f   max %6.1f   last %6.1f" % (
+          tag, m, min(nums), sum(nums) / len(nums), max(nums), nums[-1])
+      console.print(line, style="color(%d)" % colors[m], markup=False, highlight=False)
 
 
 def main():
