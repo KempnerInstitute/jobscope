@@ -325,7 +325,7 @@ def render_line(columns, rows, args, plt, Console):
     def lab(n, g, m):
       return ("%s gpu%s %-8s" % (n, g, m)) if multi else ("%-8s" % m)
     labw = max((len(lab(n, g, m)) for n, g in keys for m in metrics), default=8)
-    sc = max(12, W - labw - 18)
+    sc = max(12, W - labw - 30)
     print(base)
     for n, g in keys:
       for m in metrics:
@@ -333,7 +333,7 @@ def render_line(columns, rows, args, plt, Console):
         if not ys:
           continue
         sp, lo, hi = braille_spark(ys, sc)
-        text = "  %-*s ┤%s  (%g-%g)" % (labw, lab(n, g, m), sp, lo, hi)
+        text = "  %-*s ┤%s  (%g-%g, mean %.1f)" % (labw, lab(n, g, m), sp, lo, hi, sum(ys) / len(ys))
         console.print(text, style="color(%d)" % mcolor[m], markup=False, highlight=False)
     return
 
