@@ -17,6 +17,38 @@ needs **Python 3.12 + plotext + rich**.
 
 ---
 
+## Cluster requirements
+
+`kempner_jobstats` is a thin **read-only client** over the cluster's existing
+jobstats and Prometheus stack. It collects nothing itself.
+
+External infrastructure must already exist:
+
+- **jobstats** installed on the cluster. It provides the `config` module
+  (`PROM_SERVER`, `SAMPLING_PERIOD`, thresholds) and writes each job's metrics
+  into the Slurm `sacct` `AdminComment` blob (`JS1:...` payload).
+- **Slurm / `sacct`** for job selection, state, and reading the `AdminComment`
+  blob.
+- **Prometheus** for DCGM GPU time series used by `--gpu`, `--dcgm`, and
+  `--diagnose`. The offline `--cpu` and `--cgpu` views need only `sacct`.
+
+Data flow:
+
+```text
+dcgm-exporter (per GPU node) -> Prometheus
+                                   |
+sacct AdminComment blob -----------+-> kempner_jobstats --csv -> jobstats_plot
+```
+
+Python requirements:
+
+| Tool | Interpreter | Packages |
+|---|---|---|
+| `kempner_jobstats` | system `python3` | standard library + `requests` on Prometheus paths |
+| `jobstats_plot` | `python3.12` | `plotext` + `rich` |
+
+---
+
 ## 1. Put the tools on your PATH
 
 ### a. This shell only
