@@ -89,7 +89,7 @@ FAILED_STATES = "FAILED,TIMEOUT,OUT_OF_MEMORY,NODE_FAIL,CANCELLED,DEADLINE,BOOT_
 
 # Summary table layout (kept identical to the original jobstats_summary.sh).
 # Summary columns: (header, cell-format, group). 'id' always shown; 'cpu'/'gpu'
-# columns are shown per --cpu / --gpu / --full.
+# columns are shown per --cpu / --gpu / --cgpu.
 SUMCOLS = [
     ("JOBID",   "{:<12}", 'id'),
     ("STATE",   "{:<9}",  'id'),
@@ -127,17 +127,18 @@ DETCOLS = [
 
 
 def cols_for(specs, view, dcgm=False, diagnose=False):
-    """Column specs to show for the chosen metric view (cpu / gpu / full).
-    DCGM/DIAG columns appear only with --dcgm/--diagnose and only in a
-    GPU-bearing view."""
+    """Column specs to show for the chosen metric view (cpu / gpu / cgpu).
+    The DCGM columns are part of the --gpu view; the DIAG column is added by
+    --diagnose. Both live in the --gpu view only (it is the only one that pulls
+    DCGM); --cpu/--cgpu are blob-only and offline."""
     out = []
     for c in specs:
         g = c[2]
         if g == 'id' \
-           or (g == 'cpu' and view in ('cpu', 'full')) \
-           or (g == 'gpu' and view in ('gpu', 'full')) \
-           or (g == 'dcgm' and dcgm and view in ('gpu', 'full')) \
-           or (g == 'diag' and diagnose and view in ('gpu', 'full')):
+           or (g == 'cpu' and view in ('cpu', 'cgpu')) \
+           or (g == 'gpu' and view in ('gpu', 'cgpu')) \
+           or (g == 'dcgm' and dcgm and view == 'gpu') \
+           or (g == 'diag' and diagnose and view == 'gpu'):
             out.append(c)
     return out
 
@@ -211,9 +212,10 @@ def blob_detail(js):
   return rows
 
 
-# --- DCGM profiling metrics (opt-in via --dcgm) ------------------------------
+# --- DCGM profiling metrics (part of the --gpu view) -------------------------
 # These are NOT in the AdminComment blob; they come from the same Prometheus
-# jobstats uses. Endpoint + sampling period are imported lazily from the
+# jobstats uses. The --gpu view fetches them automatically (--cpu/--cgpu do not).
+# Endpoint + sampling period are imported lazily from the
 # jobstats `config` module so credentials live in exactly one place. Each value
 # is the time-average over the job's [start,end] window (avg_over_time subquery)
 # -- the same method jobstats uses for the duty cycle. GPUs are joined to the
@@ -233,7 +235,8 @@ _PROM = {}
 
 def prom_setup():
   """Lazily import PROM_SERVER/SAMPLING_PERIOD/requests from the jobstats install.
-  Only called on the --dcgm path, so non-GPU/blob-only use never needs them."""
+  Only called when the --gpu view fetches DCGM, so cpu/full/blob-only use never
+  needs them."""
   if _PROM:
     return _PROM
   for p in ("/usr/local/bin", "/usr/bin"):
@@ -242,8 +245,8 @@ def prom_setup():
   try:
     from config import PROM_SERVER
   except Exception as e:
-    sys.exit("ERROR: --dcgm needs the jobstats `config` (PROM_SERVER): %s\n"
-             "       Run this where the `jobstats` command lives." % e)
+    sys.exit("ERROR: the --gpu view needs the jobstats `config` (PROM_SERVER): %s\n"
+             "       Run this where the `jobstats` command lives, or use the offline --cgpu view." % e)
   try:
     from config import SAMPLING_PERIOD as sp
   except Exception:
@@ -251,7 +254,8 @@ def prom_setup():
   try:
     import requests
   except Exception:
-    sys.exit("ERROR: --dcgm needs the `requests` module (it ships with jobstats).")
+    sys.exit("ERROR: the --gpu view needs the `requests` module (it ships with jobstats); "
+             "or use the offline --cgpu view.")
   _PROM.update(server=PROM_SERVER, sp=sp, req=requests)
   return _PROM
 
@@ -343,7 +347,7 @@ def dcgm_fmt(header, v):
 
 # --- diagnosis (opt-in via --diagnose) ---------------------------------------
 # Advisory tags from the 4 DCGM utilization metrics (no extra queries beyond the
-# --dcgm fetch, which --diagnose triggers). Heuristic and window-averaged, so a
+# --gpu view's DCGM fetch). Heuristic and window-averaged, so a
 # multi-phase job blurs; descriptive, not a verdict. Several legitimately-low-util
 # workloads (inference, sampling, sparse HPC, data prep) read as "underfed"
 # without being wasteful -- confirm against intent. KEEP IN SYNC with the copy in
@@ -398,7 +402,8 @@ def diag_from_dcgm(dvals, dur, min_runtime):
 
 
 # Column descriptions for --describe / --explain: (header, source, text), in
-# display order. CPU/MEM/GPU/GMEM come from the sacct blob; the rest need --dcgm.
+# display order. CPU/MEM/GPU/GMEM come from the sacct blob; the rest come with
+# the --gpu view (Prometheus).
 DESCRIPTIONS = [
   ("CPU%",    "blob (cgroup CPU-seconds)",
    "Average CPU-core utilization: 100 x CPU-seconds used / (elapsed x allocated cores). "
@@ -407,22 +412,22 @@ DESCRIPTIONS = [
    "Peak host (CPU) memory used / memory allocated, as a percent."),
   ("GPU%",    "blob (nvidia_gpu_duty_cycle)",
    "GPU duty cycle averaged over the job's GPUs: fraction of time at least one kernel ran. "
-   "Coarse -- says the GPU was occupied in time, not how hard. Use SM_ACT%/OCC% (--dcgm) for that."),
+   "Coarse -- says the GPU was occupied in time, not how hard. Use SM_ACT%/OCC% (--gpu) for that."),
   ("GMEM%",   "blob (nvidia_gpu_memory_used)",
    "Peak GPU memory used / total, summed over the job's GPUs. A high-water mark, not a time-average."),
-  ("SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE (--dcgm)",
+  ("SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE (--gpu)",
    "Fraction of time at least one warp was resident on an SM, averaged across all SMs. Low while "
    "GPU% is high means the GPU was barely loaded (parked / underfed)."),
-  ("OCC%",    "DCGM_FI_PROF_SM_OCCUPANCY (--dcgm)",
+  ("OCC%",    "DCGM_FI_PROF_SM_OCCUPANCY (--gpu)",
    "SM occupancy: fraction of warp slots filled, averaged over SMs and time. Low occupancy means "
    "kernels under-fill the GPU -- small launches, or register / shared-memory limits."),
-  ("TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE (--dcgm)",
+  ("TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE (--gpu)",
    "Fraction of time the tensor-core pipe was active. High only for mixed-precision matmul work "
    "(fp16/bf16/tf32); ~0 means the tensor cores sat idle."),
-  ("DRAM%",   "DCGM_FI_PROF_DRAM_ACTIVE (--dcgm)",
+  ("DRAM%",   "DCGM_FI_PROF_DRAM_ACTIVE (--gpu)",
    "Fraction of time the device-memory (HBM) interface was busy. High while SM_ACT% is low suggests "
    "the job is memory-bound."),
-  ("POWER_W", "DCGM_FI_DEV_POWER_USAGE (--dcgm)",
+  ("POWER_W", "DCGM_FI_DEV_POWER_USAGE (--gpu)",
    "Mean board power draw over the run, in watts. Near-idle watts mean the GPU was not really working."),
 ]
 
@@ -431,8 +436,9 @@ def describe(args):
   """Print a plain-English description of each column and exit (no job needed)."""
   import textwrap
   print("jobstats_history columns. CPU/MEM/GPU/GMEM come from the sacct blob (no")
-  print("network); the DCGM columns (--dcgm) and DIAG (--diagnose) are pulled from")
-  print("Prometheus. For the full DCGM metric set, see `jobstats_dcgm --describe --all`.\n")
+  print("network); the DCGM columns (shown by --gpu) and DIAG (--gpu --diagnose) are")
+  print("pulled from Prometheus. For the full DCGM metric set, see")
+  print("`jobstats_dcgm --describe --all`.\n")
   for header, source, text in DESCRIPTIONS:
     print("  %-9s %s" % (header, source))
     for ln in textwrap.wrap(text, width=74):
@@ -527,8 +533,8 @@ def fetch(jobids, timeout):
     if q not in seen:
       seen.add(q); qids.append(q)
   # AdminComment is the base64 blob (no '|'), so it stays last and we split with
-  # a fixed maxsplit. Start/End/JobIDRaw/Cluster are only used by --dcgm; adding
-  # them keeps this a single bulk query.
+  # a fixed maxsplit. Start/End/JobIDRaw/Cluster are only used by the --gpu view's
+  # DCGM fetch; adding them keeps this a single bulk query.
   out = run_capture(['sacct', '-j', ','.join(qids), '-X', '-P', '-n', '--units=G',
                      '-o', 'JobID,State,JobName,Elapsed,NNodes,AllocTRES,'
                            'Start,End,JobIDRaw,Cluster,User,AdminComment'],
@@ -565,10 +571,10 @@ def context_pairs(args, desc, data=None):
 
 
 def summarize(jobids, args, desc, data, dcgm_data):
-  do_dcgm = (args.dcgm or args.diagnose) and args.metrics in ('gpu', 'full')
+  do_dcgm = args.show_dcgm   # DCGM is fetched (and shown) only in the --gpu view
   if args.metrics == 'gpu':   # GPU view -> only jobs that requested GPUs
     jobids = [j for j in jobids if data.get(j, {}).get('gpus')]
-  cols = cols_for(SUMCOLS, args.metrics, args.dcgm, args.diagnose)
+  cols = cols_for(SUMCOLS, args.metrics, args.show_dcgm, args.diagnose)
   headers = [c[0] for c in cols]
   ctx = context_pairs(args, desc, data)
   writer = csv.writer(sys.stdout, lineterminator='\n') if args.csv else None
@@ -645,10 +651,10 @@ def summarize(jobids, args, desc, data, dcgm_data):
 
 
 def detail(jobids, args, desc, data, dcgm_data):
-  do_dcgm = (args.dcgm or args.diagnose) and args.metrics in ('gpu', 'full')
+  do_dcgm = args.show_dcgm   # DCGM is fetched (and shown) only in the --gpu view
   if args.metrics == 'gpu':   # GPU view -> only jobs that requested GPUs
     jobids = [j for j in jobids if data.get(j, {}).get('gpus')]
-  dcols = cols_for(DETCOLS, args.metrics, args.dcgm, args.diagnose)
+  dcols = cols_for(DETCOLS, args.metrics, args.show_dcgm, args.diagnose)
   DHDR = ("NODE", "GPU", "CPU%", "CPU-MEM", "GPU%", "GPU-MEM", "GMEM%",
           "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "DIAG")
 
@@ -709,12 +715,14 @@ if __name__ == "__main__":
   -p/partition and -t/state, over a time scope (-N last N jobs, -D last N days,
   -S/-E window). With no scope at all it defaults to the last 1 day. Give explicit
   JOBIDs to bypass selection.
-  Pick columns with --cpu/--gpu/--full; -d adds the per-node/GPU breakdown.
-  --dcgm adds time-averaged DCGM profiling columns (SM_ACT%/OCC%/TENSOR%/DRAM%/
-  POWER_W) pulled live from the jobstats Prometheus (GPU jobs only; one extra
-  set of queries per GPU job). --diagnose adds an advisory DIAG column
-  (idle/underfed/low-occ/mem-bound/no-tensor/ok) from the same data. --csv works
-  for both the summary and -d views.
+  Pick columns with --cpu/--gpu/--cgpu (default --gpu); -d adds the per-node/GPU
+  breakdown. The --gpu view also pulls time-averaged DCGM profiling columns
+  (SM_ACT%/OCC%/TENSOR%/DRAM%/POWER_W) live from the jobstats Prometheus (one
+  extra set of queries per GPU job, GPU jobs only). --gpu --diagnose adds an
+  advisory DIAG column (idle/underfed/low-occ/mem-bound/no-tensor/ok) from the
+  same data. --cpu (CPU only) and --cgpu (CPU+GPU) stay blob-only and offline --
+  use --cgpu for a fast, network-free overview. --csv works for the summary and
+  -d views.
   -----------------
   """
   )
@@ -732,18 +740,18 @@ if __name__ == "__main__":
   parser.add_argument("-E", "--endtime", dest="endtime", default=None, help="window end (sacct format)")
   parser.add_argument("-d", "--details", dest="details", action="store_true", help="per-node / per-GPU breakdown")
   mg = parser.add_mutually_exclusive_group()
-  mg.add_argument("--cpu", action="store_const", const="cpu", dest="metrics", help="show CPU columns only")
-  mg.add_argument("--gpu", action="store_const", const="gpu", dest="metrics", help="show GPU columns only")
-  mg.add_argument("--full", action="store_const", const="full", dest="metrics", help="show all columns (default)")
-  parser.add_argument("--dcgm", dest="dcgm", action="store_true",
-                      help="add time-averaged DCGM profiling columns (SM_ACT%%/OCC%%/TENSOR%%/DRAM%%/"
-                           "POWER_W) from Prometheus; GPU jobs only, adds per-job queries")
+  mg.add_argument("--cpu", action="store_const", const="cpu", dest="metrics", help="CPU columns only (offline)")
+  mg.add_argument("--gpu", action="store_const", const="gpu", dest="metrics",
+                  help="GPU columns -- blob (GPU%%/GMEM%%) plus time-averaged DCGM profiling "
+                       "(SM_ACT%%/OCC%%/TENSOR%%/DRAM%%/POWER_W) pulled live from Prometheus (default)")
+  mg.add_argument("--cgpu", action="store_const", const="cgpu", dest="metrics",
+                  help="both CPU and GPU blob columns (offline; no DCGM/Prometheus)")
   parser.add_argument("--workers", dest="workers", type=int, default=8,
-                      help="max concurrent --dcgm Prometheus query-sets (default 8; the queries are "
-                           "I/O-bound so >1 helps even on a single CPU). Use 1 to serialize")
+                      help="max concurrent DCGM Prometheus query-sets for the --gpu view (default 8; "
+                           "the queries are I/O-bound so >1 helps even on a single CPU). Use 1 to serialize")
   parser.add_argument("--diagnose", dest="diagnose", action="store_true",
-                      help="add an advisory DIAG column (idle/underfed/low-occ/mem-bound/no-tensor/ok); "
-                           "GPU jobs only, fetches DCGM data like --dcgm")
+                      help="add an advisory DIAG column (idle/underfed/low-occ/mem-bound/no-tensor/ok) "
+                           "to the --gpu view, derived from the DCGM metrics (implies --gpu)")
   parser.add_argument("--min-runtime", dest="min_runtime", type=int, default=180,
                       help="jobs shorter than this many seconds get DIAG=short (default 180; sampling noise)")
   parser.add_argument("--describe", "--description", "--explain", dest="describe", action="store_true",
@@ -779,17 +787,19 @@ if __name__ == "__main__":
   if args.lastn is not None and args.lastn <= 0:
     parser.error("-N/--lastn must be a positive integer")
 
-  # Metric columns: --cpu/--gpu/--full, else prompt interactively, else full.
+  # Metric columns: --cpu/--gpu/--cgpu, default --gpu (the GPU view with DCGM).
   if args.metrics is None:
-    if sys.stdin.isatty():
-      ans = input("Show metrics? [c]pu / [g]pu / [f]ull (default full): ").strip().lower()
-      args.metrics = {'c': 'cpu', 'cpu': 'cpu', 'g': 'gpu', 'gpu': 'gpu',
-                      'f': 'full', 'full': 'full'}.get(ans, 'full')
-    else:
-      args.metrics = 'full'
+    args.metrics = 'gpu'
 
-  if (args.dcgm or args.diagnose) and args.metrics == 'cpu':
-    print("note: --dcgm/--diagnose have no effect with --cpu (GPU metrics only)", file=sys.stderr)
+  # DIAG lives in the --gpu view only (the only one that touches DCGM/Prometheus);
+  # ignore --diagnose elsewhere with a note.
+  if args.metrics != 'gpu' and args.diagnose:
+    print("note: --diagnose applies only to the --gpu view; ignoring", file=sys.stderr)
+    args.diagnose = False
+
+  # The DCGM columns are shown/fetched only in the --gpu view.
+  args.show_dcgm = (args.metrics == 'gpu')
+
   if args.workers < 1:
     parser.error("--workers must be a positive integer")
 
@@ -803,11 +813,10 @@ if __name__ == "__main__":
 
   data = fetch(jobids, timeout)  # ONE bulk sacct query; no per-job calls
 
-  # Precompute the DCGM metrics for all GPU jobs concurrently (opt-in; the only
-  # network path). Triggered by --dcgm or --diagnose (which derives from the same
-  # data); skipped entirely otherwise or in the cpu-only view.
-  do_dcgm = (args.dcgm or args.diagnose) and args.metrics in ('gpu', 'full')
-  dcgm_data = compute_dcgm(jobids, data, timeout, args.workers) if do_dcgm else {}
+  # Precompute the DCGM metrics for all GPU jobs concurrently (the only network
+  # path). Part of the --gpu view; skipped for the --cpu/--cgpu views, or when
+  # nothing in the selection requested GPUs.
+  dcgm_data = compute_dcgm(jobids, data, timeout, args.workers) if args.show_dcgm else {}
 
   if args.details:
     detail(jobids, args, sel_desc, data, dcgm_data)

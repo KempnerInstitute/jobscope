@@ -26,10 +26,12 @@ export PATH=$PATH:/n/holylfs06/LABS/kempner_shared/Everyone/cluster_scripts/job_
 Start with a GPU summary for recent jobs:
 
 ```bash
-./jobstats_history --gpu --dcgm -D 5
+./jobstats_history -D 5
 ```
 
-This shows GPU jobs from the last 5 days and adds DCGM utilization columns.
+`--gpu` is the default, so this shows GPU jobs from the last 5 days with the
+DCGM utilization columns included automatically. For a fast, offline overview of
+all jobs (CPU + GPU blob columns, no Prometheus), use `--cgpu`.
 
 Then inspect one job in detail:
 
@@ -48,10 +50,10 @@ Add a simple advisory label:
 
 | Need | Command |
 |---|---|
-| See recent jobs | `./jobstats_history` |
-| See recent GPU jobs | `./jobstats_history --gpu -D 5` |
-| Add real GPU activity metrics | `./jobstats_history --gpu --dcgm -D 5` |
-| Grade GPU jobs with a `DIAG` tag | `./jobstats_history --gpu --diagnose -D 5` |
+| See recent GPU jobs with real activity metrics (default) | `./jobstats_history -D 5` |
+| Fast, offline overview of all jobs (CPU + GPU, no DCGM) | `./jobstats_history --cgpu -D 5` |
+| CPU-only jobs/columns | `./jobstats_history --cpu -D 5` |
+| Grade GPU jobs with a `DIAG` tag | `./jobstats_history --diagnose -D 5` |
 | Inspect one job per GPU | `./jobstats_dcgm --all JOBID` |
 | Export raw GPU time series | `./jobstats_dcgm --ts JOBID > job.csv` |
 
@@ -89,15 +91,16 @@ Use this to scan jobs in bulk. It reads each job's stored `sacct`
 Common commands:
 
 ```bash
-./jobstats_history                         # your jobs from the last 1 day
-./jobstats_history -D 7                    # your jobs from the last 7 days
-./jobstats_history -N 20                   # your 20 most recent jobs
+./jobstats_history                         # your GPU jobs from the last 1 day (default --gpu, DCGM included)
+./jobstats_history -D 7                    # your GPU jobs from the last 7 days
+./jobstats_history -N 20                   # GPU jobs among your 20 most recent
 ./jobstats_history -A kempner_dev -D 7     # account jobs from the last 7 days
 ./jobstats_history -p kempner_h100 -D 7    # partition jobs from the last 7 days
 ./jobstats_history -t failed -D 7          # failed jobs from the last 7 days
-./jobstats_history --gpu --dcgm -D 5       # GPU jobs with DCGM columns
-./jobstats_history --gpu --diagnose -D 5   # GPU jobs with DIAG labels
-./jobstats_history -d --gpu JOBID          # per-node / per-GPU breakdown
+./jobstats_history --cgpu -D 7             # all jobs, CPU+GPU columns, fast & offline (no DCGM)
+./jobstats_history --cpu -D 7              # CPU columns only, offline
+./jobstats_history --diagnose -D 5         # GPU jobs with DIAG labels
+./jobstats_history -d JOBID                # per-node / per-GPU breakdown
 ./jobstats_history --csv -D 7 > jobs.csv   # CSV output
 ```
 
@@ -113,9 +116,8 @@ Useful options:
 | `-D DAYS` | Select jobs from the last N days. |
 | `-N N` | Select the most recent N jobs. |
 | `-S TIME -E TIME` | Select an explicit time window. |
-| `--cpu`, `--gpu`, `--full` | Choose output columns. `--full` is the default. |
-| `--dcgm` | Add `SM_ACT%`, `OCC%`, `TENSOR%`, `DRAM%`, and `POWER_W`. |
-| `--diagnose` | Add an advisory `DIAG` label. |
+| `--cpu`, `--gpu`, `--cgpu` | Choose output columns. `--gpu` is the default and adds the DCGM columns `SM_ACT%`, `OCC%`, `TENSOR%`, `DRAM%`, and `POWER_W` from Prometheus (GPU jobs only). `--cpu` (CPU only) and `--cgpu` (CPU + GPU) are blob-only and offline. |
+| `--diagnose` | Add an advisory `DIAG` label (implies `--gpu`). |
 | `-d`, `--details` | Show per-node / per-GPU details. |
 | `--csv` | Print machine-readable CSV. |
 | `--describe` | Explain output columns and exit. |
@@ -162,8 +164,8 @@ Run the full help at any time:
 ## Requirements
 
 - Run these tools on a system where `jobstats` is installed.
-- `jobstats_history` without `--dcgm` or `--diagnose` only needs `sacct`.
-- `jobstats_history --dcgm`, `jobstats_history --diagnose`, and
+- `jobstats_history` in the `--cpu` / `--cgpu` views only needs `sacct`.
+- `jobstats_history` (default `--gpu`), `jobstats_history --diagnose`, and
   `jobstats_dcgm` query the jobstats Prometheus endpoint.
 - `jobstats_dcgm` requires at least one job ID unless you use `--describe`.
 
