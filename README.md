@@ -161,5 +161,4 @@ Run the full help at any time:
 - [Princeton jobstats](https://princetonuniversity.github.io/jobstats/)
 - [KempnerPulse for live monitoring](https://github.com/KempnerInstitute/kempnerpulse)
 
-Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner
-Institute, Harvard.
+
