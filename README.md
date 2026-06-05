@@ -1,25 +1,38 @@
 # kempner-jobstats
 
-`kempner_jobstats` is a read-only command-line tool for reviewing completed Slurm
-jobs on the Kempner cluster. It scans many jobs quickly from stored jobstats data,
-adds live DCGM GPU profiling where available, and can export CSV for terminal
-plots.
+**Synopsis:** `kempner_jobstats` is a read-only Slurm job-efficiency scanner for
+completed Kempner jobs. It reads existing jobstats data from `sacct`, adds DCGM
+GPU metrics from Prometheus when available, and emits concise tables or CSV for
+`jobstats_plot`.
+
+Example Usage:
+
+Scan recent GPU jobs:
+
+```bash
+kempner_jobstats -D 3  # last 3 days of DCGM GPU job metrics
+```
+
+Plot a particular job's DCGM metrics:
+
+```bash
+kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot --compact
+```
 
 For live monitoring, use
 [KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse).
 
-## What It Does
+## Screenshots
 
-| Need | Command |
-|---|---|
-| Recent GPU jobs with DCGM activity metrics | `kempner_jobstats -D 5` |
-| Fast offline CPU + GPU summary | `kempner_jobstats --cgpu -D 5` |
-| CPU-only summary | `kempner_jobstats --cpu -D 5` |
-| Advisory GPU diagnosis labels | `kempner_jobstats --diagnose -D 5` |
-| Per-node / per-GPU breakdown | `kempner_jobstats -d JOBID` |
-| Per-GPU DCGM profiling table | `kempner_jobstats --dcgm --ext JOBID` |
-| Raw DCGM time series | `kempner_jobstats --dcgm --ts --csv JOBID > ts.csv` |
-| Terminal plots from CSV | `kempner_jobstats --csv -D 7 > jobs.csv` then `jobstats_plot -f jobs.csv` |
+Per-job DCGM time series:
+
+![per-job DCGM time series](docs/timeseries.svg)
+
+Aggregated utilization across jobs:
+
+![aggregated mean-utilization bars](docs/aggregated.svg)
+
+Regenerate these with `bash setup/make_screenshots.sh`.
 
 ## Setup
 
@@ -31,42 +44,27 @@ source setup/env.sh
 
 `source setup/env.sh` adds `kempner_jobstats` and `jobstats_plot` to your `$PATH`
 for the current shell. For the shared cluster deploy, permanent PATH setup,
-plotting dependencies, containers, and cluster requirements, see
+plot dependencies, containers, and cluster requirements, see
 [`setup/README.md`](setup/README.md).
 
-## Quick Start
+## Common Commands
 
-Scan recent GPU jobs:
+| Need | Command |
+|---|---|
+| Recent GPU jobs with DCGM activity metrics | `kempner_jobstats -D 3` |
+| Fast offline CPU + GPU summary | `kempner_jobstats --cgpu -D 5` |
+| CPU-only summary | `kempner_jobstats --cpu -D 5` |
+| Advisory GPU diagnosis labels | `kempner_jobstats --diagnose -D 5` |
+| Per-node / per-GPU breakdown | `kempner_jobstats -d JOBID` |
+| Per-GPU DCGM profiling table | `kempner_jobstats --dcgm --ext JOBID` |
+| Raw DCGM time series CSV | `kempner_jobstats --dcgm --ts --csv JOBID > ts.csv` |
+| Plot saved CSV | `jobstats_plot -f ts.csv --compact` |
 
-```bash
-kempner_jobstats -D 5
-```
+Selectors such as `-N`, `-D`, `-S/-E`, `-u`, `-A`, `-p`, and `-t` work across
+views. Run `kempner_jobstats --help` for options and `kempner_jobstats --describe`
+for column definitions.
 
-Inspect one job with the full per-GPU DCGM catalog:
-
-```bash
-kempner_jobstats --dcgm --ext JOBID
-```
-
-Export a time series and plot it:
-
-```bash
-kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot --compact
-```
-
-Common selectors work across views:
-
-```bash
-kempner_jobstats -N 20
-kempner_jobstats -A kempner_dev -D 7
-kempner_jobstats -p kempner_h100 -t failed -D 7
-kempner_jobstats -S YYYY-MM-DD -E YYYY-MM-DD --csv
-```
-
-Run `kempner_jobstats --help` for options and `kempner_jobstats --describe` for
-column definitions.
-
-## Output Views
+## Views
 
 - `--gpu` is the default. It shows GPU jobs with jobstats blob columns plus live
   DCGM columns: `SM_ACT%`, `OCC%`, `TENSOR%`, `DRAM%`, and `POWER_W`.
@@ -90,8 +88,8 @@ Metric shorthand:
 
 ## Plots
 
-`jobstats_plot` renders `kempner_jobstats --csv` output as terminal charts and
-auto-detects bar gauges, histograms, heatmaps, and time-series lines.
+`jobstats_plot` renders `kempner_jobstats --csv` output as terminal bar gauges,
+histograms, heatmaps, and time-series plots.
 
 ```bash
 kempner_jobstats --gpu  --csv JOBID      | jobstats_plot
@@ -102,18 +100,6 @@ kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot --by metric
 
 For plot dependencies, chart kinds, faceting, filters, and color options, see
 [`plot_util/README.md`](plot_util/README.md).
-
-## Screenshots
-
-Per-job DCGM time series:
-
-![per-job DCGM time series](docs/timeseries.svg)
-
-Aggregated utilization across jobs:
-
-![aggregated mean-utilization bars](docs/aggregated.svg)
-
-Regenerate these with `bash setup/make_screenshots.sh`.
 
 ## References
 
