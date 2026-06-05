@@ -1,13 +1,13 @@
 # kempner-jobstats
 
-Two command-line tools for reviewing Slurm job efficiency of CPU and GPU devices after a job finishes.
+`jobstats_history` is a command-line tool for reviewing Slurm job efficiency of
+CPU and GPU devices after a job finishes. Scan many jobs quickly with the summary
+views (`--gpu`/`--cpu`/`--cgpu`), then drop into `--dcgm` for the detailed per-GPU
+DCGM profiling metrics.
 
-- `jobstats_history`: scan many jobs quickly.
-- `jobstats_dcgm`: inspect detailed GPU metrics for specific job IDs.
-
-Both tools use the same jobstats data sources, so their numbers should line up
-with `jobstats`.  For live monitoring, use
-[KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse). These two tools are excellent for extracting the CPU and GPU metrics of finished jobs.
+It uses the same jobstats data sources, so its numbers line up with `jobstats`.
+For live monitoring, use
+[KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse).
 
 ## Setup
 
@@ -33,17 +33,16 @@ Start with a GPU summary for recent jobs:
 DCGM utilization columns included automatically. For a fast, offline overview of
 all jobs (CPU + GPU blob columns, no Prometheus), use `--cgpu`.
 
-Then inspect one job in detail:
+Then inspect one job in detail (per-GPU DCGM metrics):
 
 ```bash
-./jobstats_dcgm --all 17487044
+./jobstats_history --dcgm --ext 17487044
 ```
 
 Add a simple advisory label:
 
 ```bash
 ./jobstats_history --gpu --diagnose -D 5
-./jobstats_dcgm --diagnose 17487044
 ```
 
 ## Which Tool Should I Use?
@@ -54,8 +53,8 @@ Add a simple advisory label:
 | Fast, offline overview of all jobs (CPU + GPU, no DCGM) | `./jobstats_history --cgpu -D 5` |
 | CPU-only jobs/columns | `./jobstats_history --cpu -D 5` |
 | Grade GPU jobs with a `DIAG` tag | `./jobstats_history --diagnose -D 5` |
-| Inspect one job per GPU | `./jobstats_dcgm --all JOBID` |
-| Export raw GPU time series | `./jobstats_dcgm --ts JOBID > job.csv` |
+| Inspect jobs per GPU (full DCGM catalog) | `./jobstats_history --dcgm --ext JOBID` |
+| Export raw GPU time series | `./jobstats_history --dcgm --ts JOBID > job.csv` |
 
 ## Reading GPU Metrics
 
@@ -102,6 +101,9 @@ Common commands:
 ./jobstats_history --diagnose -D 5         # GPU jobs with DIAG labels
 ./jobstats_history -d JOBID                # per-node / per-GPU breakdown
 ./jobstats_history --csv -D 7 > jobs.csv   # CSV output
+./jobstats_history --dcgm JOBID            # per-GPU DCGM table (default 6 metrics)
+./jobstats_history --dcgm --ext -D 1       # per-GPU table, full 28-metric catalog
+./jobstats_history --dcgm --ts JOBID > ts.csv  # raw per-scrape time series
 ```
 
 Useful options:
@@ -118,9 +120,12 @@ Useful options:
 | `-S TIME -E TIME` | Select an explicit time window. |
 | `--cpu`, `--gpu`, `--cgpu` | Choose output columns. `--gpu` is the default and adds the DCGM columns `SM_ACT%`, `OCC%`, `TENSOR%`, `DRAM%`, and `POWER_W` from Prometheus (GPU jobs only). `--cpu` (CPU only) and `--cgpu` (CPU + GPU) are blob-only and offline. |
 | `--diagnose` | Add an advisory `DIAG` label (implies `--gpu`). |
+| `--dcgm` | Per-GPU DCGM profiling table (one row per GPU). Its own view; overrides `--cpu/--gpu/--cgpu` and `-d`. See below. |
+| `--ext` | With `--dcgm`, show the full 28-metric catalog instead of the default 6. |
+| `--ts` | With `--dcgm`, emit the raw per-scrape time series as CSV. |
 | `-d`, `--details` | Show per-node / per-GPU details. |
 | `--csv` | Print machine-readable CSV. |
-| `--describe` | Explain output columns and exit. |
+| `--describe` | Explain output columns and exit (add `--dcgm`/`--ext` for the DCGM catalog). |
 
 Run the full help at any time:
 
@@ -128,20 +133,20 @@ Run the full help at any time:
 ./jobstats_history --help
 ```
 
-## `jobstats_dcgm`
+### Per-GPU DCGM details (`--dcgm`)
 
-Use this after `jobstats_history` points to a job worth investigating. It shows
-time-averaged DCGM metrics per GPU.
-
-Common commands:
+Use this after the summary points to a job worth investigating. `--dcgm` switches
+to a per-GPU table (one row per GPU) of time-averaged DCGM profiling metrics. It
+follows the same job selection as the rest of `jobstats_history` (a JOBID, `-N`,
+`-D`, `-S/-E`, `-A`, `-p`, ...), not just explicit job IDs.
 
 ```bash
-./jobstats_dcgm --all JOBID           # all available GPU metrics
-./jobstats_dcgm JOBID1 JOBID2         # several jobs
-./jobstats_dcgm --diagnose JOBID      # add DIAG labels
-./jobstats_dcgm --csv JOBID > out.csv # one row per job/GPU
-./jobstats_dcgm --ts JOBID > ts.csv   # raw per-scrape time series
-./jobstats_dcgm --describe --all      # explain all metrics
+./jobstats_history --dcgm JOBID1 JOBID2     # default 6 metrics, per GPU
+./jobstats_history --dcgm --ext JOBID       # full 28-metric catalog
+./jobstats_history --dcgm -D 1              # every GPU job from the last day
+./jobstats_history --dcgm --csv JOBID > out.csv  # one row per job/GPU
+./jobstats_history --dcgm --ts JOBID > ts.csv    # raw per-scrape time series
+./jobstats_history --dcgm --describe --ext  # explain all metrics
 ```
 
 Default columns:
@@ -155,19 +160,15 @@ Default columns:
 | `DRAM%` | HBM bandwidth activity. |
 | `POWER_W` | Mean board power. |
 
-Run the full help at any time:
-
-```bash
-./jobstats_dcgm --help
-```
+`--ext` adds the full catalog (ENGINE/HMMA/IMMA/DFMA/FP16/FP32/FP64/MEMCP/PWRmax/
+ENERGY/FB_*/PCIE_*/NVLINK/clocks/temps/ENC/DEC).
 
 ## Requirements
 
-- Run these tools on a system where `jobstats` is installed.
+- Run this tool on a system where `jobstats` is installed.
 - `jobstats_history` in the `--cpu` / `--cgpu` views only needs `sacct`.
-- `jobstats_history` (default `--gpu`), `jobstats_history --diagnose`, and
-  `jobstats_dcgm` query the jobstats Prometheus endpoint.
-- `jobstats_dcgm` requires at least one job ID unless you use `--describe`.
+- `jobstats_history` (default `--gpu`), `--diagnose`, and `--dcgm` query the
+  jobstats Prometheus endpoint.
 
 ## References
 

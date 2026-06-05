@@ -212,24 +212,127 @@ def blob_detail(js):
   return rows
 
 
-# --- DCGM profiling metrics (part of the --gpu view) -------------------------
+# --- DCGM profiling metric catalog -------------------------------------------
 # These are NOT in the AdminComment blob; they come from the same Prometheus
-# jobstats uses. The --gpu view fetches them automatically (--cpu/--cgpu do not).
-# Endpoint + sampling period are imported lazily from the
-# jobstats `config` module so credentials live in exactly one place. Each value
-# is the time-average over the job's [start,end] window (avg_over_time subquery)
-# -- the same method jobstats uses for the duty cycle. GPUs are joined to the
-# job by UUID (the DCGM `gpu` index and slurm `minor_number` disagree; only the
-# UUID is stable across the two exporters), via the nvidia_gpu_jobId companion.
-DCGM_METRICS = [
-    # header,    metric,                                uuidlbl, reducer, scale, dec, agg
-    ("SM_ACT%",  "DCGM_FI_PROF_SM_ACTIVE",              "UUID", "avg", 100, 1, "mean"),
-    ("OCC%",     "DCGM_FI_PROF_SM_OCCUPANCY",           "UUID", "avg", 100, 1, "mean"),
-    ("TENSOR%",  "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE",     "UUID", "avg", 100, 1, "mean"),
-    ("DRAM%",    "DCGM_FI_PROF_DRAM_ACTIVE",            "UUID", "avg", 100, 1, "mean"),
-    ("POWER_W",  "DCGM_FI_DEV_POWER_USAGE",             "UUID", "avg", 1,   0, "mean"),
+# jobstats uses. The --gpu summary shows the 5 default profiling columns
+# (SM_ACT/OCC/TENSOR/DRAM/POWER); the --dcgm per-GPU view shows the full catalog
+# (6 default incl DUTY%, + 22 with --ext). Endpoint + sampling period are
+# imported lazily from the jobstats `config` module so credentials live in one
+# place. Each value is the time-average over the job's [start,end] window
+# (avg_over_time subquery) -- the same method jobstats uses for the duty cycle.
+# GPUs are joined to the job by UUID (the DCGM `gpu` index and slurm
+# `minor_number` disagree; only the UUID is stable across the two exporters),
+# via the nvidia_gpu_jobId companion.
+#
+# Each METRICS entry: (key, header, metric, uuidlbl, reducer, scale, dec, agg, group)
+#   key      stable internal id            reducer  avg|max|delta (over the window)
+#   header   column label                  scale    display multiplier (0-1 frac->%, MiB->GiB, mJ->kWh)
+#   metric   Prometheus series name        dec      decimal places (0 -> int)
+#   uuidlbl  UUID join label               agg      multi-GPU reduce: mean|sum|max (unused by --dcgm)
+#   group    default (always) | all (only with --dcgm --ext)
+# Quick reference (time-averaged over the run): DUTY% nvidia_gpu_duty_cycle (coarse
+# "a kernel ran"); SM_ACT% SMs engaged; OCC% warp-slot fill; TENSOR% tensor pipe;
+# DRAM% HBM busy; POWER_W mean watts; then --ext adds ENGINE/HMMA/IMMA/DFMA/FP16/
+# FP32/FP64/MEMCP/PWRmax/ENERGY/FB_USED/FB_FREE/FB_RSVD/PCIE_TX/PCIE_RX/NVLINK/
+# SMCLK/MEMCLK/TEMP/MEMTEMP/ENC/DEC. PCIE_*/NVLINK_* are DCGM rates, so treat
+# absolute bandwidth as approximate (zero-vs-nonzero is reliable).
+METRICS = [
+  # key,      header,       metric,                                uuidlbl, reducer, scale,    dec, agg,    group
+  ("duty",   "DUTY%",       "nvidia_gpu_duty_cycle",               "uuid", "avg",   1,        0, "mean", "default"),
+  ("smact",  "SM_ACT%",     "DCGM_FI_PROF_SM_ACTIVE",              "UUID", "avg",   100,      1, "mean", "default"),
+  ("occ",    "OCC%",        "DCGM_FI_PROF_SM_OCCUPANCY",           "UUID", "avg",   100,      1, "mean", "default"),
+  ("tensor", "TENSOR%",     "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE",     "UUID", "avg",   100,      1, "mean", "default"),
+  ("dram",   "DRAM%",       "DCGM_FI_PROF_DRAM_ACTIVE",            "UUID", "avg",   100,      1, "mean", "default"),
+  ("power",  "POWER_W",     "DCGM_FI_DEV_POWER_USAGE",             "UUID", "avg",   1,        0, "mean", "default"),
+  ("engine", "ENGINE%",     "DCGM_FI_PROF_GR_ENGINE_ACTIVE",       "UUID", "avg",   100,      1, "mean", "all"),
+  ("hmma",   "HMMA%",       "DCGM_FI_PROF_PIPE_TENSOR_HMMA_ACTIVE","UUID", "avg",   100,      1, "mean", "all"),
+  ("imma",   "IMMA%",       "DCGM_FI_PROF_PIPE_TENSOR_IMMA_ACTIVE","UUID", "avg",   100,      1, "mean", "all"),
+  ("dfma",   "DFMA%",       "DCGM_FI_PROF_PIPE_TENSOR_DFMA_ACTIVE","UUID", "avg",   100,      1, "mean", "all"),
+  ("fp16",   "FP16%",       "DCGM_FI_PROF_PIPE_FP16_ACTIVE",       "UUID", "avg",   100,      1, "mean", "all"),
+  ("fp32",   "FP32%",       "DCGM_FI_PROF_PIPE_FP32_ACTIVE",       "UUID", "avg",   100,      1, "mean", "all"),
+  ("fp64",   "FP64%",       "DCGM_FI_PROF_PIPE_FP64_ACTIVE",       "UUID", "avg",   100,      1, "mean", "all"),
+  ("memcp",  "MEMCP%",      "DCGM_FI_DEV_MEM_COPY_UTIL",           "UUID", "avg",   1,        0, "mean", "all"),
+  ("pwrmax", "PWRmax_W",    "DCGM_FI_DEV_POWER_USAGE",             "UUID", "max",   1,        0, "max",  "all"),
+  ("energy", "ENERGY_kWh",  "DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION","UUID", "delta", 1/3.6e9,  3, "sum",  "all"),
+  ("fbused", "FB_USED_GB",  "DCGM_FI_DEV_FB_USED",                 "UUID", "avg",   1/1024,   1, "mean", "all"),
+  ("fbfree", "FB_FREE_GB",  "DCGM_FI_DEV_FB_FREE",                 "UUID", "avg",   1/1024,   1, "mean", "all"),
+  ("fbrsvd", "FB_RSVD_GB",  "DCGM_FI_DEV_FB_RESERVED",             "UUID", "avg",   1/1024,   1, "mean", "all"),
+  ("pcietx", "PCIE_TX_MBs", "DCGM_FI_PROF_PCIE_TX_BYTES",          "UUID", "avg",   1e-6,     1, "mean", "all"),
+  ("pcierx", "PCIE_RX_MBs", "DCGM_FI_PROF_PCIE_RX_BYTES",          "UUID", "avg",   1e-6,     1, "mean", "all"),
+  ("nvlink", "NVLINK_MBs",  "DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL",  "UUID", "avg",   1/1024,   1, "mean", "all"),
+  ("smclk",  "SMCLK_MHz",   "DCGM_FI_DEV_SM_CLOCK",                "UUID", "avg",   1,        0, "mean", "all"),
+  ("memclk", "MEMCLK_MHz",  "DCGM_FI_DEV_MEM_CLOCK",               "UUID", "avg",   1,        0, "mean", "all"),
+  ("temp",   "TEMP_C",      "DCGM_FI_DEV_GPU_TEMP",                "UUID", "avg",   1,        0, "mean", "all"),
+  ("memtemp","MEMTEMP_C",   "DCGM_FI_DEV_MEMORY_TEMP",             "UUID", "avg",   1,        0, "mean", "all"),
+  ("enc",    "ENC%",        "DCGM_FI_DEV_ENC_UTIL",                "UUID", "avg",   1,        0, "mean", "all"),
+  ("dec",    "DEC%",        "DCGM_FI_DEV_DEC_UTIL",                "UUID", "avg",   1,        0, "mean", "all"),
 ]
-DCGM_HEADERS = [m[0] for m in DCGM_METRICS]
+SPEC_BY_HEADER = {s[1]: s for s in METRICS}
+DEFAULT_SPECS  = [s for s in METRICS if s[8] == 'default']     # 6, incl DUTY%
+ALL_SPECS      = list(METRICS)                                 # 28
+# The --gpu summary's 5 profiling columns: default group minus DUTY% (DUTY% == the
+# blob's GPU%, already shown there). DCGM_HEADERS keeps its historical 5 in order,
+# so the summary/detail rendering is untouched.
+GPU_SUMMARY_SPECS = [s for s in DEFAULT_SPECS if s[0] != 'duty']
+DCGM_HEADERS = [s[1] for s in GPU_SUMMARY_SPECS]
+
+# Plain-English descriptions for --dcgm --describe, keyed by column header.
+DCGM_DESCRIPTIONS = {
+  "DUTY%":      "jobstats' GPU%. Coarse duty cycle: fraction of the run during which at least one "
+                "kernel was executing on the GPU. Says the GPU was occupied in time, NOT how "
+                "intensely -- a 1-thread kernel and a full-GPU kernel both read ~100%.",
+  "SM_ACT%":    "Fraction of time at least one warp was resident on an SM, averaged across all SMs. "
+                "Distinguishes 'one SM busy' from 'all SMs busy' -- low while DUTY% is high means the "
+                "GPU was barely loaded (parked / underfed).",
+  "OCC%":       "SM occupancy: the fraction of warp slots that were filled, averaged over SMs and "
+                "time (active warps / the hardware max per SM). Low occupancy means kernels under-fill "
+                "the GPU -- small launches, or register / shared-memory limits.",
+  "TENSOR%":    "Fraction of time the tensor-core pipe was active. High only for mixed-precision "
+                "matmul-heavy work (fp16/bf16/tf32 training or inference); ~0 means the tensor cores "
+                "sat idle.",
+  "DRAM%":      "Fraction of time the device-memory (HBM) interface was busy moving data -- a "
+                "memory-bandwidth duty cycle. High while SM_ACT% is low suggests the job is "
+                "memory-bound, not compute-bound.",
+  "POWER_W":    "Mean board power draw over the run, in watts. Compare to the GPU's TDP (~700 W for "
+                "H100/H200, ~400 W for A100); near-idle watts mean the GPU was not really working.",
+  "ENGINE%":    "Fraction of time the graphics/compute engine had work in flight -- a finer-grained "
+                "successor to the DUTY% duty cycle.",
+  "HMMA%":      "Tensor-core activity for half-precision matrix ops (fp16/bf16). A precision breakdown "
+                "of TENSOR%.",
+  "IMMA%":      "Tensor-core activity for integer matrix ops (int8). Precision breakdown of TENSOR% -- "
+                "nonzero for quantized / int8 inference.",
+  "DFMA%":      "Tensor-core activity for double-precision matrix ops (fp64). Precision breakdown of "
+                "TENSOR% -- relevant to fp64 HPC on tensor cores.",
+  "FP16%":      "Fraction of time the (non-tensor) fp16 floating-point pipe was active.",
+  "FP32%":      "Fraction of time the (non-tensor) fp32 floating-point pipe was active -- the default "
+                "precision for much numerical code.",
+  "FP64%":      "Fraction of time the fp64 (double-precision) pipe was active. High for "
+                "double-precision HPC (CFD, MD, dense linear algebra).",
+  "MEMCP%":     "Percent of time the memory-copy engine was moving data (nvidia-smi's 'Memory' "
+                "utilization). Not the same as DRAM bandwidth.",
+  "PWRmax_W":   "Peak board power seen during the run, in watts (vs POWER_W, the mean).",
+  "ENERGY_kWh": "Total energy the GPU consumed over the run, in kWh (from the monotonic energy "
+                "counter, end minus start). Useful for cost / efficiency accounting.",
+  "FB_USED_GB": "Mean GPU (framebuffer) memory in use over the run, in GiB. Complements jobstats' "
+                "GMEM%, which is the PEAK -- a job that loads a model then idles shows high peak but a "
+                "lower mean.",
+  "FB_FREE_GB": "Mean free GPU memory over the run, in GiB.",
+  "FB_RSVD_GB": "Mean GPU memory reserved by the driver/system over the run, in GiB (not available to "
+                "your job).",
+  "PCIE_TX_MBs":"Mean PCIe transmit throughput (GPU -> host), in MB/s. A bottleneck if the GPU waits "
+                "on host transfers. (DCGM rate; treat the absolute value as approximate.)",
+  "PCIE_RX_MBs":"Mean PCIe receive throughput (host -> GPU), in MB/s -- e.g. input batches streamed to "
+                "the GPU. (DCGM rate; absolute value approximate.)",
+  "NVLINK_MBs": "Mean NVLink throughput, in MiB/s. ~0 for single-GPU jobs; nonzero indicates "
+                "multi-GPU communication (e.g. NCCL all-reduce). (DCGM rate; absolute approximate.)",
+  "SMCLK_MHz":  "Mean SM (core) clock frequency, in MHz. A low mean alongside high temperature / power "
+                "can indicate throttling.",
+  "MEMCLK_MHz": "Mean memory clock frequency, in MHz.",
+  "TEMP_C":     "Mean GPU core temperature, in degrees Celsius.",
+  "MEMTEMP_C":  "Mean GPU memory (HBM) temperature, in degrees Celsius.",
+  "ENC%":       "Mean hardware video-encoder (NVENC) utilization. Usually 0 unless encoding video.",
+  "DEC%":       "Mean hardware video-decoder (NVDEC) utilization. Usually 0 unless decoding video.",
+}
 _PROM = {}
 
 
@@ -281,6 +384,17 @@ def prom_query(query, at, timeout):
   return j['data']['result']
 
 
+def prom_query_range(query, start, end, step, timeout):
+  """Range query -> result list, each series carrying raw [ts, value] samples at
+  `step` resolution over [start, end]. Empty on error. Used by --dcgm --ts."""
+  P = prom_setup()
+  r = P['req'].get(P['server'] + '/api/v1/query_range',
+                   params={'query': query, 'start': start, 'end': end, 'step': step},
+                   timeout=timeout)
+  j = r.json()
+  return j['data']['result'] if j.get('status') == 'success' else []
+
+
 def _dcgm_query(metric, reducer, uuidlbl, uuids, dur):
   rx = "^(" + "|".join(uuids) + ")$"   # UUIDs are hex+hyphen, RE2-safe as-is
   sel = "%s{%s=~\"%s\"}" % (metric, uuidlbl, rx)
@@ -291,10 +405,39 @@ def _dcgm_query(metric, reducer, uuidlbl, uuids, dur):
   return "(max_over_time((%s)[%ds:]) - min_over_time((%s)[%ds:]))" % (sel, dur, sel, dur)
 
 
-def dcgm_for_job(d, timeout):
-  """(overall{header:val}, per_gpu{(node,minor):{header:val}}) for one job, or
-  ({},{}) when it has no GPUs / no samples. Joins DCGM series to the job on UUID
-  via nvidia_gpu_jobId (the same job->GPU mapping jobstats uses)."""
+def _gpu_minor_key(minor):
+  """Numeric sort key for a GPU minor number; falls back to string."""
+  return int(minor) if str(minor).isdigit() else minor
+
+
+def discover_gpus(d, timeout):
+  """[{uuid,node,minor}] for the GPUs that ran the job over its window, sorted by
+  (node, numeric minor). [] for CPU-only jobs or when no GPU samples exist. Joins
+  via nvidia_gpu_jobId -- the same job->GPU mapping jobstats uses. (Used by the
+  --dcgm --ts path; the window-average path discovers inline in dcgm_for_job.)"""
+  if not d.get('gpus') or not d.get('jobidraw') or not d.get('dur'):
+    return []
+  cl = "slurm_cluster='%s'" % d['cluster'] if d.get('cluster') else ''
+  try:
+    disc = prom_query("max_over_time((nvidia_gpu_jobId{%s} == %s)[%ds:])"
+                      % (cl, d['jobidraw'], d['dur']), d['end'], timeout)
+  except Exception:
+    return []
+  gpus = []
+  for s in disc:
+    m = s['metric']
+    u = m.get('uuid')
+    if u:
+      gpus.append({'uuid': u, 'node': m.get('host', '?').split(':')[0],
+                   'minor': str(m.get('minor_number', '?'))})
+  gpus.sort(key=lambda g: (g['node'], _gpu_minor_key(g['minor'])))
+  return gpus
+
+
+def dcgm_for_job(d, specs, timeout):
+  """(overall{header:val}, per_gpu{(node,minor):{header:val}}) for one job over
+  the given metric `specs`, or ({},{}) when it has no GPUs / no samples. Joins
+  DCGM series to the job on UUID via nvidia_gpu_jobId (jobstats's mapping)."""
   if not d.get('gpus') or not d.get('jobidraw') or not d.get('dur'):
     return {}, {}
   try:
@@ -313,7 +456,7 @@ def dcgm_for_job(d, timeout):
   if not uuids:
     return {}, {}
   per_uuid = {u: {} for u in uuids}
-  for header, metric, uuidlbl, reducer, scale, dec, agg in DCGM_METRICS:
+  for key, header, metric, uuidlbl, reducer, scale, dec, agg, group in specs:
     try:
       res = prom_query(_dcgm_query(metric, reducer, uuidlbl, uuids, d['dur']),
                        d['end'], timeout)
@@ -328,7 +471,7 @@ def dcgm_for_job(d, timeout):
         pass
   per_gpu = {(node, minor): per_uuid.get(u, {}) for node, minor, u in gpus}
   overall = {}
-  for header, metric, uuidlbl, reducer, scale, dec, agg in DCGM_METRICS:
+  for key, header, metric, uuidlbl, reducer, scale, dec, agg, group in specs:
     vals = [per_uuid[u][header] for u in uuids if header in per_uuid[u]]
     if vals:
       overall[header] = (sum(vals) if agg == 'sum'
@@ -337,12 +480,17 @@ def dcgm_for_job(d, timeout):
   return overall, per_gpu
 
 
-def dcgm_fmt(header, v):
-  """Format one DCGM cell ('-' when missing), using the metric's decimals."""
+def fmt_spec(spec, v):
+  """Format one DCGM cell ('-' when missing), using the metric's decimals (spec[6])."""
   if v is None:
     return '-'
-  dec = next((m[5] for m in DCGM_METRICS if m[0] == header), 1)
+  dec = spec[6]
   return ("{:.%df}" % dec).format(v) if dec else str(int(round(v)))
+
+
+def dcgm_fmt(header, v):
+  """Format a DCGM cell by header (summary/detail callers); see fmt_spec."""
+  return fmt_spec(SPEC_BY_HEADER[header], v)
 
 
 # --- diagnosis (opt-in via --diagnose) ---------------------------------------
@@ -350,8 +498,8 @@ def dcgm_fmt(header, v):
 # --gpu view's DCGM fetch). Heuristic and window-averaged, so a
 # multi-phase job blurs; descriptive, not a verdict. Several legitimately-low-util
 # workloads (inference, sampling, sparse HPC, data prep) read as "underfed"
-# without being wasteful -- confirm against intent. KEEP IN SYNC with the copy in
-# jobstats_dcgm. Thresholds are percent (SM_ACT/OCC/TENSOR/DRAM are 0-100).
+# without being wasteful -- confirm against intent. Thresholds are percent
+# (SM_ACT/OCC/TENSOR/DRAM are 0-100).
 DIAG_IDLE, DIAG_UNDERFED, DIAG_BUSY = 5, 15, 40
 DIAG_LOWOCC, DIAG_MEM, DIAG_TENSOR = 20, 40, 1
 
@@ -437,8 +585,8 @@ def describe(args):
   import textwrap
   print("jobstats_history columns. CPU/MEM/GPU/GMEM come from the sacct blob (no")
   print("network); the DCGM columns (shown by --gpu) and DIAG (--gpu --diagnose) are")
-  print("pulled from Prometheus. For the full DCGM metric set, see")
-  print("`jobstats_dcgm --describe --all`.\n")
+  print("pulled from Prometheus. For the full per-GPU DCGM catalog, see")
+  print("`--dcgm --describe` (add --ext for all 28 metrics).\n")
   for header, source, text in DESCRIPTIONS:
     print("  %-9s %s" % (header, source))
     for ln in textwrap.wrap(text, width=74):
@@ -446,6 +594,22 @@ def describe(args):
     print()
   if args.diagnose:
     print(DIAG_LEGEND)
+
+
+def describe_dcgm(specs):
+  """Plain-English reference for the --dcgm metric catalog (no job needed)."""
+  import textwrap
+  red = {'avg': 'mean', 'max': 'peak', 'delta': 'delta'}
+  ndefault = len(DEFAULT_SPECS)
+  print("DCGM GPU metrics (--dcgm). Each value is time-averaged over the job's [start,end]")
+  print("window. Showing %d of %d metrics (%s). [reduce] = how the window is collapsed.\n"
+        % (len(specs), len(ALL_SPECS),
+           "all" if len(specs) > ndefault else "default; --ext for the rest"))
+  for key, header, metric, uuidlbl, reducer, scale, dec, agg, group in specs:
+    print("  %-12s %-38s [reduce: %s]" % (header, metric, red.get(reducer, reducer)))
+    for ln in textwrap.wrap(DCGM_DESCRIPTIONS.get(header, "(no description)"), width=74):
+      print("      " + ln)
+    print()
 
 
 def extend_detail_row(r, per_gpu, dur=None, min_runtime=None, diagnose_on=False):
@@ -458,22 +622,23 @@ def extend_detail_row(r, per_gpu, dur=None, min_runtime=None, diagnose_on=False)
   return out
 
 
-def compute_dcgm(jobids, data, timeout, workers):
-  """Run dcgm_for_job for every GPU job, concurrently -> {jid: (overall, per_gpu)}.
-  The per-job queries are network I/O-bound (each thread mostly waits on the
-  Prometheus round-trip; the GIL is released during that wait), so a thread pool
-  overlaps them and speeds up wide selections even on a single CPU core. The 6
-  queries *within* one job stay sequential -- the parallelism is across jobs."""
+def compute_dcgm(jobids, data, specs, timeout, workers):
+  """Run dcgm_for_job over `specs` for every GPU job, concurrently -> {jid:
+  (overall, per_gpu)}. The per-job queries are network I/O-bound (each thread
+  mostly waits on the Prometheus round-trip; the GIL is released during that
+  wait), so a thread pool overlaps them and speeds up wide selections even on a
+  single CPU core. The per-metric queries *within* one job stay sequential --
+  the parallelism is across jobs."""
   gpu_jids = [j for j in jobids if data.get(j, {}).get('gpus')]
   if not gpu_jids:
     return {}
   prom_setup()   # initialise the shared _PROM once, before any worker runs
   workers = max(1, min(workers, len(gpu_jids)))
   if workers == 1:
-    return {j: dcgm_for_job(data[j], timeout) for j in gpu_jids}
+    return {j: dcgm_for_job(data[j], specs, timeout) for j in gpu_jids}
   results = {}
   with ThreadPoolExecutor(max_workers=workers) as ex:
-    futs = {ex.submit(dcgm_for_job, data[j], timeout): j for j in gpu_jids}
+    futs = {ex.submit(dcgm_for_job, data[j], specs, timeout): j for j in gpu_jids}
     for fut, j in futs.items():
       try:
         results[j] = fut.result()
@@ -702,6 +867,119 @@ def detail(jobids, args, desc, data, dcgm_data):
     print()
 
 
+def dcgm_report(jobids, args, desc, data, dcgm_data, specs):
+  """--dcgm view: per-GPU DCGM profiling table, ONE ROW PER GPU (no averaged
+  'Overall' row, no DIAG). Consumes dcgm_data[jid]=(overall, per_gpu); uses
+  per_gpu only. Restricted to GPU jobs (matching the --gpu summary)."""
+  jobids = [j for j in jobids if data.get(j, {}).get('gpus')]
+  headers = [s[1] for s in specs]
+
+  def gkey(nm):   # sort per_gpu keys (node, minor_str) by node then numeric minor
+    return (nm[0], _gpu_minor_key(nm[1]))
+
+  # CSV: one row per (job, node, GPU), leading JOBID like the -d view.
+  if args.csv:
+    writer = csv.writer(sys.stdout, lineterminator='\n')
+    if args.header:
+      for label, val in context_pairs(args, desc, data):
+        writer.writerow([label, val])
+      writer.writerow(["JOBID", "STATE", "NAME", "NODE", "GPU", "DUR_S"] + headers)
+    for jid in jobids:
+      d = data.get(jid, {})
+      per_gpu = dcgm_data.get(jid, ({}, {}))[1]
+      for nm in sorted(per_gpu, key=gkey):
+        vals = per_gpu[nm]
+        writer.writerow([jid, d.get('state', '?'), d.get('name', '?'), nm[0], nm[1],
+                         d.get('dur', '')] + [fmt_spec(s, vals.get(s[1])) for s in specs])
+    return
+
+  if args.header:
+    for label, val in context_pairs(args, desc, data):
+      print(fmt_context(label, val))
+    print()
+  if not jobids:
+    print("(no GPU jobs in this selection)")
+    return
+
+  DHDR = ["NODE", "GPU"] + headers
+  widths = [16, 4] + [max(len(h), 8) + 1 for h in headers]
+
+  def line(cells):
+    return " ".join(str(c).ljust(w) for c, w in zip(cells, widths))
+
+  for jid in jobids:
+    d = data.get(jid, {})
+    win = ""
+    if d.get('start'):
+      win = "   (%s .. %s, %ds)" % (
+          time.strftime('%Y-%m-%d %H:%M', time.localtime(d['start'])),
+          time.strftime('%H:%M', time.localtime(d['end'])), d.get('dur') or 0)
+    print(f"Job {jid}  [{d.get('state', '?')}]  {d.get('name', '?')}{win}")
+    per_gpu = dcgm_data.get(jid, ({}, {}))[1]
+    if not per_gpu:
+      print("  (no GPU samples for this job -- too short, no DCGM data, or beyond retention)\n")
+      continue
+    if args.header:
+      print("  " + line(DHDR))
+      print("  " + "-" * len(line(DHDR)))
+    for nm in sorted(per_gpu, key=gkey):
+      vals = per_gpu[nm]
+      print("  " + line([nm[0], nm[1]] + [fmt_spec(s, vals.get(s[1])) for s in specs]))
+    print()
+
+
+def dcgm_timeseries(jobids, data, specs, args, timeout):
+  """--dcgm --ts: emit the RAW per-scrape DCGM time series over each job's window
+  as CSV (one row per job/GPU/timestamp), instead of the window average. Metrics
+  are de-duplicated by Prometheus name (so POWER_W/PWRmax_W collapse to one
+  column); each cell is the raw sampled value, scaled for display."""
+  jobids = [j for j in jobids if data.get(j, {}).get('gpus')]
+  seen, tspecs = set(), []
+  for s in specs:                       # dedupe by prometheus metric name
+    if s[2] not in seen:
+      seen.add(s[2]); tspecs.append(s)
+  sp = prom_setup()['sp']
+  w = csv.writer(sys.stdout, lineterminator='\n')
+  if args.header:
+    w.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"] + [s[1] for s in tspecs])
+
+  def cell(v, dec):
+    if v is None:
+      return ''
+    return ("{:.%df}" % dec).format(v) if dec else str(int(round(v)))
+
+  for jid in jobids:
+    d = data.get(jid, {})
+    gpus = discover_gpus(d, timeout)
+    if not gpus:
+      print("warn: job %s has no GPU samples" % jid, file=sys.stderr); continue
+    uuid_to = {g['uuid']: (g['node'], g['minor']) for g in gpus}
+    rx = "^(" + "|".join(uuid_to) + ")$"
+    # keep range/step under Prometheus' ~11k-point cap for long jobs
+    step = max(sp, d['dur'] // 10000 + 1)
+    series = {u: {} for u in uuid_to}   # {uuid: {ts: {header: value}}}
+    for key, header, metric, uuidlbl, reducer, scale, dec, agg, group in tspecs:
+      for r in prom_query_range("%s{%s=~\"%s\"}" % (metric, uuidlbl, rx),
+                                d['start'], d['end'], step, timeout):
+        u = r['metric'].get(uuidlbl) or r['metric'].get('uuid') or r['metric'].get('UUID')
+        if u not in series:
+          continue
+        for ts, val in r['values']:
+          try:
+            series[u].setdefault(int(ts), {})[header] = float(val) * scale
+          except (TypeError, ValueError):
+            pass
+    rows = []                           # (node, minor_sort, ts, csv_row)
+    for u, (node, minor) in uuid_to.items():
+      for ts in sorted(series[u]):
+        cells = series[u][ts]
+        rows.append((node, _gpu_minor_key(minor), ts,
+                     [jid, ts, time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(ts)),
+                      node, minor] + [cell(cells.get(s[1]), s[6]) for s in tspecs]))
+    for _, _, _, row in sorted(rows, key=lambda x: (x[0], x[1], x[2])):
+      w.writerow(row)
+
+
 if __name__ == "__main__":
   desc = (
   """
@@ -723,6 +1001,10 @@ if __name__ == "__main__":
   same data. --cpu (CPU only) and --cgpu (CPU+GPU) stay blob-only and offline --
   use --cgpu for a fast, network-free overview. --csv works for the summary and
   -d views.
+  --dcgm switches to a per-GPU DCGM profiling table (one row per GPU):
+  DUTY%/SM_ACT%/OCC%/TENSOR%/DRAM%/POWER_W by default, --ext for the full 28-metric
+  catalog. --dcgm --csv emits one CSV row per job/GPU; --dcgm --ts emits the raw
+  per-scrape time series. --dcgm follows the same job selection as above.
   -----------------
   """
   )
@@ -746,6 +1028,16 @@ if __name__ == "__main__":
                        "(SM_ACT%%/OCC%%/TENSOR%%/DRAM%%/POWER_W) pulled live from Prometheus (default)")
   mg.add_argument("--cgpu", action="store_const", const="cgpu", dest="metrics",
                   help="both CPU and GPU blob columns (offline; no DCGM/Prometheus)")
+  parser.add_argument("--dcgm", dest="dcgm", action="store_true",
+                      help="per-GPU DCGM profiling table (one row per GPU, pulled live from "
+                           "Prometheus): DUTY%%/SM_ACT%%/OCC%%/TENSOR%%/DRAM%%/POWER_W. Its own view -- "
+                           "overrides --cpu/--gpu/--cgpu and -d. Add --ext for the full 28-metric catalog")
+  parser.add_argument("--ext", "--extended", dest="ext", action="store_true",
+                      help="with --dcgm, show the full extended metric catalog (ENGINE/HMMA/IMMA/DFMA/"
+                           "FP16/FP32/FP64/MEMCP/PWRmax/ENERGY/FB_*/PCIE_*/NVLINK/clocks/temps/ENC/DEC)")
+  parser.add_argument("--ts", "--timeseries", dest="ts", action="store_true",
+                      help="with --dcgm, emit the RAW per-scrape time series over each job's window as "
+                           "CSV (JOBID,EPOCH,TIME,NODE,GPU,<metrics>) instead of the window average")
   parser.add_argument("--workers", dest="workers", type=int, default=8,
                       help="max concurrent DCGM Prometheus query-sets for the --gpu view (default 8; "
                            "the queries are I/O-bound so >1 helps even on a single CPU). Use 1 to serialize")
@@ -756,15 +1048,22 @@ if __name__ == "__main__":
                       help="jobs shorter than this many seconds get DIAG=short (default 180; sampling noise)")
   parser.add_argument("--describe", "--description", "--explain", dest="describe", action="store_true",
                       help="print a plain-English description of each column and exit (no job needed; "
-                           "add --diagnose for the DIAG legend)")
+                           "add --diagnose for the DIAG legend, or --dcgm [--ext] for the DCGM catalog)")
   parser.add_argument("-n", "--noheader", dest="header", action="store_false", help="suppress the header/context block")
-  parser.add_argument("--csv", dest="csv", action="store_true", help="machine-readable output (summary or -d view)")
+  parser.add_argument("--csv", dest="csv", action="store_true", help="machine-readable output (summary, -d, or --dcgm view)")
   parser.add_argument("--timeout", dest="timeout", type=float, default=60.0,
                       help="seconds per sacct call (default 60; 0 disables)")
   args = parser.parse_args()
 
+  # --ext/--ts are modifiers of --dcgm only.
+  if (args.ext or args.ts) and not args.dcgm:
+    parser.error("--ext/--ts only apply with --dcgm")
+
   if args.describe:   # static reference; no sacct/Prometheus, no job selection
-    describe(args)
+    if args.dcgm:
+      describe_dcgm(ALL_SPECS if args.ext else DEFAULT_SPECS)
+    else:
+      describe(args)
     sys.exit(0)
 
   # Defaults and validation (mirroring stotal_kempner).
@@ -787,18 +1086,29 @@ if __name__ == "__main__":
   if args.lastn is not None and args.lastn <= 0:
     parser.error("-N/--lastn must be a positive integer")
 
-  # Metric columns: --cpu/--gpu/--cgpu, default --gpu (the GPU view with DCGM).
-  if args.metrics is None:
-    args.metrics = 'gpu'
-
-  # DIAG lives in the --gpu view only (the only one that touches DCGM/Prometheus);
-  # ignore --diagnose elsewhere with a note.
-  if args.metrics != 'gpu' and args.diagnose:
-    print("note: --diagnose applies only to the --gpu view; ignoring", file=sys.stderr)
+  # --dcgm is its own per-GPU view: it overrides --cpu/--gpu/--cgpu and -d, and
+  # never carries DIAG (DIAG stays on the --gpu summary only).
+  if args.dcgm:
+    if args.metrics is not None:
+      print("note: --dcgm overrides --cpu/--gpu/--cgpu", file=sys.stderr)
+    if args.details:
+      print("note: --dcgm is already per-GPU; ignoring -d", file=sys.stderr)
     args.diagnose = False
-
-  # The DCGM columns are shown/fetched only in the --gpu view.
-  args.show_dcgm = (args.metrics == 'gpu')
+    args.metrics = 'gpu'        # GPU-bearing, so the fetch path + GPU-job filter apply
+    args.show_dcgm = True
+    dcgm_specs = ALL_SPECS if args.ext else DEFAULT_SPECS
+  else:
+    # Metric columns: --cpu/--gpu/--cgpu, default --gpu (the GPU view with DCGM).
+    if args.metrics is None:
+      args.metrics = 'gpu'
+    # DIAG lives in the --gpu view only (the only one that touches Prometheus);
+    # ignore --diagnose elsewhere with a note.
+    if args.metrics != 'gpu' and args.diagnose:
+      print("note: --diagnose applies only to the --gpu view; ignoring", file=sys.stderr)
+      args.diagnose = False
+    # The DCGM columns are shown/fetched only in the --gpu view.
+    args.show_dcgm = (args.metrics == 'gpu')
+    dcgm_specs = GPU_SUMMARY_SPECS
 
   if args.workers < 1:
     parser.error("--workers must be a positive integer")
@@ -813,12 +1123,17 @@ if __name__ == "__main__":
 
   data = fetch(jobids, timeout)  # ONE bulk sacct query; no per-job calls
 
-  # Precompute the DCGM metrics for all GPU jobs concurrently (the only network
-  # path). Part of the --gpu view; skipped for the --cpu/--cgpu views, or when
-  # nothing in the selection requested GPUs.
-  dcgm_data = compute_dcgm(jobids, data, timeout, args.workers) if args.show_dcgm else {}
-
-  if args.details:
-    detail(jobids, args, sel_desc, data, dcgm_data)
+  # DCGM is the only network path. --dcgm --ts does its own range queries; every
+  # other DCGM path uses the concurrent window-average fetch. cpu/cgpu skip it.
+  if args.dcgm:
+    if args.ts:
+      dcgm_timeseries(jobids, data, dcgm_specs, args, timeout)
+    else:
+      dcgm_data = compute_dcgm(jobids, data, dcgm_specs, timeout, args.workers)
+      dcgm_report(jobids, args, sel_desc, data, dcgm_data, dcgm_specs)
   else:
-    summarize(jobids, args, sel_desc, data, dcgm_data)
+    dcgm_data = compute_dcgm(jobids, data, dcgm_specs, timeout, args.workers) if args.show_dcgm else {}
+    if args.details:
+      detail(jobids, args, sel_desc, data, dcgm_data)
+    else:
+      summarize(jobids, args, sel_desc, data, dcgm_data)
