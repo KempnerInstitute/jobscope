@@ -180,17 +180,19 @@ affected by it. Pipe the CSV in (without `-n`, so the header is included):
 
 The chart type is auto-detected from the columns; override with `--kind
 auto|bars|heat|hist|line`. Other options: `--metric NAME` (histogram metric / line
-metrics), `--all` (line: every metric), `--marker braille|dot|hd|fhd` (line style;
-braille = thin, the default), `--width`/`--height`, `--max-rows` (heatmap cap),
-`--no-color` (also honors `$NO_COLOR`), `--config` (pull color thresholds from the
-jobstats config). `--help` for the full list.
+metrics), `--all` (line: every metric), `--by metric|gpu` (line faceting),
+`--marker braille|dot|hd|fhd` (line style; braille = thin, the default),
+`--width`/`--height`, `--max-rows` (heatmap cap), `--no-color` (also honors
+`$NO_COLOR`), `--config` (pull color thresholds from the jobstats config).
+`--help` for the full list.
 
-For a **multi-GPU** job, `--dcgm --ts` draws one panel per GPU (each metric a
-consistent color); pass a single `--metric` to get one panel with a line per GPU
-instead. For a **multi-node** job it facets by node (one panel per node, a line
-per GPU, single metric). Narrow large jobs with `--node NODE` (drill into one
-node to see all its metrics) and/or `--gpu N`; these filters also apply to the
-heatmap. Stacked panels are capped (use `--node`/`--gpu` if you hit the cap).
+By default `--dcgm --ts` gives **each metric its own panel and y-axis**, so metrics
+in similar ranges (e.g. OCC% vs SM_ACT%) don't overlap. With multiple GPUs, each
+metric panel draws a line per GPU; `--by gpu` flips to one panel per GPU (all
+metrics sharing an axis). A **multi-node** job facets by node (one panel per node,
+a line per GPU, single metric). Narrow large jobs with `--node NODE` (drill into one
+node) and/or `--gpu N` — these filters also apply to the heatmap — or a single
+`--metric`. Stacked panels are capped (a note tells you when).
 
 **Requirements:** `jobstats_plot` needs Python 3.12 with `plotext` and `rich`:
 

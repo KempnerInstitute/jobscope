@@ -223,11 +223,12 @@ def render_heat(columns, rows, args, Console, Table, Text):
 
 def render_line(columns, rows, args, plt, Console):
   """Time-series line chart over the job's window + a per-metric stats summary.
-  x = minutes since the first sample. Layout scales with the job's shape:
-    single GPU            -> one panel, a line per metric
-    one node, many GPUs   -> facet by GPU (all metrics) | one panel, line per GPU (single --metric)
-    many nodes            -> facet by NODE, a line per GPU, of a single metric
-  Narrow huge jobs with --node NODE / --gpu N."""
+  x = minutes since the first sample. Each metric gets its OWN panel/y-axis by
+  default (--by metric) so metrics in similar ranges don't overlap:
+    single GPU          -> one panel per metric (one line each)
+    one node, many GPUs -> one panel per metric, a line per GPU (--by gpu flips it)
+    many nodes          -> one panel per NODE, a line per GPU, of a single metric
+  A single --metric collapses to one panel. Narrow huge jobs with --node/--gpu."""
   console = Console(no_color=args.no_color)
   mcols = [c for c in metric_cols(columns) if is_pct(c) or c in ("POWER_W",)]
   if args.all:
@@ -275,64 +276,70 @@ def render_line(columns, rows, args, plt, Console):
 
   def cap(items, what):
     if len(items) > PANEL_CAP:
-      print("note: showing %d of %d %s; narrow with --node/--gpu" % (PANEL_CAP, len(items), what),
+      print("note: showing %d of %d %s; narrow with --metric/--node/--gpu" % (PANEL_CAP, len(items), what),
             file=sys.stderr)
     return items[:PANEL_CAP]
+
+  def panel(specs):
+    """specs: list of (label, color, samples, metric). Draw each as a line."""
+    for lbl, col, samp, m in specs:
+      xs, ys = series(samp, m)
+      if ys:
+        plt.plot(xs, ys, label=lbl, **pkw(col))
 
   W = args.width or shutil.get_terminal_size((100, 30)).columns
   plt.clear_figure()
   multinode = len(nodes) > 1
-  by_gpu_color = multinode or (len(keys) > 1 and len(metrics) == 1)  # lines are GPUs -> color by GPU
+  K, M = len(keys), len(metrics)
+  lines_are_gpus = False     # whether each line is a GPU (color/label by GPU) vs a metric
   stat_metrics = metrics
 
   if multinode:
     # MULTI-NODE: one panel per node, a line per GPU, of a single metric
-    m = metrics[0]
-    if len(metrics) > 1:
+    m = metrics[0]; stat_metrics = [m]; lines_are_gpus = True
+    if M > 1:
       print("note: multi-node view charts one metric (%s); use --node NODE to see all metrics for a node"
             % m, file=sys.stderr)
-    stat_metrics = [m]
     pn = cap(nodes, "nodes")
     plt.subplots(len(pn), 1)
     for i, node in enumerate(pn):
       plt.subplot(i + 1, 1); plt.theme("clear"); plt.plotsize(W, args.height or 7)
-      for g in gpu_ids:
-        if (node, g) not in gpus:
-          continue
-        xs, ys = series(gpus[(node, g)], m)
-        if ys:
-          plt.plot(xs, ys, label="gpu%s" % g, **pkw(gcolor[g]))
+      panel([("gpu%s" % g, gcolor[g], gpus[(node, g)], m) for g in gpu_ids if (node, g) in gpus])
       plt.title("%s  %s" % (node, m)); plt.xlabel("minutes since start"); plt.ylabel(m)
     plt.show()
-  elif len(keys) > 1 and len(metrics) > 1:
-    # ONE NODE, MANY GPUs, several metrics: facet by GPU (all metrics per panel)
+  elif M == 1:
+    # one metric: one panel, a line per GPU (single line if just one GPU)
+    m = metrics[0]; stat_metrics = [m]; lines_are_gpus = K > 1
+    plt.theme("clear"); plt.plotsize(W, args.height or 18)
+    if K > 1:
+      panel([("gpu%s" % g, gcolor[g], gpus[(n, g)], m) for n, g in keys])
+      plt.title("%s  --  %s" % (m, base))
+    else:
+      panel([(m, mcolor[m], gpus[keys[0]], m)])
+      plt.title(base)
+    plt.ylabel(m); plt.xlabel("minutes since start")
+    plt.show()
+  elif args.by == "gpu":
+    # facet by GPU: one panel per GPU, all metrics in it (metrics share the panel axis)
     pk = cap(keys, "GPUs")
     plt.subplots(len(pk), 1)
     for i, key in enumerate(pk):
       plt.subplot(i + 1, 1); plt.theme("clear"); plt.plotsize(W, args.height or 8)
-      for m in metrics:
-        xs, ys = series(gpus[key], m)
-        if ys:
-          plt.plot(xs, ys, label=m, **pkw(mcolor[m]))
-      plt.title("%s gpu%s" % key); plt.xlabel("minutes since start")
+      panel([(m, mcolor[m], gpus[key], m) for m in metrics])
+      plt.title("%s gpu%s" % key); plt.xlabel("minutes since start"); plt.ylabel("value")
     plt.show()
   else:
-    # ONE NODE: single GPU (line per metric) or many GPUs + single metric (line per GPU)
-    plt.theme("clear"); plt.plotsize(W, args.height or 18)
-    if len(keys) > 1:                          # many GPUs, one metric -> line per GPU
-      m = metrics[0]; stat_metrics = [m]
-      for key in keys:
-        xs, ys = series(gpus[key], m)
-        if ys:
-          plt.plot(xs, ys, label="gpu%s" % key[1], **pkw(gcolor[key[1]]))
-      plt.title("%s  --  %s" % (m, base)); plt.ylabel(m)
-    else:                                      # single GPU -> line per metric
-      for m in metrics:
-        xs, ys = series(gpus[keys[0]], m)
-        if ys:
-          plt.plot(xs, ys, label=m, **pkw(mcolor[m]))
-      plt.title(base); plt.ylabel("value")
-    plt.xlabel("minutes since start")
+    # DEFAULT (--by metric): one panel per metric (own y-axis), a line per GPU within
+    lines_are_gpus = K > 1
+    pm = cap(metrics, "metrics")
+    plt.subplots(len(pm), 1)
+    for i, m in enumerate(pm):
+      plt.subplot(i + 1, 1); plt.theme("clear"); plt.plotsize(W, args.height or 8)
+      if K > 1:
+        panel([("gpu%s" % g, gcolor[g], gpus[(n, g)], m) for n, g in keys])
+      else:
+        panel([(m, mcolor[m], gpus[keys[0]], m)])
+      plt.title(m); plt.xlabel("minutes since start"); plt.ylabel(m)
     plt.show()
 
   # per-(node,GPU) stats for the charted metric(s) -- the numbers the chart doesn't label, tinted
@@ -345,7 +352,7 @@ def render_line(columns, rows, args, plt, Console):
         continue
       line = "  %s%-9s min %6.1f   mean %6.1f   max %6.1f   last %6.1f" % (
           tag, m, min(ys), sum(ys) / len(ys), max(ys), ys[-1])
-      col = gcolor[key[1]] if by_gpu_color else mcolor[m]
+      col = gcolor[key[1]] if lines_are_gpus else mcolor[m]
       console.print(line, style="color(%d)" % col, markup=False, highlight=False)
 
 
@@ -366,6 +373,9 @@ def main():
   ap.add_argument("--all", action="store_true", help="line: draw every metric, not just the default set")
   ap.add_argument("--marker", choices=["braille", "dot", "hd", "fhd"], default="braille",
                   help="line marker (default braille = thin lines; hd = thick blocks; dot = sparse)")
+  ap.add_argument("--by", choices=["metric", "gpu"], default="metric",
+                  help="line: facet by 'metric' (default; one panel per metric, own y-axis) or "
+                       "'gpu' (one panel per GPU, all metrics sharing the axis)")
   ap.add_argument("--title", help="override the chart title")
   ap.add_argument("--width", type=int, help="plot width in chars (plotext charts)")
   ap.add_argument("--height", type=int, help="plot height in chars (plotext charts)")
