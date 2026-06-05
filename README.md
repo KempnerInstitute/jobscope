@@ -12,11 +12,11 @@ kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot # Plot the JOBID GPU me
 
 Per-job DCGM time series:
 
-![per-job DCGM time series](docs/timeseries.svg)
+<img src="docs/timeseries.svg" alt="per-job DCGM time series" width="850">
 
 Aggregated utilization across jobs:
 
-![aggregated mean-utilization bars](docs/aggregated.svg)
+<img src="docs/aggregated.svg" alt="aggregated mean-utilization bars" width="850">
 
 Regenerate these with `bash setup/make_screenshots.sh`.
 
@@ -92,4 +92,3 @@ For plot dependencies, chart kinds, faceting, filters, and color options, see
 - [FASRC jobstats documentation](https://docs.rc.fas.harvard.edu/kb/jobstats/)
 - [Princeton jobstats](https://princetonuniversity.github.io/jobstats/)
 - For live monitoring, use [KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse)
-
