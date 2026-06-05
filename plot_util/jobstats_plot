@@ -6,19 +6,19 @@
 # (The block above lets `uv run jobstats_plot` auto-provision Python 3.12 +
 # plotext + rich. It is a plain comment to a normal interpreter.)
 #
-# jobstats_plot - render jobstats_history CSV as terminal graphs.
+# jobstats_plot - render kempner_jobstats CSV as terminal graphs.
 #
-# Reads the CSV that `jobstats_history` already emits and draws it: utilization
+# Reads the CSV that `kempner_jobstats` already emits and draws it: utilization
 # bar gauges, a distribution histogram, a colored heatmap table, or a time-series
-# line chart. This keeps plotting OUT of the core tool -- jobstats_history stays
+# line chart. This keeps plotting OUT of the core tool -- kempner_jobstats stays
 # dependency-free and fast on its own interpreter; all the plotting deps (plotext
 # + rich, Python 3.12) live here and are only paid for when you actually plot.
 #
 # The view is auto-detected from the CSV columns; override with --kind.
-#   jobstats_history --gpu  --csv  -D 7      | jobstats_plot     # histogram (many jobs)
-#   jobstats_history --gpu  --csv  JOBID     | jobstats_plot     # bar gauges (one job)
-#   jobstats_history --dcgm --csv  JOBID...  | jobstats_plot     # heatmap (jobs/GPUs x metrics)
-#   jobstats_history --dcgm --ts --csv JOBID | jobstats_plot     # time-series line + per-metric stats
+#   kempner_jobstats --gpu  --csv  -D 7      | jobstats_plot     # histogram (many jobs)
+#   kempner_jobstats --gpu  --csv  JOBID     | jobstats_plot     # bar gauges (one job)
+#   kempner_jobstats --dcgm --csv  JOBID...  | jobstats_plot     # heatmap (jobs/GPUs x metrics)
+#   kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot     # time-series line + per-metric stats
 #   jobstats_plot -f saved.csv --kind heat                       # from a saved file
 #
 # Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner Institute, Harvard
@@ -89,7 +89,7 @@ def load_libs():
   except ImportError as e:
     die("jobstats_plot needs plotext and rich (missing: %s).\n"
         "       Install: /usr/bin/python3.12 -m pip install --user plotext rich\n"
-        "       (jobstats_history itself needs none of this -- only plotting does.)"
+        "       (kempner_jobstats itself needs none of this -- only plotting does.)"
         % getattr(e, "name", e))
 
 
@@ -112,7 +112,7 @@ def load_config_red():
 
 # --- CSV parsing -------------------------------------------------------------
 def parse_csv(fobj):
-  """Return (columns, rows) from a jobstats_history CSV. Skips the leading context
+  """Return (columns, rows) from a kempner_jobstats CSV. Skips the leading context
   rows (User,.. / Select,..) up to the header row (first cell 'JOBID'), and drops
   the trailing 'Mean' summary row. rows are dicts keyed by column."""
   columns, rows = None, []
@@ -127,7 +127,7 @@ def parse_csv(fobj):
       continue
     rows.append({columns[i]: (rec[i] if i < len(rec) else "") for i in range(len(columns))})
   if columns is None:
-    die("no 'JOBID' header row found -- is this jobstats_history --csv output? "
+    die("no 'JOBID' header row found -- is this kempner_jobstats --csv output? "
         "(pipe without -n so the header is included)")
   return columns, rows
 
@@ -398,8 +398,8 @@ def render_line(columns, rows, args, plt, Console):
 def main():
   ap = argparse.ArgumentParser(
       formatter_class=argparse.RawDescriptionHelpFormatter,
-      description="Render jobstats_history --csv output as a terminal graph.\n"
-                  "Pipe it in:  jobstats_history <view> --csv | jobstats_plot\n"
+      description="Render kempner_jobstats --csv output as a terminal graph.\n"
+                  "Pipe it in:  kempner_jobstats <view> --csv | jobstats_plot\n"
                   "Kinds: bars (gauges), hist (distribution), heat (jobs x metrics),\n"
                   "line (--dcgm --ts time series). 'auto' picks from the CSV columns.")
   ap.add_argument("file", nargs="?", help="CSV file (default: stdin)")
@@ -439,7 +439,7 @@ def main():
       die("cannot open %s: %s" % (path, e))
   else:
     if sys.stdin.isatty():
-      die("no input -- pipe jobstats_history --csv in, or pass a CSV file.")
+      die("no input -- pipe kempner_jobstats --csv in, or pass a CSV file.")
     fobj = sys.stdin
 
   if args.config:
@@ -474,7 +474,7 @@ def main():
 
   # validate explicit kinds against the CSV shape
   if kind == "line" and not ("EPOCH" in columns and "TIME" in columns):
-    die("--kind line needs a time series: jobstats_history --dcgm --ts --csv")
+    die("--kind line needs a time series: kempner_jobstats --dcgm --ts --csv")
   if kind == "hist" and len(rows) == 1:
     print("note: histogram needs multiple jobs; showing bars instead", file=sys.stderr)
     kind = "bars"
