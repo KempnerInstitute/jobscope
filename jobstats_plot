@@ -32,9 +32,10 @@ RED = {"GPU%": 25, "DUTY%": 25, "GMEM%": 20, "CPU%": 25, "MEM%": 25}
 BLOCKS = "▁▂▃▄▅▆▇█"       # sparkline ramp
 HEAT_MAX_ROWS = 40
 
-# Distinct line colors for the --ts chart (plotext names + 256-color codes), one
-# per metric so each metric reads as its own color.
-PALETTE = ["red", "green", "blue", "orange", "magenta", "cyan", 226, 129, 244, 39]
+# Distinct 256-color codes for the --ts chart, one per metric so each metric reads
+# as its own color. Integer codes (not names) so the plotext line and the
+# rich-tinted sparkline summary render the exact same color.
+PALETTE = [196, 46, 33, 208, 201, 51, 226, 129, 244, 39]
 
 # Time-series line chart: which metrics to draw by default (if present), unless
 # --metric/--all widen it. Kept small so the chart stays readable.
@@ -279,7 +280,7 @@ def render_line(columns, rows, args, plt, Console):
   plt.xlabel("minutes since start"); plt.ylabel("value")
   plt.show()
 
-  # compact sparkline summary (per GPU, per metric)
+  # compact sparkline summary (per GPU, per metric), tinted to match the chart line
   print()
   for (node, gpu), samples in sorted(gpus.items()):
     samples.sort(key=lambda x: x[0])
@@ -288,7 +289,8 @@ def render_line(columns, rows, args, plt, Console):
       ys = [to_float(r.get(m)) for _, r in samples]
       if any(y is not None for y in ys):
         nums = [y for y in ys if y is not None]
-        print("  %s%-9s %s  (%.0f-%.0f)" % (tag, m, spark(ys), min(nums), max(nums)))
+        line = "  %s%-9s %s  (%.0f-%.0f)" % (tag, m, spark(ys), min(nums), max(nums))
+        console.print(line, style="color(%d)" % colors[m], markup=False, highlight=False)
 
 
 def main():
