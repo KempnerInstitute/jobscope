@@ -16,7 +16,7 @@
 #
 # Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner Institute, Harvard
 
-import os, sys, csv, argparse
+import os, sys, csv, shutil, argparse
 
 # Columns that identify a row rather than carry a plottable metric.
 ID_COLS = {"JOBID", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
@@ -222,7 +222,9 @@ def render_heat(columns, rows, args, Console, Table, Text):
 
 def render_line(columns, rows, args, plt, Console):
   """Time-series line chart over the job's window + a per-metric stats summary
-  (min/mean/max/last). x = minutes since the first sample; one line per (GPU, metric)."""
+  (min/mean/max/last). x = minutes since the first sample. Single GPU: one panel,
+  a line per metric. Multi-GPU: one panel PER GPU (faceted), each showing all the
+  metrics -- unless a single --metric is given, then one panel with a line per GPU."""
   console = Console(no_color=args.no_color)
   mcols = [c for c in metric_cols(columns) if is_pct(c) or c in ("POWER_W",)]
   if args.all:
@@ -231,57 +233,87 @@ def render_line(columns, rows, args, plt, Console):
     metrics = [m for m in args.metric.split(",") if m in columns] or die("none of --metric in CSV")
   else:
     metrics = [m for m in TS_DEFAULT if m in columns] or mcols[:4]
-  # group samples by GPU, preserving time order
+
+  # group samples by GPU, time-ordered, against a common t0
+  t0 = min((to_float(r.get("EPOCH")) for r in rows if to_float(r.get("EPOCH")) is not None), default=None)
   gpus = {}
-  t0 = None
   for r in rows:
     ep = to_float(r.get("EPOCH"))
     if ep is None:
       continue
-    t0 = ep if t0 is None else min(t0, ep)
-  for r in rows:
-    ep = to_float(r.get("EPOCH"))
-    if ep is None:
-      continue
-    key = (r.get("NODE", "?"), r.get("GPU", "?"))
-    gpus.setdefault(key, []).append((ep, r))
-  if not gpus:
+    gpus.setdefault((r.get("NODE", "?"), r.get("GPU", "?")), []).append((ep, r))
+  if not gpus or t0 is None:
     die("no timestamped samples (need --dcgm --ts --csv output)")
+  for s in gpus.values():
+    s.sort(key=lambda x: x[0])
+  keys = sorted(gpus)
   jid = rows[0].get("JOBID", "?")
   running = any(r.get("STATE", "") == "RUNNING" for r in rows)
+  title = args.title or ("job %s  DCGM over time%s" % (jid, "  (running)" if running else ""))
+  mcolor = {m: PALETTE[i % len(PALETTE)] for i, m in enumerate(metrics)}
+  per_gpu_color = len(keys) > 1 and len(metrics) == 1   # one metric -> color/label by GPU
 
+  def ckw(c):
+    return {} if args.no_color else {"color": c}
+
+  def series(samples, m):
+    """(xs minutes, ys) for metric m, dropping missing samples; (None, None) if empty."""
+    xs, ys = [], []
+    for ep, r in samples:
+      v = to_float(r.get(m))
+      if v is not None:
+        xs.append((ep - t0) / 60.0); ys.append(v)
+    return (xs, ys) if ys else (None, None)
+
+  W = args.width or shutil.get_terminal_size((100, 30)).columns
   plt.clear_figure()
-  plt.theme("clear")
-  if args.width and args.height:
-    plt.plotsize(args.width, args.height)
-  colors = {m: PALETTE[i % len(PALETTE)] for i, m in enumerate(metrics)}
-  for (node, gpu), samples in sorted(gpus.items()):
-    samples.sort(key=lambda x: x[0])
-    xs = [(ep - t0) / 60.0 for ep, _ in samples]
-    for m in metrics:
-      ys = [to_float(r.get(m)) for _, r in samples]
-      if not any(y is not None for y in ys):
-        continue
-      ys = [y if y is not None else 0.0 for y in ys]
-      lbl = ("%s gpu%s" % (m, gpu)) if len(gpus) > 1 else m
-      kw = {} if args.no_color else {"color": colors[m]}
-      plt.plot(xs, ys, label=lbl, **kw)
-  plt.title(args.title or ("job %s  DCGM over time%s" % (jid, "  (running)" if running else "")))
-  plt.xlabel("minutes since start"); plt.ylabel("value")
-  plt.show()
 
-  # per-metric stats the shared-axis chart doesn't label (range/mean/last), tinted to match
+  if len(keys) > 1 and len(metrics) > 1:
+    # facet: one stacked panel per GPU; metrics keep a consistent color across panels
+    ph = args.height or 8
+    plt.subplots(len(keys), 1)
+    for i, key in enumerate(keys):
+      plt.subplot(i + 1, 1)
+      plt.theme("clear")
+      plt.plotsize(W, ph)
+      for m in metrics:
+        xs, ys = series(gpus[key], m)
+        if ys:
+          plt.plot(xs, ys, label=m, **ckw(mcolor[m]))
+      plt.title("%s gpu%s" % key)
+      plt.xlabel("minutes since start")
+    plt.show()
+  else:
+    plt.theme("clear")
+    plt.plotsize(W, args.height or 18)
+    if per_gpu_color:                          # multi-GPU, one metric: a line per GPU
+      m = metrics[0]
+      for i, key in enumerate(keys):
+        xs, ys = series(gpus[key], m)
+        if ys:
+          plt.plot(xs, ys, label="%s gpu%s" % key, **ckw(PALETTE[i % len(PALETTE)]))
+      title = "%s  --  %s" % (m, title); plt.ylabel(m)
+    else:                                      # single GPU: a line per metric
+      for m in metrics:
+        xs, ys = series(gpus[keys[0]], m)
+        if ys:
+          plt.plot(xs, ys, label=m, **ckw(mcolor[m]))
+      plt.ylabel("value")
+    plt.title(title); plt.xlabel("minutes since start")
+    plt.show()
+
+  # per-metric stats per GPU (the numbers the shared-axis chart doesn't label), tinted
   print()
-  for (node, gpu), samples in sorted(gpus.items()):
-    samples.sort(key=lambda x: x[0])
-    tag = ("%s gpu%s  " % (node, gpu)) if len(gpus) > 1 else ""
+  for i, key in enumerate(keys):
+    tag = ("%s gpu%s  " % key) if len(keys) > 1 else ""
     for m in metrics:
-      nums = [v for v in (to_float(r.get(m)) for _, r in samples) if v is not None]
-      if not nums:
+      _, ys = series(gpus[key], m)
+      if not ys:
         continue
       line = "  %s%-9s min %6.1f   mean %6.1f   max %6.1f   last %6.1f" % (
-          tag, m, min(nums), sum(nums) / len(nums), max(nums), nums[-1])
-      console.print(line, style="color(%d)" % colors[m], markup=False, highlight=False)
+          tag, m, min(ys), sum(ys) / len(ys), max(ys), ys[-1])
+      col = PALETTE[i % len(PALETTE)] if per_gpu_color else mcolor[m]
+      console.print(line, style="color(%d)" % col, markup=False, highlight=False)
 
 
 def main():

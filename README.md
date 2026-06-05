@@ -184,6 +184,10 @@ metrics), `--all` (line: every metric), `--width`/`--height`, `--max-rows` (heat
 cap), `--no-color` (also honors `$NO_COLOR`), `--config` (pull color thresholds from
 the jobstats config). `--help` for the full list.
 
+For a **multi-GPU** job, `--dcgm --ts` draws one panel per GPU (each metric a
+consistent color); pass a single `--metric` to get one panel with a line per GPU
+instead.
+
 **Requirements:** `jobstats_plot` needs Python 3.12 with `plotext` and `rich`:
 
 ```bash
