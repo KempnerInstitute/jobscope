@@ -1,26 +1,12 @@
 # kempner-jobstats
 
-**Synopsis:** `kempner_jobstats` is a read-only Slurm job-efficiency scanner for
-completed Kempner jobs. It reads existing jobstats data from `sacct`, adds DCGM
-GPU metrics from Prometheus when available, and emits concise tables or CSV for
-`jobstats_plot`.
+`kempner_jobstats` is a read-only Slurm job-efficiency scanner for completed Kempner jobs. It reads existing jobstats data from `sacct`, adds DCGM GPU metrics from Prometheus when available, and emits concise tables or CSV for `jobstats_plot`.
 
 Example Usage:
-
-Scan recent GPU jobs:
-
 ```bash
-kempner_jobstats -D 3  # last 3 days of DCGM GPU job metrics
+kempner_jobstats -D 3  # last 3 days of GPU job metrics
+kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot # Plot the JOBID GPU metrics
 ```
-
-Plot a particular job's DCGM metrics:
-
-```bash
-kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot --compact
-```
-
-For live monitoring, use
-[KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse).
 
 ## Screenshots
 
@@ -105,3 +91,5 @@ For plot dependencies, chart kinds, faceting, filters, and color options, see
 
 - [FASRC jobstats documentation](https://docs.rc.fas.harvard.edu/kb/jobstats/)
 - [Princeton jobstats](https://princetonuniversity.github.io/jobstats/)
+- For live monitoring, use [KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse)
+
