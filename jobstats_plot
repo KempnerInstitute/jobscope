@@ -30,6 +30,7 @@ DEFAULT_RED = 15          # DCGM utilization %: idle/underfed band (matches DIAG
 RED = {"GPU%": 25, "DUTY%": 25, "GMEM%": 20, "CPU%": 25, "MEM%": 25}
 
 HEAT_MAX_ROWS = 40
+PANEL_CAP = 12            # max stacked --ts panels before capping (narrow with --node/--gpu)
 
 # Distinct 256-color codes for the --ts chart, one per metric so each metric reads
 # as its own color. Integer codes (not names) so the plotext line and the
@@ -221,10 +222,12 @@ def render_heat(columns, rows, args, Console, Table, Text):
 
 
 def render_line(columns, rows, args, plt, Console):
-  """Time-series line chart over the job's window + a per-metric stats summary
-  (min/mean/max/last). x = minutes since the first sample. Single GPU: one panel,
-  a line per metric. Multi-GPU: one panel PER GPU (faceted), each showing all the
-  metrics -- unless a single --metric is given, then one panel with a line per GPU."""
+  """Time-series line chart over the job's window + a per-metric stats summary.
+  x = minutes since the first sample. Layout scales with the job's shape:
+    single GPU            -> one panel, a line per metric
+    one node, many GPUs   -> facet by GPU (all metrics) | one panel, line per GPU (single --metric)
+    many nodes            -> facet by NODE, a line per GPU, of a single metric
+  Narrow huge jobs with --node NODE / --gpu N."""
   console = Console(no_color=args.no_color)
   mcols = [c for c in metric_cols(columns) if is_pct(c) or c in ("POWER_W",)]
   if args.all:
@@ -234,7 +237,7 @@ def render_line(columns, rows, args, plt, Console):
   else:
     metrics = [m for m in TS_DEFAULT if m in columns] or mcols[:4]
 
-  # group samples by GPU, time-ordered, against a common t0
+  # group samples by (node, gpu), time-ordered, against a common t0
   t0 = min((to_float(r.get("EPOCH")) for r in rows if to_float(r.get("EPOCH")) is not None), default=None)
   gpus = {}
   for r in rows:
@@ -247,11 +250,13 @@ def render_line(columns, rows, args, plt, Console):
   for s in gpus.values():
     s.sort(key=lambda x: x[0])
   keys = sorted(gpus)
+  nodes = sorted({n for n, _ in keys})
   jid = rows[0].get("JOBID", "?")
   running = any(r.get("STATE", "") == "RUNNING" for r in rows)
-  title = args.title or ("job %s  DCGM over time%s" % (jid, "  (running)" if running else ""))
+  base = args.title or ("job %s  DCGM over time%s" % (jid, "  (running)" if running else ""))
   mcolor = {m: PALETTE[i % len(PALETTE)] for i, m in enumerate(metrics)}
-  per_gpu_color = len(keys) > 1 and len(metrics) == 1   # one metric -> color/label by GPU
+  gpu_ids = sorted({g for _, g in keys}, key=lambda g: int(g) if str(g).isdigit() else g)
+  gcolor = {g: PALETTE[i % len(PALETTE)] for i, g in enumerate(gpu_ids)}  # GPU color, stable across panels
 
   def ckw(c):
     return {} if args.no_color else {"color": c}
@@ -265,54 +270,79 @@ def render_line(columns, rows, args, plt, Console):
         xs.append((ep - t0) / 60.0); ys.append(v)
     return (xs, ys) if ys else (None, None)
 
+  def cap(items, what):
+    if len(items) > PANEL_CAP:
+      print("note: showing %d of %d %s; narrow with --node/--gpu" % (PANEL_CAP, len(items), what),
+            file=sys.stderr)
+    return items[:PANEL_CAP]
+
   W = args.width or shutil.get_terminal_size((100, 30)).columns
   plt.clear_figure()
+  multinode = len(nodes) > 1
+  by_gpu_color = multinode or (len(keys) > 1 and len(metrics) == 1)  # lines are GPUs -> color by GPU
+  stat_metrics = metrics
 
-  if len(keys) > 1 and len(metrics) > 1:
-    # facet: one stacked panel per GPU; metrics keep a consistent color across panels
-    ph = args.height or 8
-    plt.subplots(len(keys), 1)
-    for i, key in enumerate(keys):
-      plt.subplot(i + 1, 1)
-      plt.theme("clear")
-      plt.plotsize(W, ph)
+  if multinode:
+    # MULTI-NODE: one panel per node, a line per GPU, of a single metric
+    m = metrics[0]
+    if len(metrics) > 1:
+      print("note: multi-node view charts one metric (%s); use --node NODE to see all metrics for a node"
+            % m, file=sys.stderr)
+    stat_metrics = [m]
+    pn = cap(nodes, "nodes")
+    plt.subplots(len(pn), 1)
+    for i, node in enumerate(pn):
+      plt.subplot(i + 1, 1); plt.theme("clear"); plt.plotsize(W, args.height or 7)
+      for g in gpu_ids:
+        if (node, g) not in gpus:
+          continue
+        xs, ys = series(gpus[(node, g)], m)
+        if ys:
+          plt.plot(xs, ys, label="gpu%s" % g, **ckw(gcolor[g]))
+      plt.title("%s  %s" % (node, m)); plt.xlabel("minutes since start"); plt.ylabel(m)
+    plt.show()
+  elif len(keys) > 1 and len(metrics) > 1:
+    # ONE NODE, MANY GPUs, several metrics: facet by GPU (all metrics per panel)
+    pk = cap(keys, "GPUs")
+    plt.subplots(len(pk), 1)
+    for i, key in enumerate(pk):
+      plt.subplot(i + 1, 1); plt.theme("clear"); plt.plotsize(W, args.height or 8)
       for m in metrics:
         xs, ys = series(gpus[key], m)
         if ys:
           plt.plot(xs, ys, label=m, **ckw(mcolor[m]))
-      plt.title("%s gpu%s" % key)
-      plt.xlabel("minutes since start")
+      plt.title("%s gpu%s" % key); plt.xlabel("minutes since start")
     plt.show()
   else:
-    plt.theme("clear")
-    plt.plotsize(W, args.height or 18)
-    if per_gpu_color:                          # multi-GPU, one metric: a line per GPU
-      m = metrics[0]
-      for i, key in enumerate(keys):
+    # ONE NODE: single GPU (line per metric) or many GPUs + single metric (line per GPU)
+    plt.theme("clear"); plt.plotsize(W, args.height or 18)
+    if len(keys) > 1:                          # many GPUs, one metric -> line per GPU
+      m = metrics[0]; stat_metrics = [m]
+      for key in keys:
         xs, ys = series(gpus[key], m)
         if ys:
-          plt.plot(xs, ys, label="%s gpu%s" % key, **ckw(PALETTE[i % len(PALETTE)]))
-      title = "%s  --  %s" % (m, title); plt.ylabel(m)
-    else:                                      # single GPU: a line per metric
+          plt.plot(xs, ys, label="gpu%s" % key[1], **ckw(gcolor[key[1]]))
+      plt.title("%s  --  %s" % (m, base)); plt.ylabel(m)
+    else:                                      # single GPU -> line per metric
       for m in metrics:
         xs, ys = series(gpus[keys[0]], m)
         if ys:
           plt.plot(xs, ys, label=m, **ckw(mcolor[m]))
-      plt.ylabel("value")
-    plt.title(title); plt.xlabel("minutes since start")
+      plt.title(base); plt.ylabel("value")
+    plt.xlabel("minutes since start")
     plt.show()
 
-  # per-metric stats per GPU (the numbers the shared-axis chart doesn't label), tinted
+  # per-(node,GPU) stats for the charted metric(s) -- the numbers the chart doesn't label, tinted
   print()
-  for i, key in enumerate(keys):
+  for key in keys:
     tag = ("%s gpu%s  " % key) if len(keys) > 1 else ""
-    for m in metrics:
+    for m in stat_metrics:
       _, ys = series(gpus[key], m)
       if not ys:
         continue
       line = "  %s%-9s min %6.1f   mean %6.1f   max %6.1f   last %6.1f" % (
           tag, m, min(ys), sum(ys) / len(ys), max(ys), ys[-1])
-      col = PALETTE[i % len(PALETTE)] if per_gpu_color else mcolor[m]
+      col = gcolor[key[1]] if by_gpu_color else mcolor[m]
       console.print(line, style="color(%d)" % col, markup=False, highlight=False)
 
 
@@ -328,6 +358,8 @@ def main():
   ap.add_argument("--kind", choices=["auto", "bars", "heat", "hist", "line"], default="auto",
                   help="chart type (default: auto-detect from the CSV columns)")
   ap.add_argument("--metric", help="metric column for hist (one) or line (comma-separated)")
+  ap.add_argument("--node", help="plot only this node (where the CSV has a NODE column)")
+  ap.add_argument("--gpu", help="plot only this GPU index (where the CSV has a GPU column)")
   ap.add_argument("--all", action="store_true", help="line: draw every metric, not just the default set")
   ap.add_argument("--title", help="override the chart title")
   ap.add_argument("--width", type=int, help="plot width in chars (plotext charts)")
@@ -358,6 +390,24 @@ def main():
   columns, rows = parse_csv(fobj)
   if not rows:
     die("no data rows in the CSV (empty selection?).")
+
+  # optional --node / --gpu narrowing (where the CSV carries those columns)
+  if args.node is not None:
+    if "NODE" not in columns:
+      print("note: --node ignored (no NODE column in this CSV)", file=sys.stderr)
+    else:
+      avail = sorted({r.get("NODE") for r in rows if r.get("NODE")})
+      rows = [r for r in rows if r.get("NODE") == args.node]
+      if not rows:
+        die("no rows for node %r. Available: %s" % (args.node, ", ".join(avail)))
+  if args.gpu is not None and rows:
+    if "GPU" not in columns:
+      print("note: --gpu ignored (no GPU column in this CSV)", file=sys.stderr)
+    else:
+      avail = sorted({str(r.get("GPU")) for r in rows if r.get("GPU") not in (None, "")})
+      rows = [r for r in rows if str(r.get("GPU")) == str(args.gpu)]
+      if not rows:
+        die("no rows for GPU %r. Available: %s" % (args.gpu, ", ".join(avail)))
 
   kind = args.kind
   if kind == "auto":

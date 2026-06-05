@@ -186,7 +186,10 @@ the jobstats config). `--help` for the full list.
 
 For a **multi-GPU** job, `--dcgm --ts` draws one panel per GPU (each metric a
 consistent color); pass a single `--metric` to get one panel with a line per GPU
-instead.
+instead. For a **multi-node** job it facets by node (one panel per node, a line
+per GPU, single metric). Narrow large jobs with `--node NODE` (drill into one
+node to see all its metrics) and/or `--gpu N`; these filters also apply to the
+heatmap. Stacked panels are capped (use `--node`/`--gpu` if you hit the cap).
 
 **Requirements:** `jobstats_plot` needs Python 3.12 with `plotext` and `rich`:
 
