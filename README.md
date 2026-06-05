@@ -6,9 +6,7 @@ Two command-line tools for reviewing Slurm job efficiency after a job finishes.
 - `jobstats_dcgm`: inspect detailed GPU metrics for specific job IDs.
 
 Both tools use the same jobstats data sources, so their numbers should line up
-with `jobstats`.
-
-These are for finished jobs. For live monitoring, use
+with `jobstats`. These are for finished jobs. For live monitoring, use
 [KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse).
 
 ## Quick Start
