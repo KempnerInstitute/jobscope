@@ -39,7 +39,7 @@ Add a simple advisory label:
 | See recent GPU jobs | `./jobstats_history --gpu -D 5` |
 | Add real GPU activity metrics | `./jobstats_history --gpu --dcgm -D 5` |
 | Grade GPU jobs with a `DIAG` tag | `./jobstats_history --gpu --diagnose -D 5` |
-| Inspect one job per GPU | `./jobstats_dcgm JOBID` |
+| Inspect one job per GPU | `./jobstats_dcgm --all JOBID` |
 | Export raw GPU time series | `./jobstats_dcgm --ts JOBID > job.csv` |
 
 ## Reading GPU Metrics
