@@ -22,7 +22,7 @@ This shows GPU jobs from the last 5 days and adds DCGM utilization columns.
 Then inspect one job in detail:
 
 ```bash
-./jobstats_dcgm 17487044
+./jobstats_dcgm --all 17487044
 ```
 
 Add a simple advisory label:
@@ -122,10 +122,9 @@ time-averaged DCGM metrics per GPU.
 Common commands:
 
 ```bash
-./jobstats_dcgm JOBID                 # default GPU metrics
+./jobstats_dcgm --all JOBID           # all available GPU metrics
 ./jobstats_dcgm JOBID1 JOBID2         # several jobs
 ./jobstats_dcgm --diagnose JOBID      # add DIAG labels
-./jobstats_dcgm --all JOBID           # all available metrics
 ./jobstats_dcgm --csv JOBID > out.csv # one row per job/GPU
 ./jobstats_dcgm --ts JOBID > ts.csv   # raw per-scrape time series
 ./jobstats_dcgm --describe --all      # explain all metrics
