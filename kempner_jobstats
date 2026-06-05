@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# jobstats_history - compact per-job utilization summary (CPU%/MEM%/GPU%/GMEM%),
+# kempner_jobstats - compact per-job utilization summary (CPU%/MEM%/GPU%/GMEM%),
 # same table as jobstats_summary but computed in BULK from each job's sacct
 # AdminComment blob (the data jobstats itself stores) -- ONE sacct query, no
 # per-job `jobstats` calls and no job-count cap. For completed jobs the metrics
@@ -583,7 +583,7 @@ DESCRIPTIONS = [
 def describe(args):
   """Print a plain-English description of each column and exit (no job needed)."""
   import textwrap
-  print("jobstats_history columns. CPU/MEM/GPU/GMEM come from the sacct blob (no")
+  print("kempner_jobstats columns. CPU/MEM/GPU/GMEM come from the sacct blob (no")
   print("network); the DCGM columns (shown by --gpu) and DIAG (--gpu --diagnose) are")
   print("pulled from Prometheus. For the full per-GPU DCGM catalog, see")
   print("`--dcgm --describe` (add --ext for all 28 metrics).\n")
@@ -983,7 +983,7 @@ def dcgm_timeseries(jobids, data, specs, args, timeout):
 if __name__ == "__main__":
   desc = (
   """
-  jobstats_history  (companion to stotal_kempner / seff_history)
+  kempner_jobstats  (companion to stotal_kempner / seff_history)
   -----------------
 
   Compact per-job utilization summary (CPU%/MEM%/GPU%/GMEM%), computed in BULK
