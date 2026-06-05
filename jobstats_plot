@@ -258,8 +258,11 @@ def render_line(columns, rows, args, plt, Console):
   gpu_ids = sorted({g for _, g in keys}, key=lambda g: int(g) if str(g).isdigit() else g)
   gcolor = {g: PALETTE[i % len(PALETTE)] for i, g in enumerate(gpu_ids)}  # GPU color, stable across panels
 
-  def ckw(c):
-    return {} if args.no_color else {"color": c}
+  def pkw(c):
+    kw = {"marker": args.marker}            # thin braille lines by default (--marker)
+    if not args.no_color:
+      kw["color"] = c
+    return kw
 
   def series(samples, m):
     """(xs minutes, ys) for metric m, dropping missing samples; (None, None) if empty."""
@@ -298,7 +301,7 @@ def render_line(columns, rows, args, plt, Console):
           continue
         xs, ys = series(gpus[(node, g)], m)
         if ys:
-          plt.plot(xs, ys, label="gpu%s" % g, **ckw(gcolor[g]))
+          plt.plot(xs, ys, label="gpu%s" % g, **pkw(gcolor[g]))
       plt.title("%s  %s" % (node, m)); plt.xlabel("minutes since start"); plt.ylabel(m)
     plt.show()
   elif len(keys) > 1 and len(metrics) > 1:
@@ -310,7 +313,7 @@ def render_line(columns, rows, args, plt, Console):
       for m in metrics:
         xs, ys = series(gpus[key], m)
         if ys:
-          plt.plot(xs, ys, label=m, **ckw(mcolor[m]))
+          plt.plot(xs, ys, label=m, **pkw(mcolor[m]))
       plt.title("%s gpu%s" % key); plt.xlabel("minutes since start")
     plt.show()
   else:
@@ -321,13 +324,13 @@ def render_line(columns, rows, args, plt, Console):
       for key in keys:
         xs, ys = series(gpus[key], m)
         if ys:
-          plt.plot(xs, ys, label="gpu%s" % key[1], **ckw(gcolor[key[1]]))
+          plt.plot(xs, ys, label="gpu%s" % key[1], **pkw(gcolor[key[1]]))
       plt.title("%s  --  %s" % (m, base)); plt.ylabel(m)
     else:                                      # single GPU -> line per metric
       for m in metrics:
         xs, ys = series(gpus[keys[0]], m)
         if ys:
-          plt.plot(xs, ys, label=m, **ckw(mcolor[m]))
+          plt.plot(xs, ys, label=m, **pkw(mcolor[m]))
       plt.title(base); plt.ylabel("value")
     plt.xlabel("minutes since start")
     plt.show()
@@ -361,6 +364,8 @@ def main():
   ap.add_argument("--node", help="plot only this node (where the CSV has a NODE column)")
   ap.add_argument("--gpu", help="plot only this GPU index (where the CSV has a GPU column)")
   ap.add_argument("--all", action="store_true", help="line: draw every metric, not just the default set")
+  ap.add_argument("--marker", choices=["braille", "dot", "hd", "fhd"], default="braille",
+                  help="line marker (default braille = thin lines; hd = thick blocks; dot = sparse)")
   ap.add_argument("--title", help="override the chart title")
   ap.add_argument("--width", type=int, help="plot width in chars (plotext charts)")
   ap.add_argument("--height", type=int, help="plot height in chars (plotext charts)")

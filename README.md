@@ -180,9 +180,10 @@ affected by it. Pipe the CSV in (without `-n`, so the header is included):
 
 The chart type is auto-detected from the columns; override with `--kind
 auto|bars|heat|hist|line`. Other options: `--metric NAME` (histogram metric / line
-metrics), `--all` (line: every metric), `--width`/`--height`, `--max-rows` (heatmap
-cap), `--no-color` (also honors `$NO_COLOR`), `--config` (pull color thresholds from
-the jobstats config). `--help` for the full list.
+metrics), `--all` (line: every metric), `--marker braille|dot|hd|fhd` (line style;
+braille = thin, the default), `--width`/`--height`, `--max-rows` (heatmap cap),
+`--no-color` (also honors `$NO_COLOR`), `--config` (pull color thresholds from the
+jobstats config). `--help` for the full list.
 
 For a **multi-GPU** job, `--dcgm --ts` draws one panel per GPU (each metric a
 consistent color); pass a single `--metric` to get one panel with a line per GPU
