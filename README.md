@@ -197,14 +197,45 @@ the heatmap — or a single `--metric`. Stacked panels are capped (a note tells 
 when). For a dense overview, `--compact` collapses each metric to a single braille
 sparkline row (its own scale + min-max range) instead of full-height panels.
 
-**Requirements:** `jobstats_plot` needs Python 3.12 with `plotext` and `rich`:
+### Installing the plot dependencies
+
+`jobstats_plot` needs Python 3.12 with `plotext` and `rich`. `jobstats_history`
+itself needs none of this and runs on the system Python. Pick whichever install
+fits you (in rough order of convenience):
+
+**1. uv (recommended).** `jobstats_plot` carries inline [PEP 723] metadata, so
+[uv](https://docs.astral.sh/uv/) auto-provisions Python 3.12 + plotext + rich
+(cached after the first run) — no manual setup:
+
+```bash
+jobstats_history --dcgm --ts --csv JOBID | uv run --script jobstats_plot --compact
+```
+
+**2. uv shared venv** (one install for all users; point the deploy at it):
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv plotext rich
+jobstats_history ... --csv | ./.venv/bin/python jobstats_plot --compact
+```
+
+**3. pip --user** (quick, per-user):
 
 ```bash
 /usr/bin/python3.12 -m pip install --user plotext rich
+jobstats_history ... --csv | ./jobstats_plot
 ```
 
-(A Singularity container bundling these is a planned secondary option — it only needs
-`plotext`/`rich` and reads the CSV on stdin, so it requires no Slurm/Prometheus access.)
+**4. Singularity container** (no host Python/uv needed; portable). Build once
+(`jobstats_plot.def` is in the repo), then pipe CSV into it — it needs no
+Slurm/Prometheus/config inside:
+
+```bash
+singularity build --fakeroot jobstats_plot.sif jobstats_plot.def
+jobstats_history --dcgm --ts --csv JOBID | singularity run jobstats_plot.sif --compact
+```
+
+[PEP 723]: https://peps.python.org/pep-0723/
 
 ## Requirements
 

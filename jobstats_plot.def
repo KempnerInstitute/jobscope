@@ -1,0 +1,39 @@
+Bootstrap: docker
+From: python:3.12-slim
+
+# A tiny, self-contained image for jobstats_plot. It only renders the CSV that
+# jobstats_history emits, so it needs NOTHING from the host -- no Slurm/sacct, no
+# Prometheus, no jobstats config, no secrets. Pipe the CSV in on stdin:
+#
+#   jobstats_history --dcgm --ts --csv JOBID | singularity run jobstats_plot.sif --compact
+#   jobstats_history --gpu  --csv -D 7       | singularity run jobstats_plot.sif
+#
+# Build (rootless fakeroot; network needed to pull the base image + wheels):
+#   singularity build --fakeroot jobstats_plot.sif jobstats_plot.def
+
+%files
+    jobstats_plot /opt/jobstats_plot
+
+%post
+    set -eu
+    # uv: a fast, reproducible installer (https://docs.astral.sh/uv/)
+    pip install --no-cache-dir uv
+    uv pip install --system --no-cache plotext rich
+    chmod +x /opt/jobstats_plot
+    python -c "import plotext, rich; print('plotext', plotext.__version__, '| rich ok')"
+
+%runscript
+    exec python /opt/jobstats_plot "$@"
+
+%help
+    Render jobstats_history --csv output as a terminal graph (bars / hist / heat /
+    time-series line). Reads CSV on stdin; pass jobstats_plot options as args:
+
+      jobstats_history --dcgm --ts --csv JOBID | singularity run jobstats_plot.sif --compact
+      jobstats_history --dcgm --csv -D 7       | singularity run jobstats_plot.sif --kind heat
+
+    No host access required (no Slurm / Prometheus / config inside the image).
+
+%labels
+    Tool        jobstats_plot
+    Maintainer  Bala Desinghu, Kempner Institute, Harvard

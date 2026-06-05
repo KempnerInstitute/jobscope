@@ -1,4 +1,11 @@
 #!/usr/bin/python3.12
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["plotext>=5.3", "rich>=13"]
+# ///
+# (The block above lets `uv run jobstats_plot` auto-provision Python 3.12 +
+# plotext + rich. It is a plain comment to a normal interpreter.)
+#
 # jobstats_plot - render jobstats_history CSV as terminal graphs.
 #
 # Reads the CSV that `jobstats_history` already emits and draws it: utilization
