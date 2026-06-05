@@ -1,13 +1,13 @@
 # kempner-jobstats
 
-Two command-line tools for reviewing Slurm job efficiency after a job finishes.
+Two command-line tools for reviewing Slurm job efficiency of CPU and GPU devices after a job finishes.
 
 - `jobstats_history`: scan many jobs quickly.
 - `jobstats_dcgm`: inspect detailed GPU metrics for specific job IDs.
 
 Both tools use the same jobstats data sources, so their numbers should line up
 with `jobstats`.  For live monitoring, use
-[KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse). These two tools are for rxtracting CPU and GPU metrics of finished jobs.
+[KempnerPulse](https://github.com/KempnerInstitute/kempnerpulse). These two tools are excellent for extracting the CPU and GPU metrics of finished jobs.
 
 ## Quick Start
 
