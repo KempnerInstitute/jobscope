@@ -257,12 +257,41 @@ kempner_jobstats --dcgm --ts --csv JOBID | singularity run jobstats_plot.sif --c
 
 [PEP 723]: https://peps.python.org/pep-0723/
 
-## Requirements
+## Requirements & dependencies
 
-- Run this tool on a system where `jobstats` is installed.
-- `kempner_jobstats` in the `--cpu` / `--cgpu` views only needs `sacct`.
-- `kempner_jobstats` (default `--gpu`), `--diagnose`, and `--dcgm` query the
-  jobstats Prometheus endpoint.
+This package is a thin **read-only client** over the cluster's existing jobstats /
+Prometheus stack — it collects nothing itself, it only queries.
+
+**External infrastructure (must already exist on the cluster):**
+
+- **`jobstats`** installed — it provides the `config` module (`PROM_SERVER`,
+  `SAMPLING_PERIOD`, thresholds) at `/usr/local/bin/config.py`, and writes each
+  job's metrics into the Slurm `sacct` **AdminComment** blob (the `JS1:…` payload
+  that `kempner_jobstats` decodes for CPU%/MEM%/GPU%/GMEM%).
+- **Slurm / `sacct`** — for job selection, state, and reading the AdminComment blob.
+- A **Prometheus** server (reached at `PROM_SERVER` from the jobstats `config`)
+  holding the GPU time series. The data path:
+
+  ```
+  dcgm-exporter (per GPU node) ─▶ Prometheus ─┐
+                                  (PROM_SERVER) ├─▶ kempner_jobstats ──CSV──▶ jobstats_plot
+  sacct AdminComment blob (jobstats) ──────────┘      (read-only)            (optional plots)
+  ```
+
+  `kempner_jobstats` queries `DCGM_FI_PROF_*` / `nvidia_gpu_*`, joined to a job by
+  GPU UUID via `nvidia_gpu_jobId`. The `--gpu` (default), `--dcgm`, and `--diagnose`
+  paths hit Prometheus; `--cpu` / `--cgpu` (blob only) need just `sacct`.
+
+**Python dependencies:**
+
+| Tool | Interpreter | Packages |
+|---|---|---|
+| `kempner_jobstats` (core) | any `python3` ≥ 3.6 (system `/usr/bin/python3`, or 3.12) | standard library + `requests` (only on the Prometheus paths; ships with jobstats) |
+| `plot_util/jobstats_plot` (optional) | `python3.12` | [`plotext`](https://github.com/piccolomo/plotext) (charts) + [`rich`](https://github.com/Textualize/rich) (tables/color) |
+
+The core tool needs no third-party install beyond what jobstats already provides.
+For `jobstats_plot`'s `plotext` + `rich`, use uv / pip / the Singularity container —
+see [Installing the plot dependencies](#installing-the-plot-dependencies).
 
 ## References
 
