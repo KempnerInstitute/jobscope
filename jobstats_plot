@@ -41,6 +41,31 @@ PALETTE = [196, 46, 33, 208, 201, 51, 226, 129, 244, 39]
 # --metric/--all widen it. Kept small so the chart stays readable.
 TS_DEFAULT = ["SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
 
+# Braille dot bits for the 1-row --compact sparkline (cell = 2 cols x 4 rows).
+_BR_DOT = {(0, 0): 0x01, (0, 1): 0x02, (0, 2): 0x04, (0, 3): 0x40,
+           (1, 0): 0x08, (1, 1): 0x10, (1, 2): 0x20, (1, 3): 0x80}
+
+
+def braille_spark(vals, cells):
+  """A one-row braille sparkline of vals over `cells` chars, scaled to vals' own
+  min..max (top = high). Returns (sparkline, lo, hi); ('', None, None) if empty."""
+  vals = [v for v in vals if v is not None]
+  if not vals:
+    return "", None, None
+  lo, hi = min(vals), max(vals)
+  rng = (hi - lo) or 1.0
+  cells = max(1, cells)
+  cols, n = cells * 2, len(vals)
+  out = []
+  for c in range(cells):
+    ch = 0
+    for sub in (0, 1):
+      v = vals[min(n - 1, (c * 2 + sub) * n // cols)]
+      row = 3 - int(round((v - lo) / rng * 3))   # 0 = top (high) .. 3 = bottom (low)
+      ch |= _BR_DOT[(sub, row)]
+    out.append(chr(0x2800 + ch))
+  return "".join(out), lo, hi
+
 
 def die(msg):
   sys.exit("ERROR: " + msg)
@@ -294,6 +319,24 @@ def render_line(columns, rows, args, plt, Console):
     plt.title(title); plt.xlabel("minutes since start"); plt.ylabel(ylabel)
     plt.show(); print()
 
+  if args.compact:
+    # one braille sparkline row per (gpu,) metric, each scaled to its own min-max
+    multi = len(keys) > 1
+    def lab(n, g, m):
+      return ("%s gpu%s %-8s" % (n, g, m)) if multi else ("%-8s" % m)
+    labw = max((len(lab(n, g, m)) for n, g in keys for m in metrics), default=8)
+    sc = max(12, W - labw - 18)
+    print(base)
+    for n, g in keys:
+      for m in metrics:
+        _, ys = series(gpus[(n, g)], m)
+        if not ys:
+          continue
+        sp, lo, hi = braille_spark(ys, sc)
+        text = "  %-*s ┤%s  (%g-%g)" % (labw, lab(n, g, m), sp, lo, hi)
+        console.print(text, style="color(%d)" % mcolor[m], markup=False, highlight=False)
+    return
+
   multinode = len(nodes) > 1
   K, M = len(keys), len(metrics)
   lines_are_gpus = False     # whether each line is a GPU (color/label by GPU) vs a metric
@@ -364,6 +407,9 @@ def main():
   ap.add_argument("--by", choices=["metric", "gpu"], default="metric",
                   help="line: facet by 'metric' (default; one panel per metric, own y-axis) or "
                        "'gpu' (one panel per GPU, all metrics sharing the axis)")
+  ap.add_argument("--compact", action="store_true",
+                  help="line: one braille sparkline row per metric (own scale + min-max), "
+                       "instead of full-height panels")
   ap.add_argument("--title", help="override the chart title")
   ap.add_argument("--width", type=int, help="plot width in chars (plotext charts)")
   ap.add_argument("--height", type=int, help="plot height in chars (plotext charts)")
