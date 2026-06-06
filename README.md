@@ -4,6 +4,19 @@
 jobstats data from `sacct`, adds DCGM GPU metrics from Prometheus when available,
 and can emit CSV for terminal plots.
 
+## Quick Start
+
+```bash
+git clone https://github.com/KempnerInstitute/kempner-jobstats
+cd kempner-jobstats
+
+./kempner_jobstats -D 3
+./kempner_jobstats --dcgm --ts --csv JOBID | ./plot_util/jobstats_plot --compact
+```
+
+`kempner_jobstats` does not need an install step. Run it by path. For plotting dependencies, including how to use your own venv, see
+[`plot_util/README.md`](plot_util/README.md).
+
 ## Screenshots
 
 <table>
@@ -17,18 +30,7 @@ and can emit CSV for terminal plots.
   </tr>
 </table>
 
-## Quick Start
 
-```bash
-git clone https://github.com/KempnerInstitute/kempner-jobstats
-cd kempner-jobstats
-
-./kempner_jobstats -D 3
-./kempner_jobstats --dcgm --ts --csv JOBID | ./plot_util/jobstats_plot --compact
-```
-
-`kempner_jobstats` does not need an install step. Run it by path. For plotting dependencies, including how to use your own venv, see
-[`plot_util/README.md`](plot_util/README.md).
 
 ## Common Commands
 
