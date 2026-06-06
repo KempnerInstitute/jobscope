@@ -1,4 +1,4 @@
-#!/usr/bin/python3.12
+#!/usr/bin/env python3.12
 # /// script
 # requires-python = ">=3.12"
 # dependencies = ["plotext>=5.3", "rich>=13"]
@@ -24,6 +24,46 @@
 # Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner Institute, Harvard
 
 import os, sys, csv, shutil, argparse
+
+
+def _bootstrap_venv():
+  """Run jobstats_plot under the venv recorded in plot_util/venv_path.conf.
+
+  jobstats_plot needs plotext + rich (the core scanner does not). Instead of a
+  wrapper on PATH, the tool self-resolves: if those libs aren't importable in the
+  current interpreter, read `venv_env_path` from venv_path.conf (next to this
+  file) and re-exec under <venv_env_path>/.venv/bin/python. One hop, guarded
+  against loops; a no-op when the libs are already present (e.g. `uv run`)."""
+  if os.environ.get("_KJ_PLOT_BOOTSTRAP"):
+    return                                    # already re-exec'd once -- don't loop
+  import importlib.util
+  try:
+    if importlib.util.find_spec("plotext") and importlib.util.find_spec("rich"):
+      return                                  # libs available here -> run in place
+  except Exception:
+    pass
+  here = os.path.dirname(os.path.realpath(__file__))   # plot_util/ (follows symlinks)
+  base = ""
+  try:
+    with open(os.path.join(here, "venv_path.conf")) as f:
+      for line in f:
+        line = line.strip()
+        if line.startswith("venv_env_path="):
+          base = line.split("=", 1)[1].strip()
+  except OSError:
+    pass
+  if not base:
+    base = "/n/holylfs06/LABS/kempner_shared/Everyone/cluster_scripts/job_eff/kempner-jobstats"
+  for py in (os.path.join(base, ".venv", "bin", "python"),
+             os.path.join(base, "bin", "python")):
+    if os.access(py, os.X_OK):
+      os.environ["_KJ_PLOT_BOOTSTRAP"] = "1"
+      os.execv(py, [py, os.path.realpath(__file__), *sys.argv[1:]])
+  # No venv python found: fall through; load_libs() prints an actionable message.
+
+
+_bootstrap_venv()
+
 
 # Columns that identify a row rather than carry a plottable metric.
 ID_COLS = {"JOBID", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
@@ -88,8 +128,9 @@ def load_libs():
     return plt, Console, Table, Text
   except ImportError as e:
     die("jobstats_plot needs plotext and rich (missing: %s).\n"
-        "       Install: /usr/bin/python3.12 -m pip install --user plotext rich\n"
-        "       (kempner_jobstats itself needs none of this -- only plotting does.)"
+        "       Build/point a venv: bash plot_util/setup/install_venv.sh\n"
+        "       (or set venv_env_path in plot_util/venv_path.conf).\n"
+        "       The core scanner needs none of this -- only plotting does."
         % getattr(e, "name", e))
 
 
