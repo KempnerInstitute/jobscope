@@ -5,7 +5,7 @@
 Example Usage:
 ```bash
 kempner_jobstats -D 3  # last 3 days of GPU job metrics
-kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot # Plot the JOBID GPU metrics
+kempner_jobstats --dcgm --ts --csv JOBID | ~/plot_utils/jobstats_plot # Plot the JOBID GPU metrics
 ```
 
 ## Screenshots
