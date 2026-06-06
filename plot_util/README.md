@@ -10,12 +10,15 @@ jobstats_plot -f saved.csv [options]
 ```
 
 Do not use `-n` with `kempner_jobstats --csv`; `jobstats_plot` needs the header
-row. Plot dependencies are covered in [`../setup/README.md`](../setup/README.md).
+row. Examples here use the bare tool names -- run them by path
+(`./kempner_jobstats`, `./plot_util/jobstats_plot`) or put the repo root and
+`plot_util/` on your `$PATH`. Plot dependencies and install are covered in
+[`setup/README.md`](setup/README.md).
 
 Quickest no-install run:
 
 ```bash
-kempner_jobstats --dcgm --ts --csv JOBID | uv run --script plot_util/jobstats_plot --compact
+./kempner_jobstats --dcgm --ts --csv JOBID | uv run --script plot_util/jobstats_plot --compact
 ```
 
 ## Examples

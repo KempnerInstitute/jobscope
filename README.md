@@ -21,20 +21,27 @@ kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot # Plot the JOBID GPU me
   </tr>
 </table>
 
-Regenerate these with `bash setup/make_screenshots.sh`.
+Regenerate these with `bash plot_util/setup/make_screenshots.sh`.
 
 ## Setup
 
 ```bash
 git clone https://github.com/KempnerInstitute/kempner-jobstats
 cd kempner-jobstats
-source setup/env.sh
+# run by path (no setup needed):
+./kempner_jobstats --dcgm --ts --csv JOBID | ./plot_util/jobstats_plot --compact
+# or add both to your PATH so the examples below work by name:
+export PATH="$PWD:$PWD/plot_util:$PATH"
 ```
 
-`source setup/env.sh` adds `kempner_jobstats` and `jobstats_plot` to your `$PATH`
-for the current shell. For the shared cluster deploy, permanent PATH setup,
-plot dependencies, containers, and cluster requirements, see
-[`setup/README.md`](setup/README.md).
+No install step: `kempner_jobstats` runs on the system `python3`, and
+`jobstats_plot` finds its plotting venv automatically -- it reads
+`plot_util/venv_path.conf` and re-execs under that venv (default: the shared
+cluster `.venv`). The examples below write the bare names `kempner_jobstats` and
+`jobstats_plot`; those resolve once the repo and `plot_util/` are on your `$PATH`
+(the `export` line above), otherwise prefix them with `./` and `./plot_util/`. To
+build your own venv, and for plot dependencies and cluster requirements, see
+[`plot_util/setup/README.md`](plot_util/setup/README.md).
 
 ## Common Commands
 
