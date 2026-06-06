@@ -4,6 +4,19 @@
 jobstats data from `sacct`, adds DCGM GPU metrics from Prometheus when available,
 and can emit CSV for terminal plots.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td><strong>Per-job DCGM time series</strong></td>
+    <td><strong>Aggregated utilization across jobs</strong></td>
+  </tr>
+  <tr>
+    <td><img src="docs/timeseries.svg" alt="per-job DCGM time series" width="420"></td>
+    <td><img src="docs/aggregated.svg" alt="aggregated mean-utilization bars" width="420"></td>
+  </tr>
+</table>
+
 ## Quick Start
 
 ```bash
@@ -14,14 +27,7 @@ cd kempner-jobstats
 ./kempner_jobstats --dcgm --ts --csv JOBID | ./plot_util/jobstats_plot --compact
 ```
 
-`kempner_jobstats` does not need an install step. Run it by path, or add the repo
-and plotting directory to your `PATH`:
-
-```bash
-export PATH="$PWD:$PWD/plot_util:$PATH"
-```
-
-For plotting dependencies, including how to use your own venv, see
+`kempner_jobstats` does not need an install step. Run it by path. For plotting dependencies, including how to use your own venv, see
 [`plot_util/README.md`](plot_util/README.md).
 
 ## Common Commands
@@ -65,20 +71,6 @@ kempner_jobstats --dcgm --ts --csv JOBID | jobstats_plot --by metric
 
 See [`plot_util/README.md`](plot_util/README.md) for plotting setup and options.
 
-## Screenshots
-
-<table>
-  <tr>
-    <td><strong>Per-job DCGM time series</strong></td>
-    <td><strong>Aggregated utilization across jobs</strong></td>
-  </tr>
-  <tr>
-    <td><img src="docs/timeseries.svg" alt="per-job DCGM time series" width="420"></td>
-    <td><img src="docs/aggregated.svg" alt="aggregated mean-utilization bars" width="420"></td>
-  </tr>
-</table>
-
-Regenerate screenshots with `bash plot_util/setup/make_screenshots.sh`.
 
 ## References
 
