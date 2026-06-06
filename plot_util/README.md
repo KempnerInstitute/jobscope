@@ -1,25 +1,46 @@
-# plot_util/ - `jobstats_plot`
+# plot_util
 
-`jobstats_plot` turns `kempner_jobstats --csv` output into terminal charts. It is
-optional and separate from the core scanner; the two tools are connected only by
-CSV.
+`jobstats_plot` draws terminal charts from `kempner_jobstats --csv` output. It is
+optional; the core `kempner_jobstats` scanner works without plotting
+dependencies.
 
 ```bash
 kempner_jobstats <view> --csv | jobstats_plot [options]
 jobstats_plot -f saved.csv [options]
 ```
 
-Do not use `-n` with `kempner_jobstats --csv`; `jobstats_plot` needs the header
-row. Examples here use the bare tool names -- run them by path
-(`./kempner_jobstats`, `./plot_util/jobstats_plot`) or put the repo root and
-`plot_util/` on your `$PATH`. Plot dependencies and install are covered in
-[`setup/README.md`](setup/README.md).
+Do not use `-n` with `kempner_jobstats --csv`; plots need the CSV header row.
 
-Quickest no-install run:
+## Setup
+
+The shared repo already points `jobstats_plot` at the shared plotting venv:
+
+```bash
+./kempner_jobstats --dcgm --ts --csv JOBID | ./plot_util/jobstats_plot --compact
+```
+
+To use your own venv, build it and record its base directory in
+`plot_util/venv_path.conf`:
+
+```bash
+bash plot_util/setup/install_venv.sh /path/to/base
+./kempner_jobstats --dcgm --ts --csv JOBID | ./plot_util/jobstats_plot --compact
+```
+
+The venv is created at `/path/to/base/.venv`. `jobstats_plot` reads
+`plot_util/venv_path.conf` and re-runs itself under that venv when `plotext` and
+`rich` are not already importable. The setup script requires `uv`.
+
+`venv_path.conf` is tracked and repo-wide, so changing it in a shared checkout
+changes the plotting venv for everyone using that checkout.
+
+For a one-off run without changing the config:
 
 ```bash
 ./kempner_jobstats --dcgm --ts --csv JOBID | uv run --script plot_util/jobstats_plot --compact
 ```
+
+Setup script details are in [`setup/README.md`](setup/README.md).
 
 ## Examples
 
@@ -35,12 +56,12 @@ jobstats_plot -f saved.csv --kind heat
 
 `--kind auto` is the default.
 
-| Input | Default chart | Shows |
-|---|---|---|
-| One summary job | `bars` | utilization gauges |
-| Many summary jobs | `hist` | distribution of one metric |
-| `--dcgm --csv` | `heat` | jobs/GPUs by metric |
-| `--dcgm --ts --csv` | `line` | time series plus min/mean/max/last |
+| Input | Default chart |
+|---|---|
+| One summary job | `bars` |
+| Many summary jobs | `hist` |
+| `--dcgm --csv` | `heat` |
+| `--dcgm --ts --csv` | `line` |
 
 Override with `--kind bars`, `--kind hist`, `--kind heat`, or `--kind line`.
 
@@ -48,18 +69,14 @@ Override with `--kind bars`, `--kind hist`, `--kind heat`, or `--kind line`.
 
 | Option | Use |
 |---|---|
-| `--metric NAME[,NAME...]` | choose histogram metric or line metrics |
-| `--by gpu` | time series: one panel per GPU, shared metric axis |
-| `--by metric` | time series: one panel per metric, separate y-axis |
-| `--compact` | time series: one sparkline row per metric |
-| `--all` | time series: draw every available metric |
-| `--node NODE` / `--gpu N` | filter large jobs or heatmaps |
+| `--metric NAME[,NAME...]` | choose metrics |
+| `--by gpu` / `--by metric` | split time-series panels |
+| `--compact` | show compact time-series sparklines |
+| `--all` | draw every available metric |
+| `--node NODE` / `--gpu N` | filter large jobs |
 | `--width N` / `--height N` | control chart size |
 | `--max-rows N` | cap heatmap rows |
-| `--no-color` | disable color; also honors `$NO_COLOR` |
+| `--no-color` | disable color |
 | `--config` | use jobstats color thresholds |
 
-Percent metrics are colored red/yellow/green by threshold. Non-percent metrics
-such as `POWER_W`, memory, clocks, and temperatures are shown as plain values.
-
-Run `jobstats_plot --help` for the authoritative option list.
+Run `jobstats_plot --help` for the full option list.
