@@ -4,18 +4,6 @@
 jobstats data from `sacct`, adds DCGM GPU metrics from Prometheus when available,
 and can emit CSV for terminal plots.
 
-## Quick Start
-
-```bash
-git clone https://github.com/KempnerInstitute/kempner-jobstats
-cd kempner-jobstats
-
-./kempner_jobstats -D 3
-./kempner_jobstats --dcgm --ts --csv JOBID | ./plot_util/jobstats_plot --compact
-```
-
-`kempner_jobstats` does not need an install step. Run it by path. For plotting dependencies, including how to use your own venv, see
-[`plot_util/README.md`](plot_util/README.md).
 
 ## Screenshots
 
@@ -54,13 +42,46 @@ JOBID        STATE     GPUS GPU%   GMEM%   SM_ACT%  OCC%    TENSOR%  DRAM%   POW
 -------------------------------------------------------------------------------------------------------
 Mean:                       76     11      57.5     15.5    1.8      10.9    368
 ```
+## Quick Start
+You do not need to perform a formal installation. You can run `kempner_jobstats` using the pre-deployed cluster path or by cloning the repository directly.
+
+Using the shared cluster path:
+```bash
+export JOBSTAT_PATH=/n/holylfs06/LABS/kempner_shared/Everyone/cluster_scripts/job_eff/kempner-jobstats
+
+# View efficiency for the last 3 days
+$JOBSTAT_PATH/kempner_jobstats -D 3
+
+# Plot efficiency for a specific JOBID
+$JOBSTAT_PATH/kempner_jobstats --dcgm --ts --csv <JOBID> | ./plot_util/jobstats_plot --compact
+```
+Downloading the scripts:
+```bash
+git clone https://github.com/KempnerInstitute/kempner-jobstats
+cd kempner-jobstats
+
+# View efficiency for the last 3 days
+./kempner_jobstats -D 3
+
+# Plot efficiency for a specific JOBID
+./kempner_jobstats --dcgm --ts --csv <JOBID> | ./plot_util/jobstats_plot --compact
+```
+Dependencies:
+For instructions on plotting dependencies and setting up your own virtual environment, please refer to plot_util/README.md.
+For plotting dependencies, including how to use your own venv, see [`plot_util/README.md`](plot_util/README.md).
+
 
 ## Common Commands
 
+See command args
+```bash
+kempner_jobstats -h
+```
+Some common command need and options
 | Need | Command |
 |---|---|
 | Recent GPU jobs | `kempner_jobstats -D 3` |
-| CPU + GPU summary without Prometheus | `kempner_jobstats --cgpu -D 5` |
+| CPU + GPU summary without Prometheus | `kempner_jobstats --cgpu -D 2` |
 | CPU-only summary | `kempner_jobstats --cpu -D 5` |
 | GPU diagnosis labels | `kempner_jobstats --diagnose -D 5` |
 | Per-node / per-GPU detail | `kempner_jobstats -d JOBID` |
@@ -89,8 +110,7 @@ histograms, heatmaps, and time-series plots.
 
 ```bash
 kempner_jobstats --gpu  --csv JOBID      | ~/plot_util/jobstats_plot
-kempner_jobstats --gpu  --csv -D 7       | ~/plot_util/jobstats_plot
-kempner_jobstats --dcgm --csv -D 7       | ~/plot_util/jobstats_plot
+kempner_jobstats --gpu  --csv -D 3       | ~/plot_util/jobstats_plot --kind bars
 kempner_jobstats --dcgm --ts --csv JOBID | ~/plot_util/jobstats_plot --compact
 ```
 
