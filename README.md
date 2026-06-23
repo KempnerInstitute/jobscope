@@ -55,6 +55,11 @@ $JOBSTAT_PATH/kempner_jobstats -D 3
 # Plot efficiency for a specific JOBID
 $JOBSTAT_PATH/kempner_jobstats --dcgm --ts --csv <JOBID> | $JOBSTAT_PATH/plot_util/jobstats_plot --compact
 ```
+
+# Plot efficiency for a specific JOBID for specific metric
+$JOBSTAT_PATH/kempner_jobstats --dcgm --ts --csv <JOBID> | $JOBSTAT_PATH/plot_util/jobstats_plot --metric OCC%
+```
+
 Downloading the scripts:
 ```bash
 git clone https://github.com/KempnerInstitute/kempner-jobstats
