@@ -109,9 +109,9 @@ views. Run `kempner_jobstats --help` for all options and
 histograms, heatmaps, and time-series plots.
 
 ```bash
-kempner_jobstats --gpu  --csv JOBID      | ~/plot_util/jobstats_plot
-kempner_jobstats --gpu  --csv -D 3       | ~/plot_util/jobstats_plot --kind bars
-kempner_jobstats --dcgm --ts --csv JOBID | ~/plot_util/jobstats_plot --compact
+./kempner_jobstats --gpu  --csv JOBID      | ./plot_util/jobstats_plot
+./kempner_jobstats --gpu  --csv -D 3       | ./plot_util/jobstats_plot --kind bars
+./kempner_jobstats --dcgm --ts --csv JOBID | ./plot_util/jobstats_plot --compact
 ```
 
 See [`plot_util/README.md`](plot_util/README.md) for plotting setup and options.
