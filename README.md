@@ -53,7 +53,7 @@ export JOBSTAT_PATH=/n/holylfs06/LABS/kempner_shared/Everyone/cluster_scripts/jo
 $JOBSTAT_PATH/kempner_jobstats -D 3
 
 # Plot efficiency for a specific JOBID
-$JOBSTAT_PATH/kempner_jobstats --dcgm --ts --csv <JOBID> | ./plot_util/jobstats_plot --compact
+$JOBSTAT_PATH/kempner_jobstats --dcgm --ts --csv <JOBID> | $JOBSTAT_PATH/plot_util/jobstats_plot --compact
 ```
 Downloading the scripts:
 ```bash
