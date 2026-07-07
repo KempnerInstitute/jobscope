@@ -53,7 +53,7 @@ echo 'export PATH="/n/holylfs06/LABS/kempner_shared/Everyone/cluster_scripts/bin
 kempner_jobstats -D 3
 
 # Plot efficiency for a specific JOBID
-kempner_jobstats --dcgm --ts --csv <JOBID> | plot_util/jobstats_plot --compact
+kempner_jobstats --dcgm --ts --csv <JOBID> | jobstats_plot --compact
 ```
 
 # Plot efficiency for a specific JOBID for specific metric
