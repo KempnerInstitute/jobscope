@@ -47,17 +47,17 @@ You do not need to perform a formal installation. You can run `kempner_jobstats`
 
 Using the shared cluster path:
 ```bash
-export JOBSTAT_PATH=/n/holylfs06/LABS/kempner_shared/Everyone/cluster_scripts/job_eff/kempner-jobstats
+echo 'export PATH="/n/holylfs06/LABS/kempner_shared/Everyone/cluster_scripts/bin:$PATH"' >> ~/.bashrc
 
 # View efficiency for the last 3 days
-$JOBSTAT_PATH/kempner_jobstats -D 3
+kempner_jobstats -D 3
 
 # Plot efficiency for a specific JOBID
-$JOBSTAT_PATH/kempner_jobstats --dcgm --ts --csv <JOBID> | $JOBSTAT_PATH/plot_util/jobstats_plot --compact
+kempner_jobstats --dcgm --ts --csv <JOBID> | plot_util/jobstats_plot --compact
 ```
 
 # Plot efficiency for a specific JOBID for specific metric
-$JOBSTAT_PATH/kempner_jobstats --dcgm --ts --csv <JOBID> | $JOBSTAT_PATH/plot_util/jobstats_plot --metric OCC%
+kempner_jobstats --dcgm --ts --csv <JOBID> | plot_util/jobstats_plot --metric OCC%
 ```
 
 Downloading the scripts:
