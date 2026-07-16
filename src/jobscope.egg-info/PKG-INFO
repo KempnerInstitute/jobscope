@@ -1,3 +1,33 @@
+Metadata-Version: 2.4
+Name: jobscope
+Version: 0.1.0
+Summary: Slurm job efficiency and GPU utilization reporting from sacct and DCGM/Prometheus
+Author: Kempner Institute, Harvard University
+License-Expression: MIT
+Project-URL: Homepage, https://github.com/KempnerInstitute/jobscope
+Project-URL: Repository, https://github.com/KempnerInstitute/jobscope
+Keywords: slurm,hpc,gpu,dcgm,prometheus,jobstats,utilization
+Classifier: Development Status :: 4 - Beta
+Classifier: Environment :: Console
+Classifier: Intended Audience :: System Administrators
+Classifier: Intended Audience :: Science/Research
+Classifier: Operating System :: POSIX :: Linux
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: System :: Monitoring
+Classifier: Topic :: System :: Clustering
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: requests>=2.25
+Requires-Dist: plotext>=5.3
+Requires-Dist: rich>=13
+Requires-Dist: tomli>=2.0; python_version < "3.11"
+Provides-Extra: dev
+Requires-Dist: pytest>=7; extra == "dev"
+Requires-Dist: pytest-cov>=4; extra == "dev"
+Requires-Dist: ruff>=0.1; extra == "dev"
+Dynamic: license-file
+
 # jobscope
 
 `jobscope` reports the efficiency of completed Slurm jobs. It decodes the

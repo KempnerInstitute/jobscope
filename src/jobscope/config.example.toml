@@ -1,0 +1,45 @@
+# jobscope configuration.
+#
+# Copy this file to ~/.config/jobscope/config.toml (or point $JOBSCOPE_CONFIG at
+# it) and edit the values for your cluster. Every value is optional; jobscope
+# falls back to the built-in defaults shown here. Print this template any time
+# with: jobscope config --example
+
+[prometheus]
+# Endpoint that serves the DCGM (DCGM_FI_*) and nvidia_gpu_* series that jobstats
+# scrapes. Required for the GPU and DCGM views; the CPU-only and offline (blob)
+# views never contact it.
+#
+# SECURITY: this URL often embeds a credential (e.g. a Grafana Cloud token).
+# Prefer supplying it through the JOBSCOPE_PROM_URL environment variable so the
+# secret never lands in a file. A value set here is used only when that variable
+# is unset.
+# url = "https://USER:TOKEN@prometheus.example.net/api/prom"
+
+# Seconds between DCGM scrapes on your cluster (the Prometheus sampling period).
+sampling_period = 60
+
+# Backward-compatibility bridge: instead of setting url above, jobscope can read
+# PROM_SERVER (and SAMPLING_PERIOD) from an existing site jobstats config module.
+# Give the directory that contains that config.py; it is added to sys.path and
+# imported only when a Prometheus URL is otherwise unavailable. On the Kempner AI
+# Cluster this is /usr/local/bin, which lets you use jobscope without a token.
+# site_jobstats_config_path = "/usr/local/bin"
+
+[thresholds]
+# Red cutoffs (percent) for plot color grading. A %-metric value below its cutoff
+# renders red, below twice the cutoff yellow, otherwise green.
+gpu = 25
+gmem = 20
+cpu = 25
+mem = 25
+# Cutoff applied to any other %-metric (e.g. the DCGM utilization columns).
+default = 15
+
+[defaults]
+# Default number of concurrent Prometheus query-sets for the GPU view.
+workers = 8
+# Default seconds per sacct / Prometheus call (0 disables the sacct timeout).
+timeout = 60
+# Jobs shorter than this many seconds are tagged DIAG=short (sampling noise).
+min_runtime = 180

@@ -1,0 +1,11 @@
+requests>=2.25
+plotext>=5.3
+rich>=13
+
+[:python_version < "3.11"]
+tomli>=2.0
+
+[dev]
+pytest>=7
+pytest-cov>=4
+ruff>=0.1
