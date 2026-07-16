@@ -42,28 +42,38 @@ Mean:                       94     7       67.7     18.5    1.3      12.1    363
 
 ## Install
 
+jobscope is a command-line tool, so install it with
+[`uv`](https://docs.astral.sh/uv/). `uv` provisions its own Python and puts the
+`jobscope` executable on your `PATH` -- there is no virtualenv to create or
+activate, and it never touches the system Python (which on clusters like
+FASRC/RHEL8 is too old to build `pyproject.toml` projects anyway).
+
+Install `uv` once, if you don't already have it:
+
 ```bash
-pip install jobscope          # from PyPI
-pip install .                 # from a source checkout
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-For development, install the test extras in editable mode and run the suite:
+Then restart your shell so `uv` is on your `PATH`. (Alternatives: `wget -qO-
+https://astral.sh/uv/install.sh | sh`, `pipx install uv`, or `brew install uv` --
+see the [uv install docs](https://docs.astral.sh/uv/getting-started/installation/).)
+
+Now install jobscope:
 
 ```bash
-pip install -e '.[dev]'
-pytest
-```
-
-`jobscope` builds from a `pyproject.toml` (there is no `setup.py`), so it needs
-Python 3.9+ and a reasonably modern `pip` (21.3+). Some clusters default to a
-`pip3` that is too old -- FASRC/RHEL8, for example, ships pip 9 on Python 3.6,
-which fails with `Directory '.' is not installable. File 'setup.py' not found`.
-Load a recent Python module (`module load python/3.12.8-fasrc01`) or use
-[`uv`](https://docs.astral.sh/uv/), which supplies its own Python:
-
-```bash
-uv tool install jobscope      # from PyPI, onto your PATH
+uv tool install jobscope      # from PyPI
 uv tool install .             # from a source checkout
+```
+
+Upgrade or remove it later with `uv tool upgrade jobscope` or `uv tool uninstall
+jobscope`.
+
+For development from a checkout there's nothing to install -- `uv` runs
+everything straight from the source tree, creating the environment on demand:
+
+```bash
+uv run jobscope -D 3          # run the CLI from source
+uv run --extra dev pytest     # run the test suite
 ```
 
 ## Configuration
