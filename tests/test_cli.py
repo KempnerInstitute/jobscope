@@ -54,6 +54,22 @@ def test_lastn_must_be_positive():
         _prepare_selection(_sel_args(lastn=-1))
 
 
+def test_starttime_alone_selects_single_day():
+    sel = _prepare_selection(_sel_args(starttime="2026-07-15"))
+    assert sel.starttime == "2026-07-15"
+    assert sel.endtime == "2026-07-16T00:00:00"
+
+
+def test_starttime_with_endtime_left_alone():
+    sel = _prepare_selection(_sel_args(starttime="2026-07-15", endtime="2026-07-20"))
+    assert sel.endtime == "2026-07-20"
+
+
+def test_starttime_relative_leaves_window_open():
+    sel = _prepare_selection(_sel_args(starttime="now-2days"))
+    assert sel.endtime is None
+
+
 def test_args_order_independent():
     _, subparsers = build_parser()
     summary = subparsers.choices["summary"]

@@ -23,7 +23,7 @@ from .report import (
     detail,
     summarize,
 )
-from .sacct import Selection, days_to_window, default_user, fetch, select_jobs
+from .sacct import Selection, days_to_window, default_user, end_of_day, fetch, select_jobs
 
 SUBCOMMANDS = ("summary", "detail", "dcgm", "plot", "describe", "config")
 
@@ -65,9 +65,11 @@ def build_parser():
     sel_scope.add_argument("-D", "--days", type=int, metavar="N",
                            help="jobs in the last N days")
     sel_scope.add_argument("-S", "--starttime", metavar="TIME",
-                           help="window start (sacct format)")
+                           help="window start, e.g. 2026-07-15 or 2026-07-15T09:00:00 "
+                                "(sacct format); without -E, selects just that day")
     sel_scope.add_argument("-E", "--endtime", metavar="TIME",
-                           help="window end (sacct format)")
+                           help="window end, same format as -S "
+                                "(default: end of the -S day, else now)")
 
     sel_filter = selector.add_argument_group("filters")
     sel_filter.add_argument("-u", "--user", help="user (default: current user, $USER)")
@@ -212,6 +214,8 @@ def _prepare_selection(args) -> Selection:
         if start or end:
             raise JobscopeError("-D/--days sets the window; do not also pass -S/-E")
         start, end = days_to_window(days)
+    elif start and not end:
+        end = end_of_day(start)  # -S alone selects just that calendar day
     if lastn is not None and lastn <= 0:
         raise JobscopeError("-N/--lastn must be a positive integer")
     return Selection(user=user, jobids=jobids, account=args.account, partition=args.partition,
