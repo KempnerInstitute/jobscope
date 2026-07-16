@@ -64,14 +64,10 @@ export JOBSCOPE_PROM_URL="https://USER:TOKEN@prometheus.example.net/api/prom"
 ```
 
 **Kempner AI Cluster users:** the endpoint is already installed on the cluster
-under `/usr/local/bin` (the jobstats `config.py`), so you never handle the URL or
-token. Point jobscope at it once:
-
-```bash
-jobscope config --example > ~/.config/jobscope/config.toml
-# then, under [prometheus] in that file, set:
-#   site_jobstats_config_path = "/usr/local/bin"
-```
+under `/usr/local/bin` (the jobstats `config.py`), and jobscope reads it
+**automatically** when nothing else is configured -- so you need no config file
+and never handle the URL or token. Just run `jobscope`. (To point at a different
+jobstats install, set `site_jobstats_config_path` in the config file below.)
 
 On any other cluster, put your settings in that same config file
 (`~/.config/jobscope/config.toml`, or wherever `$JOBSCOPE_CONFIG` points):
