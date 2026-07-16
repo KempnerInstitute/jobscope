@@ -43,14 +43,28 @@ Mean:                       94     7       67.7     18.5    1.3      12.1    363
 ## Install
 
 ```bash
-pip install .
+pip install jobscope          # from PyPI
+pip install .                 # from a source checkout
+```
 
-# for development
+For development, install the test extras in editable mode and run the suite:
+
+```bash
 pip install -e '.[dev]'
 pytest
 ```
 
-(A PyPI release will make `pip install jobscope` available later.)
+`jobscope` builds from a `pyproject.toml` (there is no `setup.py`), so it needs
+Python 3.9+ and a reasonably modern `pip` (21.3+). Some clusters default to a
+`pip3` that is too old -- FASRC/RHEL8, for example, ships pip 9 on Python 3.6,
+which fails with `Directory '.' is not installable. File 'setup.py' not found`.
+Load a recent Python module (`module load python/3.12.8-fasrc01`) or use
+[`uv`](https://docs.astral.sh/uv/), which supplies its own Python:
+
+```bash
+uv tool install jobscope      # from PyPI, onto your PATH
+uv tool install .             # from a source checkout
+```
 
 ## Configuration
 
@@ -152,6 +166,47 @@ plot` -- the plot needs the CSV header row.
 `contrib/jobstats_extended.py` is a site-specific prototype that folds DCGM
 metrics into the jobstats blob itself. It depends on an upstream jobstats install
 and is not part of the package -- see [`contrib/README.md`](contrib/README.md).
+
+## Building and publishing (maintainers)
+
+The package uses a standard `pyproject.toml` build (setuptools backend, no
+`setup.py`). Build both distribution artifacts with
+[`uv`](https://docs.astral.sh/uv/) and validate their metadata:
+
+```bash
+uv build                     # writes the sdist + wheel to dist/
+uvx twine check dist/*       # validate long-description and metadata
+```
+
+Smoke-test the built wheel in a throwaway environment before publishing:
+
+```bash
+uv run --no-project --python 3.10 \
+  --with dist/jobscope-*-py3-none-any.whl jobscope --help
+```
+
+Publish to TestPyPI first, then to PyPI. Generate an **account-scoped** API token
+for the first upload of a new project -- a project-scoped token cannot create a
+project that does not exist yet -- and note that each version can be uploaded
+only once (bump the version to re-release):
+
+```bash
+# TestPyPI -- token from https://test.pypi.org/manage/account/token/
+UV_PUBLISH_TOKEN=<test-token> \
+  uv publish --publish-url https://test.pypi.org/legacy/ dist/*
+
+# verify: TestPyPI does not host the runtime deps, so pull them from real PyPI
+uv run --no-project --python 3.10 \
+  --index https://test.pypi.org/simple/ --index-strategy unsafe-best-match \
+  --with jobscope jobscope --help
+
+# PyPI -- token from https://pypi.org/manage/account/token/
+UV_PUBLISH_TOKEN=<token> uv publish dist/*
+```
+
+To keep the token out of your shell history, read it interactively instead of
+inlining it: `read -rs -p 'token: ' T && UV_PUBLISH_TOKEN="$T" uv publish ... ;
+unset T`.
 
 ## References
 
