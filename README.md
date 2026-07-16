@@ -102,7 +102,9 @@ jobscope dcgm --ts --csv JOBID | jobscope plot --compact   # time-series chart
 ```
 
 `jobscope` alone is shorthand for `jobscope summary`, so the selectors below work
-with or without a subcommand.
+with or without a subcommand. Flags and JOBIDs may be given in any order
+(`jobscope 12345 -D 3` and `jobscope -D 3 12345` are equivalent), and
+`-j/--jobid` is an explicit alternative to the positional JOBID.
 
 ## Subcommands
 
