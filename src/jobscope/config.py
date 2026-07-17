@@ -10,6 +10,7 @@ import importlib
 import importlib.resources
 import importlib.util
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
@@ -23,12 +24,6 @@ except ModuleNotFoundError:
 
 CONFIG_ENV = "JOBSCOPE_CONFIG"
 PROM_URL_ENV = "JOBSCOPE_PROM_URL"
-
-# Directory checked automatically for a jobstats ``config.py`` (defining
-# ``PROM_SERVER``) when no endpoint is configured any other way. This is where
-# the Kempner AI Cluster installs its jobstats config, so jobscope works there
-# with no config file at all. Set ``site_jobstats_config_path`` to look elsewhere.
-DEFAULT_SITE_JOBSTATS_PATH = "/usr/local/bin"
 
 DEFAULT_SAMPLING_PERIOD = 60
 DEFAULT_WORKERS = 8
@@ -133,28 +128,42 @@ def load_config(path: Optional[str] = None,
     )
 
 
+def _discover_site_jobstats_dir() -> Optional[str]:
+    """Directory of the ``jobstats`` binary on ``PATH``, expected to hold the
+    site ``config.py`` (with ``PROM_SERVER``); None when jobstats isn't on PATH.
+
+    Keying on the jobstats binary keeps jobscope site-agnostic -- nothing
+    site-specific ships in the package -- and is a strong signal: we only import
+    a ``config.py`` that sits beside a real jobstats install the user already has,
+    never a stray file at a fixed system path.
+    """
+    path = shutil.which("jobstats")
+    return os.path.dirname(path) if path else None
+
+
 def resolve_prometheus(cfg: Config) -> Tuple[str, int]:
     """Return ``(url, sampling_period)`` for Prometheus.
 
     When no URL is configured directly, the site jobstats config supplies it: an
     explicit ``site_jobstats_config_path`` (which must import cleanly), otherwise
-    the automatic :data:`DEFAULT_SITE_JOBSTATS_PATH` (skipped silently when it
-    holds no usable config). Raises :class:`JobscopeError` with actionable
-    guidance when none is available. The URL can embed a credential, so callers
-    must never log or print it.
+    the directory of the ``jobstats`` binary auto-discovered on ``PATH`` (skipped
+    silently when it holds no usable config). Raises :class:`JobscopeError` with
+    actionable guidance when none is available. The URL can embed a credential,
+    so callers must never log or print it.
     """
     url = cfg.prometheus_url
     sampling_period = cfg.sampling_period
     if not url:
-        # An explicit path must import cleanly; the automatic default is
-        # best-effort so jobscope stays usable off the Kempner cluster.
-        explicit = cfg.site_jobstats_config_path is not None
-        site_path = cfg.site_jobstats_config_path or DEFAULT_SITE_JOBSTATS_PATH
-        site_url, site_sp = _import_site_prometheus(site_path, required=explicit)
-        if site_url:
-            url = site_url
-            if site_sp and not cfg.sampling_period_explicit:
-                sampling_period = int(site_sp)
+        # An explicit path must import cleanly; auto-discovery is best-effort so
+        # jobscope stays usable wherever jobstats is not installed.
+        explicit = cfg.site_jobstats_config_path
+        site_path = explicit or _discover_site_jobstats_dir()
+        if site_path:
+            site_url, site_sp = _import_site_prometheus(site_path, required=bool(explicit))
+            if site_url:
+                url = site_url
+                if site_sp and not cfg.sampling_period_explicit:
+                    sampling_period = int(site_sp)
     if not url:
         raise JobscopeError(_no_endpoint_message(cfg))
     return url, sampling_period
@@ -191,13 +200,12 @@ def _no_endpoint_message(cfg: Config) -> str:
     target = cfg.source_path or default_config_path()
     return (
         "no Prometheus endpoint configured; the GPU and DCGM views require one.\n"
-        "(The default site jobstats config at %s was checked and holds no usable "
-        "PROM_SERVER.)\n"
+        "(No 'jobstats' binary with a usable config.py was found on your PATH.)\n"
         "Fix any one of:\n"
         "  - set the JOBSCOPE_PROM_URL environment variable, or\n"
         '  - add [prometheus] url = "https://.../api/prom" to %s, or\n'
         "  - set [prometheus] site_jobstats_config_path to a dir holding a jobstats config.py.\n"
-        "The offline --cpu / --cgpu views need no Prometheus." % (DEFAULT_SITE_JOBSTATS_PATH, target))
+        "The offline --cpu / --cgpu views need no Prometheus." % target)
 
 
 _active: Optional[Config] = None

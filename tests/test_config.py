@@ -84,10 +84,10 @@ def test_resolve_prometheus_direct_url():
     assert resolve_prometheus(_cfg(prometheus_url="http://p:9090")) == ("http://p:9090", 60)
 
 
-def test_resolve_prometheus_missing_raises(monkeypatch, tmp_path):
-    # Point the automatic default at an empty dir so the suite never picks up a
-    # real /usr/local/bin/config.py on the host running the tests.
-    monkeypatch.setattr(config_module, "DEFAULT_SITE_JOBSTATS_PATH", str(tmp_path))
+def test_resolve_prometheus_missing_raises(monkeypatch):
+    # Disable auto-discovery so the suite never picks up a real jobstats/config.py
+    # on the host running the tests.
+    monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: None)
     with pytest.raises(JobscopeError):
         resolve_prometheus(_cfg())
 
@@ -107,24 +107,32 @@ def test_resolve_prometheus_site_keeps_explicit_period(monkeypatch):
     assert resolve_prometheus(cfg) == ("http://site:9090", 120)
 
 
-def test_resolve_prometheus_auto_default_site(monkeypatch, tmp_path):
-    # With nothing else configured, jobscope falls back to the automatic default
-    # path -- no config file and no site_jobstats_config_path needed.
+def test_resolve_prometheus_auto_discovers_site(monkeypatch, tmp_path):
+    # With nothing else configured, jobscope discovers the config next to the
+    # jobstats binary on PATH -- no config file or site_jobstats_config_path.
     (tmp_path / "config.py").write_text("PROM_SERVER='http://auto:9090'\nSAMPLING_PERIOD=45\n")
-    monkeypatch.setattr(config_module, "DEFAULT_SITE_JOBSTATS_PATH", str(tmp_path))
+    monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: str(tmp_path))
     assert resolve_prometheus(_cfg()) == ("http://auto:9090", 45)
 
 
-def test_resolve_prometheus_explicit_site_overrides_default(monkeypatch, tmp_path):
-    default_dir = tmp_path / "default"
-    default_dir.mkdir()
-    (default_dir / "config.py").write_text("PROM_SERVER='http://default:9090'\n")
+def test_resolve_prometheus_explicit_site_overrides_discovery(monkeypatch, tmp_path):
+    discovered = tmp_path / "discovered"
+    discovered.mkdir()
+    (discovered / "config.py").write_text("PROM_SERVER='http://discovered:9090'\n")
     explicit_dir = tmp_path / "explicit"
     explicit_dir.mkdir()
     (explicit_dir / "config.py").write_text("PROM_SERVER='http://explicit:9090'\n")
-    monkeypatch.setattr(config_module, "DEFAULT_SITE_JOBSTATS_PATH", str(default_dir))
+    monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: str(discovered))
     url, _ = resolve_prometheus(_cfg(site_jobstats_config_path=str(explicit_dir)))
     assert url == "http://explicit:9090"
+
+
+def test_discover_site_jobstats_dir(monkeypatch):
+    monkeypatch.setattr(config_module.shutil, "which",
+                        lambda name: "/opt/jobstats/bin/jobstats" if name == "jobstats" else None)
+    assert config_module._discover_site_jobstats_dir() == "/opt/jobstats/bin"
+    monkeypatch.setattr(config_module.shutil, "which", lambda name: None)
+    assert config_module._discover_site_jobstats_dir() is None
 
 
 def test_import_site_prometheus_reads_module(tmp_path):

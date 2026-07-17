@@ -22,9 +22,9 @@ sampling_period = 60
 # Backward-compatibility bridge: instead of setting url above, jobscope can read
 # PROM_SERVER (and SAMPLING_PERIOD) from an existing jobstats config.py. Give the
 # directory that holds that config.py; it is imported (by full path) only when no
-# Prometheus URL is available otherwise. jobscope ALREADY checks /usr/local/bin
-# automatically -- the Kempner AI Cluster install -- so on that cluster you need
-# no config file at all. Set this only to point at a config.py somewhere else.
+# Prometheus URL is available otherwise. jobscope ALREADY auto-discovers this
+# next to the 'jobstats' binary on your PATH, so wherever jobstats is installed
+# you need no config file at all. Set this only to point at a config.py elsewhere.
 # site_jobstats_config_path = "/opt/jobstats"
 
 [thresholds]

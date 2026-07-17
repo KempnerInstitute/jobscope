@@ -63,11 +63,11 @@ The GPU and DCGM views need a Prometheus endpoint serving the DCGM and
 export JOBSCOPE_PROM_URL="https://USER:TOKEN@prometheus.example.net/api/prom"
 ```
 
-**Kempner AI Cluster users:** the endpoint is already installed on the cluster
-under `/usr/local/bin` (the jobstats `config.py`), and jobscope reads it
-**automatically** when nothing else is configured -- so you need no config file
-and never handle the URL or token. Just run `jobscope`. (To point at a different
-jobstats install, set `site_jobstats_config_path` in the config file below.)
+**Kempner AI Cluster users:** the jobstats `config.py` sits beside the `jobstats`
+binary on your `PATH`, and jobscope **auto-discovers it** when nothing else is
+configured -- so you need no config file and never handle the URL or token. Just
+run `jobscope`. (This works at any jobstats site; to point at a different install,
+set `site_jobstats_config_path` in the config file below.)
 
 On any other cluster, put your settings in that same config file
 (`~/.config/jobscope/config.toml`, or wherever `$JOBSCOPE_CONFIG` points):
