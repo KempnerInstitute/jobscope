@@ -154,8 +154,6 @@ def resolve_prometheus(cfg: Config) -> Tuple[str, int]:
     url = cfg.prometheus_url
     sampling_period = cfg.sampling_period
     if not url:
-        # An explicit path must import cleanly; auto-discovery is best-effort so
-        # jobscope stays usable wherever jobstats is not installed.
         explicit = cfg.site_jobstats_config_path
         site_path = explicit or _discover_site_jobstats_dir()
         if site_path:
