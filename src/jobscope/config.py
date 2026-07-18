@@ -1,6 +1,6 @@
 """Configuration loading for jobscope.
 
-Site-specific settings -- the Prometheus endpoint above all -- come from a TOML
+Site-specific settings (the Prometheus endpoint above all) come from a TOML
 file, an environment variable, or, for backward compatibility, an existing
 jobstats ``config`` module. Nothing here ever prints the resolved Prometheus
 URL, which commonly embeds a credential.
@@ -132,8 +132,8 @@ def _discover_site_jobstats_dir() -> Optional[str]:
     """Directory of the ``jobstats`` binary on ``PATH``, expected to hold the
     site ``config.py`` (with ``PROM_SERVER``); None when jobstats isn't on PATH.
 
-    Keying on the jobstats binary keeps jobscope site-agnostic -- nothing
-    site-specific ships in the package -- and is a strong signal: we only import
+    Keying on the jobstats binary keeps jobscope site-agnostic (nothing
+    site-specific ships in the package) and is a strong signal: we only import
     a ``config.py`` that sits beside a real jobstats install the user already has,
     never a stray file at a fixed system path.
     """
@@ -174,7 +174,7 @@ def _import_site_prometheus(config_path: str,
     The file at ``<config_path>/config.py`` is loaded directly by path, so it
     never depends on ``sys.path`` order and never shadows (or is shadowed by)
     another module named ``config``. With ``required=False`` a missing or
-    unimportable file yields ``(None, None)`` instead of raising -- used for the
+    unimportable file yields ``(None, None)`` instead of raising, used for the
     automatic default path, which must not break jobscope where it is absent.
     """
     cfg_file = os.path.join(config_path, "config.py")

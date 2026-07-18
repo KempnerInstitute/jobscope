@@ -16,7 +16,7 @@ MEMORY_BOUND = 40
 TENSOR = 1
 
 LEGEND = """\
-DIAG -- advisory tag(s) from the utilization metrics (heuristic, not a verdict;
+DIAG: advisory tag(s) from the utilization metrics (heuristic, not a verdict;
 window-averaged, so multi-phase jobs blur). Several legitimately-low-util
 workloads (inference, sampling, sparse HPC, data prep) read as "underfed".
   idle       SM_ACT < %d%%                    GPU essentially never ran a kernel
