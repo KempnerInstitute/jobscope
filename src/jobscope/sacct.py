@@ -1,7 +1,7 @@
 """Job selection and the single bulk sacct fetch.
 
 Jobs are selected with one ``sacct`` query, then all of their data is retrieved
-with a second bulk ``sacct -j`` query -- no per-job jobstats calls and no
+with a second bulk ``sacct -j`` query, no per-job jobstats calls and no
 job-count cap. The AdminComment blob returned by the second query is decoded into
 each :class:`JobRecord`.
 """
@@ -90,7 +90,7 @@ def query_jobid(jobid: str) -> str:
 
     Array jobs cancelled or pending before expansion appear as
     ``BASE_[range%throttle]`` (e.g. ``18114115_[0-719%64]``); ``sacct -j`` cannot
-    parse that element spec, so query the base id instead -- it returns the same
+    parse that element spec, so query the base id instead; it returns the same
     record. Plain ids and expanded tasks (``BASE_N``) pass through unchanged.
     """
     return jobid.split("_", 1)[0] if "_[" in jobid else jobid
@@ -123,11 +123,11 @@ def run_capture(cmd: List[str], timeout: Optional[float], what: str,
         if soft:
             return None
         raise JobscopeError(
-            "%s timed out after %gs -- the selection likely spans too many jobs for\n"
+            "%s timed out after %gs; the selection likely spans too many jobs for\n"
             "sacct to return in time. Narrow it (in increasing order of help):\n"
-            "  -N N             fewer jobs   -- your most recent N (e.g. -N 50)\n"
-            "  -D N             fewer days   -- the last N days     (e.g. -D 3)\n"
-            "  -S DATE -E DATE  a narrow explicit window (best) -- e.g.\n"
+            "  -N N             fewer jobs   - your most recent N (e.g. -N 50)\n"
+            "  -D N             fewer days   - the last N days     (e.g. -D 3)\n"
+            "  -S DATE -E DATE  a narrow explicit window (best), e.g.\n"
             "                   -S 2026-05-26 -E 2026-06-02\n"
             "Or raise/disable the cap with --timeout SECONDS (--timeout 0 disables it)."
             % (what, timeout))

@@ -1,7 +1,5 @@
 """Tests for configuration loading and Prometheus endpoint resolution."""
 
-import sys
-
 import pytest
 
 from jobscope import config as config_module
@@ -86,36 +84,90 @@ def test_resolve_prometheus_direct_url():
     assert resolve_prometheus(_cfg(prometheus_url="http://p:9090")) == ("http://p:9090", 60)
 
 
-def test_resolve_prometheus_missing_raises():
+def test_resolve_prometheus_missing_raises(monkeypatch):
+    # Disable auto-discovery so the suite never picks up a real jobstats/config.py
+    # on the host running the tests.
+    monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: None)
     with pytest.raises(JobscopeError):
         resolve_prometheus(_cfg())
 
 
 def test_resolve_prometheus_site_import(monkeypatch):
     monkeypatch.setattr(config_module, "_import_site_prometheus",
-                        lambda path: ("http://site:9090", 30))
+                        lambda path, required=True: ("http://site:9090", 30))
     cfg = _cfg(site_jobstats_config_path="/opt/jobstats")
     assert resolve_prometheus(cfg) == ("http://site:9090", 30)
 
 
 def test_resolve_prometheus_site_keeps_explicit_period(monkeypatch):
     monkeypatch.setattr(config_module, "_import_site_prometheus",
-                        lambda path: ("http://site:9090", 30))
+                        lambda path, required=True: ("http://site:9090", 30))
     cfg = _cfg(site_jobstats_config_path="/opt/jobstats",
                sampling_period=120, sampling_period_explicit=True)
     assert resolve_prometheus(cfg) == ("http://site:9090", 120)
 
 
-def test_import_site_prometheus_reads_module(tmp_path, monkeypatch):
+def test_resolve_prometheus_auto_discovers_site(monkeypatch, tmp_path):
+    # With nothing else configured, jobscope discovers the config next to the
+    # jobstats binary on PATH -- no config file or site_jobstats_config_path.
+    (tmp_path / "config.py").write_text("PROM_SERVER='http://auto:9090'\nSAMPLING_PERIOD=45\n")
+    monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: str(tmp_path))
+    assert resolve_prometheus(_cfg()) == ("http://auto:9090", 45)
+
+
+def test_resolve_prometheus_explicit_site_overrides_discovery(monkeypatch, tmp_path):
+    discovered = tmp_path / "discovered"
+    discovered.mkdir()
+    (discovered / "config.py").write_text("PROM_SERVER='http://discovered:9090'\n")
+    explicit_dir = tmp_path / "explicit"
+    explicit_dir.mkdir()
+    (explicit_dir / "config.py").write_text("PROM_SERVER='http://explicit:9090'\n")
+    monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: str(discovered))
+    url, _ = resolve_prometheus(_cfg(site_jobstats_config_path=str(explicit_dir)))
+    assert url == "http://explicit:9090"
+
+
+def test_discover_site_jobstats_dir(monkeypatch):
+    monkeypatch.setattr(config_module.shutil, "which",
+                        lambda name: "/opt/jobstats/bin/jobstats" if name == "jobstats" else None)
+    assert config_module._discover_site_jobstats_dir() == "/opt/jobstats/bin"
+    monkeypatch.setattr(config_module.shutil, "which", lambda name: None)
+    assert config_module._discover_site_jobstats_dir() is None
+
+
+def test_import_site_prometheus_reads_module(tmp_path):
     (tmp_path / "config.py").write_text("PROM_SERVER='http://site:9090'\nSAMPLING_PERIOD=30\n")
-    monkeypatch.syspath_prepend(str(tmp_path))
-    sys.modules.pop("config", None)
-    try:
-        url, sp = config_module._import_site_prometheus(str(tmp_path))
-        assert url == "http://site:9090"
-        assert sp == 30
-    finally:
-        sys.modules.pop("config", None)
+    url, sp = config_module._import_site_prometheus(str(tmp_path))
+    assert url == "http://site:9090"
+    assert sp == 30
+
+
+def test_import_site_prometheus_reads_by_path_not_sys_path(tmp_path, monkeypatch):
+    # A config.py named the same, earlier on sys.path, must not shadow the one at
+    # the requested directory: the file is loaded by its full path.
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "config.py").write_text("PROM_SERVER='http://decoy:9090'\n")
+    monkeypatch.syspath_prepend(str(decoy))
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "config.py").write_text("PROM_SERVER='http://target:9090'\n")
+    url, _ = config_module._import_site_prometheus(str(target))
+    assert url == "http://target:9090"
+
+
+def test_import_site_prometheus_strict_missing_raises(tmp_path):
+    with pytest.raises(JobscopeError):
+        config_module._import_site_prometheus(str(tmp_path))  # no config.py present
+
+
+def test_import_site_prometheus_lenient_missing(tmp_path):
+    assert config_module._import_site_prometheus(str(tmp_path), required=False) == (None, None)
+
+
+def test_import_site_prometheus_missing_prom_server(tmp_path):
+    (tmp_path / "config.py").write_text("SAMPLING_PERIOD=30\n")
+    assert config_module._import_site_prometheus(str(tmp_path)) == (None, 30)
 
 
 def test_thresholds_red_map():

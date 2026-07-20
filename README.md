@@ -6,7 +6,7 @@ utilization data Slurm already stores in each job's `sacct` AdminComment
 pulled from Prometheus, and can render any view as a terminal chart.
 
 For completed jobs the CPU/MEM/GPU/GMEM numbers match `jobstats`, because
-jobscope decodes the same stored blob -- but in one bulk `sacct` query, with no
+jobscope decodes the same stored blob, but in one bulk `sacct` query, with no
 per-job calls and no job-count cap.
 
 ## Screenshots
@@ -63,15 +63,11 @@ The GPU and DCGM views need a Prometheus endpoint serving the DCGM and
 export JOBSCOPE_PROM_URL="https://USER:TOKEN@prometheus.example.net/api/prom"
 ```
 
-**Kempner AI Cluster users:** the endpoint is already installed on the cluster
-under `/usr/local/bin` (the jobstats `config.py`), so you never handle the URL or
-token. Point jobscope at it once:
-
-```bash
-jobscope config --example > ~/.config/jobscope/config.toml
-# then, under [prometheus] in that file, set:
-#   site_jobstats_config_path = "/usr/local/bin"
-```
+**Kempner AI Cluster users:** the jobstats `config.py` sits beside the `jobstats`
+binary on your `PATH`, and jobscope **auto-discovers it** when nothing else is
+configured, so you need no config file and never handle the URL or token. Just
+run `jobscope`. (This works at any jobstats site; to point at a different install,
+set `site_jobstats_config_path` in the config file below.)
 
 On any other cluster, put your settings in that same config file
 (`~/.config/jobscope/config.toml`, or wherever `$JOBSCOPE_CONFIG` points):
@@ -82,7 +78,7 @@ jobscope config                                              # show the path in 
 ```
 
 The config file also sets the DCGM sampling period, plot color thresholds, and
-default timeout / worker counts -- see `jobscope config --example` for the full,
+default timeout / worker counts; see `jobscope config --example` for the full,
 commented template.
 
 The Prometheus URL commonly embeds a credential: jobscope never prints it, and a
@@ -145,13 +141,13 @@ jobscope dcgm --ts --csv JOBID   | jobscope plot --compact        # time series
 
 `jobscope plot` reads `summary`, `dcgm`, and `dcgm --ts` CSV; the `detail` CSV is
 for machine consumption, not charts. Do not pass `-n` when piping to `jobscope
-plot` -- the plot needs the CSV header row.
+plot`: the plot needs the CSV header row.
 
 ## Contrib
 
 `contrib/jobstats_extended.py` is a site-specific prototype that folds DCGM
 metrics into the jobstats blob itself. It depends on an upstream jobstats install
-and is not part of the package -- see [`contrib/README.md`](contrib/README.md).
+and is not part of the package; see [`contrib/README.md`](contrib/README.md).
 
 ## References
 

@@ -85,7 +85,7 @@ SUMMARY_DESCRIPTIONS: List[Tuple[str, str, str]] = [
      "Peak host (CPU) memory used / memory allocated, as a percent."),
     ("GPU%", "blob (nvidia_gpu_duty_cycle)",
      "GPU duty cycle averaged over the job's GPUs: fraction of time at least one kernel ran. "
-     "Coarse -- says the GPU was occupied in time, not how hard. Use SM_ACT%/OCC% (gpu view) for that."),
+     "Coarse: says the GPU was occupied in time, not how hard. Use SM_ACT%/OCC% (gpu view) for that."),
     ("GMEM%", "blob (nvidia_gpu_memory_used)",
      "Peak GPU memory used / total, summed over the job's GPUs. A high-water mark, not a time-average."),
     ("SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE (gpu view)",
@@ -93,7 +93,7 @@ SUMMARY_DESCRIPTIONS: List[Tuple[str, str, str]] = [
      "GPU% is high means the GPU was barely loaded (parked / underfed)."),
     ("OCC%", "DCGM_FI_PROF_SM_OCCUPANCY (gpu view)",
      "SM occupancy: fraction of warp slots filled, averaged over SMs and time. Low occupancy means "
-     "kernels under-fill the GPU -- small launches, or register / shared-memory limits."),
+     "kernels under-fill the GPU: small launches, or register / shared-memory limits."),
     ("TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE (gpu view)",
      "Fraction of time the tensor-core pipe was active. High only for mixed-precision matmul work "
      "(fp16/bf16/tf32); ~0 means the tensor cores sat idle."),
@@ -375,7 +375,7 @@ def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
                                       record.name if record else "?", window), file=out)
         per_gpu = dcgm_data.get(jid, ({}, {}))[1]
         if not per_gpu:
-            print("  (no GPU samples for this job -- too short, no DCGM data, or beyond retention)\n",
+            print("  (no GPU samples for this job: too short, no DCGM data, or beyond retention)\n",
                   file=out)
             continue
         if options.header:

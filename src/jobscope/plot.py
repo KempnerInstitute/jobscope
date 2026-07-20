@@ -93,7 +93,7 @@ def parse_csv(fobj):
                      for i in range(len(columns))})
     if columns is None:
         raise JobscopeError(
-            "no 'JOBID' header row found -- is this 'jobscope <view> --csv' output? "
+            "no 'JOBID' header row found; is this 'jobscope <view> --csv' output? "
             "(do not pass -n, so the header is included)")
     return columns, rows
 
@@ -334,7 +334,7 @@ def render_line(columns, rows, args, plt, Console):
         lines_are_gpus = n_keys > 1
         if n_keys > 1:
             figure([("gpu%s" % g, gcolor[g], gpus[(n, g)], metric) for n, g in keys],
-                   "%s  --  %s" % (metric, base), metric, args.height or 15)
+                   "%s - %s" % (metric, base), metric, args.height or 15)
         else:
             figure([(metric, mcolor[metric], gpus[keys[0]], metric)], base, metric, args.height or 15)
     elif args.by == "gpu":
@@ -405,7 +405,7 @@ def run(args) -> None:
             raise JobscopeError("cannot open %s: %s" % (path, exc))
     else:
         if sys.stdin.isatty():
-            raise JobscopeError("no input -- pipe 'jobscope <view> --csv' in, or pass a CSV file.")
+            raise JobscopeError("no input: pipe 'jobscope <view> --csv' in, or pass a CSV file.")
         fobj = sys.stdin
 
     thresholds = config.get_config().thresholds
