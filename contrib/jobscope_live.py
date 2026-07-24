@@ -7,11 +7,11 @@ moment). No historical analysis or job reconstruction -- just the live snapshot.
 
 Usage:
   ./jobscope_live.py                # all running jobs >1h (default)
-  ./jobscope_live.py --partition kempner
+  ./jobscope_live.py -j 34622920            # specific job by ID
+  ./jobscope_live.py -p kempner            # jobs in partition
   ./jobscope_live.py -p kempner -u alice
-  ./jobscope_live.py -j 34818675           # specific job by ID
-  ./jobscope_live.py -p kempner --gpu   # GPU columns only
-  ./jobscope_live.py -p kempner --all   # all DCGM metrics
+  ./jobscope_live.py -p kempner --gpu      # GPU columns only
+  ./jobscope_live.py -p kempner --all      # all DCGM metrics
   ./jobscope_live.py -p kempner --min-runtime 5m  # jobs running >5 minutes
   ./jobscope_live.py -p kempner --min-runtime 0s  # all running jobs (no filter)
 
@@ -338,6 +338,13 @@ def main():
         description="Live GPU metrics for running jobs in a partition"
     )
     parser.add_argument(
+        "-j",
+        "--jobid",
+        type=int,
+        default=None,
+        help="specific Slurm job ID (overrides -p and -u filters)",
+    )
+    parser.add_argument(
         "-p",
         "--partition",
         default=None,
@@ -381,15 +388,20 @@ def main():
         metrics = DCGM_METRICS
 
     # Fetch and query
-    jobs = squeue_running_jobs(partition=args.partition, user=args.user)
+    if args.jobid:
+        jobs = squeue_job_by_id(args.jobid)
+    else:
+        jobs = squeue_running_jobs(partition=args.partition, user=args.user)
 
     # Filter by minimum runtime (default 1h, can be overridden with --min-runtime)
-    try:
-        min_runtime_seconds = parse_time_cutoff(args.min_runtime)
-        jobs = filter_jobs_by_runtime(jobs, min_runtime_seconds)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+    # Skip runtime filter if querying specific job
+    if not args.jobid and jobs:
+        try:
+            min_runtime_seconds = parse_time_cutoff(args.min_runtime)
+            jobs = filter_jobs_by_runtime(jobs, min_runtime_seconds)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     if jobs:
         prom = PrometheusQuerier(args.prom)
