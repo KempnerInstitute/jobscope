@@ -8,6 +8,7 @@ moment). No historical analysis or job reconstruction -- just the live snapshot.
 Usage:
   ./jobscope_live.py                # all running jobs >1h (default)
   ./jobscope_live.py -j 34622920            # specific job by ID
+  ./jobscope_live.py -j 34843528_6          # specific array job element
   ./jobscope_live.py -p kempner            # jobs in partition
   ./jobscope_live.py -p kempner -u alice
   ./jobscope_live.py -p kempner --gpu      # GPU columns only
@@ -128,53 +129,72 @@ class PrometheusQuerier:
             return []
 
 
-def squeue_job_by_id(jobid: str) -> Optional[Dict[int, Dict[str, str]]]:
-    """Fetch a specific job by ID from squeue. Return {jobid: {field: value}} or None.
+# %A first, then %i. %A is the *raw* per-element job ID, which is what
+# Prometheus' nvidia_gpu_jobId reports; %i is the display form and differs for
+# array elements (%i=34843528_6 -> %A=34843629). Pipe-delimited because the
+# start time contains colons.
+_SQUEUE_FMT = "%A|%i|%u|%N|%g|%j|%G|%C|%S"
 
-    Supports both regular job IDs (e.g., 34843528) and array job elements (e.g., 34843528_6).
+
+def _parse_squeue(stdout: str, user: Optional[str] = None) -> Dict[int, Dict[str, str]]:
+    """Parse squeue output in _SQUEUE_FMT into {raw_jobid: {field: value}}.
+
+    Keyed by the raw job ID so the Prometheus join works for array elements too;
+    the displayed ID keeps squeue's own notation.
     """
-    cmd = ["squeue", "-j", str(jobid), "-o", "%i|%u|%N|%g|%j|%G|%C|%S"]
+    jobs = {}
+    for line in stdout.strip().split("\n"):
+        if not line or line.startswith("JOBID"):
+            continue
+        parts = line.split("|")
+        if len(parts) < 9:
+            continue
+        raw_id, disp_id, user_name, nodelist, group, name, gpus, cpus, start_time = parts[:9]
+
+        # Filter by user if specified
+        if user and user_name != user:
+            continue
+
+        try:
+            raw_jid = int(raw_id)
+        except ValueError:
+            continue
+
+        jobs[raw_jid] = {
+            "jobid": disp_id,  # display form; array notation preserved
+            "user": user_name,
+            "node": nodelist,
+            "group": group,
+            "name": name,
+            "gpus": gpus,
+            "cpus": cpus,
+            "start_time": start_time,  # format: YYYY-MM-DDTHH:MM:SS
+        }
+
+    return jobs
+
+
+def squeue_job_by_id(jobid: str) -> Dict[int, Dict[str, str]]:
+    """Fetch one job by ID from squeue. Return {raw_jobid: {field: value}}.
+
+    Accepts a plain job ID (34843528) or an array element (34843528_6).
+    """
+    cmd = ["squeue", "-h", "-j", str(jobid), "-o", _SQUEUE_FMT]
 
     try:
         result = subprocess.run(cmd, check=True, **_PIPE_KWARGS)
     except subprocess.CalledProcessError as e:
-        stderr = e.stderr if hasattr(e, 'stderr') else "unknown error"
+        stderr = e.stderr if hasattr(e, "stderr") else "unknown error"
         print(f"# squeue failed for job {jobid}: {stderr}", file=sys.stderr)
-        return None
+        return {}
 
-    jobs = {}
-    for line in result.stdout.strip().split("\n"):
-        if not line or line.startswith("JOBID"):
-            continue
-        parts = line.split("|")
-        if len(parts) < 8:
-            continue
-        jobid_str, user_name, nodelist, group, name, gpus, cpus, start_time = parts[:8]
-
-        try:
-            # Extract base job ID (before underscore for array jobs)
-            base_jid = int(jobid_str.split("_")[0])
-            jobs[base_jid] = {
-                "jobid": jobid_str,
-                "user": user_name,
-                "node": nodelist.split(",")[0],  # primary node
-                "group": group,
-                "name": name,
-                "gpus": gpus,
-                "cpus": cpus,
-                "start_time": start_time,
-            }
-        except ValueError:
-            continue
-
-    return jobs if jobs else None
+    return _parse_squeue(result.stdout)
 
 
 def squeue_running_jobs(partition: Optional[str] = None,
                         user: Optional[str] = None) -> Dict[int, Dict[str, str]]:
-    """Fetch running jobs from squeue. Return {jobid: {field: value}}."""
-    # Use pipe delimiter since start time contains colons
-    cmd = ["squeue", "-t", "RUNNING", "-o", "%i|%u|%N|%g|%j|%G|%C|%S"]
+    """Fetch running jobs from squeue. Return {raw_jobid: {field: value}}."""
+    cmd = ["squeue", "-h", "-t", "RUNNING", "-o", _SQUEUE_FMT]
 
     if partition:
         cmd.extend(["-p", partition])
@@ -182,38 +202,11 @@ def squeue_running_jobs(partition: Optional[str] = None,
     try:
         result = subprocess.run(cmd, check=True, **_PIPE_KWARGS)
     except subprocess.CalledProcessError as e:
-        stderr = e.stderr if hasattr(e, 'stderr') else "unknown error"
+        stderr = e.stderr if hasattr(e, "stderr") else "unknown error"
         print(f"# squeue failed: {stderr}", file=sys.stderr)
         return {}
 
-    jobs = {}
-    for line in result.stdout.strip().split("\n"):
-        if not line or line.startswith("JOBID"):
-            continue
-        parts = line.split("|")
-        if len(parts) < 8:
-            continue
-        jobid, user_name, nodelist, group, name, gpus, cpus, start_time = parts[:8]
-
-        # Filter by user if specified
-        if user and user_name != user:
-            continue
-
-        try:
-            jobs[int(jobid)] = {
-                "jobid": jobid,
-                "user": user_name,
-                "node": nodelist.split(",")[0],  # primary node
-                "group": group,
-                "name": name,
-                "gpus": gpus,
-                "cpus": cpus,
-                "start_time": start_time,  # format: YYYY-MM-DDTHH:MM:SS
-            }
-        except ValueError:
-            continue
-
-    return jobs
+    return _parse_squeue(result.stdout, user=user)
 
 
 def query_gpu_metrics(prom: PrometheusQuerier,
@@ -223,25 +216,28 @@ def query_gpu_metrics(prom: PrometheusQuerier,
     if not jobs:
         return {}
 
-    # Build job ID list for Prometheus query using OR clauses
-    # E.g., (nvidia_gpu_jobId == id1) or (nvidia_gpu_jobId == id2)
-    job_filters = " or ".join(f"(nvidia_gpu_jobId == {jid})" for jid in jobs.keys())
-
-    # Map UUID -> (jobid, gpu_minor) from nvidia_gpu_jobId using a range query.
-    # Use max_over_time with a 24h window like jobstats does, since instant queries
-    # don't reliably return the data.
+    # Map UUID -> (raw_jobid, gpu_minor) from nvidia_gpu_jobId. The job ID is the
+    # metric's *value*, not a label, so there is nothing to filter on server-side:
+    # one instant query returns every GPU's current job and we keep the ones we
+    # asked about. Deliberately instant rather than a range -- a single GPU can host
+    # a dozen jobs in a day, and the DCGM metrics below are read at this instant, so
+    # a windowed lookup would staple current utilization onto a job that has already
+    # left the GPU.
     uuid_to_job = {}
-    disco_q = f"max_over_time(({job_filters})[86400s:])"
-    disco_res = prom.instant_query(disco_q)
-    for s in disco_res:
+    for s in prom.instant_query("nvidia_gpu_jobId"):
         try:
-            uuid = s["metric"].get("uuid")  # Note: lowercase "uuid"
-            jobid_str = s["value"][1]  # The value is the jobid
-            jobid = int(float(jobid_str))
-            minor = s["metric"].get("minor_number")
-            if uuid and jobid and minor is not None:
-                uuid_to_job[uuid] = (jobid, minor)
+            jobid = int(float(s["value"][1]))
         except (KeyError, ValueError, TypeError, IndexError):
+            continue
+        if jobid not in jobs:
+            continue
+        uuid = s["metric"].get("uuid")  # nvidia_* exporter uses lowercase "uuid"
+        minor = s["metric"].get("minor_number")
+        if not uuid or minor is None:
+            continue
+        try:
+            uuid_to_job[uuid] = (jobid, int(minor))
+        except ValueError:
             continue
 
     if not uuid_to_job:
@@ -282,16 +278,18 @@ def query_gpu_metrics(prom: PrometheusQuerier,
 def format_job_row(job: Dict[str, str], gpu_data: Dict[int, Dict[str, Optional[float]]],
                    metrics: List[Tuple[str, str, str, float, int, str]]) -> str:
     """Format one job row with GPU metrics per GPU."""
-    jobid = job["jobid"]
-    user = job["user"]
-    node = job["node"]
-    name = job["name"][:15]  # truncate name
+    # Truncate to the column widths: array IDs and multi-node nodelists are long
+    # enough to push the table out of alignment otherwise.
+    jobid = job["jobid"][:12]
+    user = job["user"][:12]
+    node = job["node"][:15]
+    name = job["name"][:15]
 
     # Collect metrics across GPUs in this job
     all_gpu_minors = sorted(gpu_data.keys())
     if not all_gpu_minors:
         # No GPU data; just show the job
-        return f"{jobid:<10} {user:<12} {node:<15} {name:<15} [no GPU data]"
+        return f"{jobid:<12} {user:<12} {node:<15} {name:<15} [no GPU data]"
 
     rows = []
     for gpu_minor in all_gpu_minors:
@@ -303,12 +301,31 @@ def format_job_row(job: Dict[str, str], gpu_data: Dict[int, Dict[str, Optional[f
                 metric_vals.append(f"{val:>6}")
             else:
                 metric_vals.append("    -")
-        row = f"{jobid:<10} {user:<12} {node:<15} {name:<15} GPU{gpu_minor:>2}  " + "  ".join(
+        row = f"{jobid:<12} {user:<12} {node:<15} {name:<15} GPU{gpu_minor:>2}  " + "  ".join(
             metric_vals
         )
         rows.append(row)
 
     return "\n".join(rows)
+
+
+def job_sort_key(job: Dict[str, str]) -> Tuple[int, int]:
+    """Sort key from the displayed job ID: (base id, array index).
+
+    Keeps elements of one array together and in numeric index order; raw IDs are
+    assigned in submission order and would interleave unrelated jobs.
+    """
+    base, _, index = job["jobid"].partition("_")
+    try:
+        base_n = int(base)
+    except ValueError:
+        return (sys.maxsize, 0)
+    try:
+        # No index -> plain job, sorts ahead of any element of the same base
+        index_n = int(index) if index else -1
+    except ValueError:
+        index_n = -1
+    return (base_n, index_n)
 
 
 def print_results(jobs: Dict[int, Dict[str, str]],
@@ -321,16 +338,15 @@ def print_results(jobs: Dict[int, Dict[str, str]],
 
     # Header
     headers = [f"{h:>6}" for _, h, *_ in metrics]
-    print(
-        f"{'JOBID':<10} {'USER':<12} {'NODE':<15} {'NAME':<15} {'GPU':>5}  "
+    header_line = (
+        f"{'JOBID':<12} {'USER':<12} {'NODE':<15} {'NAME':<15} {'GPU':>5}  "
         + "  ".join(headers)
     )
-    print(
-        "-" * (10 + 12 + 15 + 15 + 5 + 2 + len(headers) * 8 + (len(headers) - 1) * 2)
-    )
+    print(header_line)
+    print("-" * len(header_line))
 
     # Rows
-    for jobid in sorted(jobs.keys()):
+    for jobid in sorted(jobs, key=lambda j: job_sort_key(jobs[j])):
         job = jobs[jobid]
         gpu_data = gpu_metrics.get(jobid, {})
         row = format_job_row(job, gpu_data, metrics)
@@ -392,19 +408,21 @@ def main():
 
     # Fetch and query
     if args.jobid:
+        # An explicit job is looked up as-is: no partition/user narrowing and no
+        # runtime floor, and a miss is an error rather than an empty table.
         jobs = squeue_job_by_id(args.jobid)
+        if not jobs:
+            print(f"# Job {args.jobid} is not running", file=sys.stderr)
+            sys.exit(1)
     else:
         jobs = squeue_running_jobs(partition=args.partition, user=args.user)
 
-    # Filter by minimum runtime (default 1h, can be overridden with --min-runtime)
-    # Skip runtime filter if querying specific job
-    if not args.jobid and jobs:
         try:
             min_runtime_seconds = parse_time_cutoff(args.min_runtime)
-            jobs = filter_jobs_by_runtime(jobs, min_runtime_seconds)
         except ValueError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
+        jobs = filter_jobs_by_runtime(jobs, min_runtime_seconds)
 
     if jobs:
         prom = PrometheusQuerier(args.prom)
