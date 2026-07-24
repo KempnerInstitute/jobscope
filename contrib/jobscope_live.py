@@ -128,8 +128,11 @@ class PrometheusQuerier:
             return []
 
 
-def squeue_job_by_id(jobid: int) -> Optional[Dict[int, Dict[str, str]]]:
-    """Fetch a specific job by ID from squeue. Return {jobid: {field: value}} or None."""
+def squeue_job_by_id(jobid: str) -> Optional[Dict[int, Dict[str, str]]]:
+    """Fetch a specific job by ID from squeue. Return {jobid: {field: value}} or None.
+
+    Supports both regular job IDs (e.g., 34843528) and array job elements (e.g., 34843528_6).
+    """
     cmd = ["squeue", "-j", str(jobid), "-o", "%i|%u|%N|%g|%j|%G|%C|%S"]
 
     try:
@@ -149,8 +152,9 @@ def squeue_job_by_id(jobid: int) -> Optional[Dict[int, Dict[str, str]]]:
         jobid_str, user_name, nodelist, group, name, gpus, cpus, start_time = parts[:8]
 
         try:
-            jid = int(jobid_str)
-            jobs[jid] = {
+            # Extract base job ID (before underscore for array jobs)
+            base_jid = int(jobid_str.split("_")[0])
+            jobs[base_jid] = {
                 "jobid": jobid_str,
                 "user": user_name,
                 "node": nodelist.split(",")[0],  # primary node
@@ -340,9 +344,8 @@ def main():
     parser.add_argument(
         "-j",
         "--jobid",
-        type=int,
         default=None,
-        help="specific Slurm job ID (overrides -p and -u filters)",
+        help="specific Slurm job ID or array job element (e.g., 34843528 or 34843528_6)",
     )
     parser.add_argument(
         "-p",
