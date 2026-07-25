@@ -23,14 +23,20 @@ Usage:
   ./jobscope_live.py -p kempner --min-runtime 5m  # jobs running >5 minutes
   ./jobscope_live.py -p kempner --min-runtime 0s  # all running jobs (no filter)
 
+  # timeseries CSV over each job's runtime, in the schema jobscope plot reads:
+  ./jobscope_live.py -j 34843528_6 --ts > ts.csv && jobscope plot ts.csv
+  ./jobscope_live.py -p kempner --ts --step 300   # coarser sampling
+
 Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner Institute, Harvard
 """
 
 import sys
+import csv
 import json
 import argparse
 import subprocess
 import re
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -60,6 +66,11 @@ try:
 except ImportError:
     PROM_SERVER = "http://localhost:9090"
 
+try:
+    from config import SAMPLING_PERIOD
+except ImportError:
+    SAMPLING_PERIOD = 60  # exporter scrape interval; the finest useful --ts step
+
 import requests
 
 
@@ -70,6 +81,15 @@ class Gpu(NamedTuple):
     host: str
     minor: int
     label: str          # display form, e.g. "GPU 2" or "MIG 2.0"
+
+    @property
+    def csv_id(self) -> str:
+        """GPU value for CSV output: "2", or "2.0" for a MIG slice.
+
+        Keeps the existing convention (bare minor number for a whole card) while
+        staying unique per slice, since plot groups series by (NODE, GPU).
+        """
+        return self.label.split(" ", 1)[1]
 
 
 class Metric(NamedTuple):
@@ -154,17 +174,19 @@ def parse_time_cutoff(cutoff_str: str) -> int:
     return value * multipliers[unit]
 
 
-def elapsed_seconds(start_time: str) -> Optional[int]:
-    """Seconds since a squeue %S start time, or None if it is not a timestamp.
+def parse_start_time(start_time: str) -> Tuple[Optional[int], Optional[int]]:
+    """(start epoch, elapsed seconds) from a squeue %S value.
 
-    squeue prints "N/A"/"Unknown" when a job has no start time yet.
+    (None, None) when it is not a timestamp -- squeue prints "N/A"/"Unknown"
+    while a job has no start time yet. %S is local time, hence mktime.
     """
     try:
         # Python 3.6 compatibility: strptime instead of fromisoformat
         start_dt = datetime.strptime(start_time, "%Y-%m-%dT%H:%M:%S")
     except (ValueError, TypeError):
-        return None
-    return int((datetime.now() - start_dt).total_seconds())
+        return None, None
+    epoch = int(time.mktime(start_dt.timetuple()))
+    return epoch, int(time.time()) - epoch
 
 
 def filter_jobs_by_runtime(
@@ -206,6 +228,24 @@ class PrometheusQuerier:
             print(f"# Prometheus query failed: {mask_url(str(e))}", file=sys.stderr)
             return []
 
+    def query_range(self, query: str, start: int, end: int, step: int) -> List[dict]:
+        """Run a range query. Each result carries a "values" list of [epoch, value]."""
+        try:
+            resp = requests.get(
+                self.url + "/api/v1/query_range",
+                params={"query": query, "start": start, "end": end, "step": step},
+                timeout=self.timeout,
+            )
+            payload = resp.json()
+            if payload.get("status") != "success":
+                print("# Prometheus range query failed: %s"
+                      % mask_url(str(payload.get("error", "unknown"))), file=sys.stderr)
+                return []
+            return payload["data"]["result"]
+        except Exception as e:
+            print(f"# Prometheus range query failed: {mask_url(str(e))}", file=sys.stderr)
+            return []
+
 
 # %A first, then %i. %A is the *raw* per-element job ID, which is what
 # Prometheus' nvidia_gpu_jobId reports; %i is the display form and differs for
@@ -238,6 +278,7 @@ def _parse_squeue(stdout: str, user: Optional[str] = None) -> Dict[int, Job]:
         except ValueError:
             continue
 
+        start_epoch, elapsed = parse_start_time(start_time)
         jobs[raw_jid] = {
             "jobid": disp_id,  # display form; array notation preserved
             "user": user_name,
@@ -247,9 +288,10 @@ def _parse_squeue(stdout: str, user: Optional[str] = None) -> Dict[int, Job]:
             "gpus": gpus,
             "cpus": cpus,
             "start_time": start_time,  # format: YYYY-MM-DDTHH:MM:SS
-            # Runtime is both the --min-runtime filter input and the averaging
-            # window for --avg, so derive it once here.
-            "elapsed_seconds": elapsed_seconds(start_time),
+            # Runtime drives the --min-runtime filter, the --avg window and the
+            # --ts range, so derive it once here.
+            "start_epoch": start_epoch,
+            "elapsed_seconds": elapsed,
         }
 
     return jobs
@@ -491,6 +533,102 @@ def _collect_averaged(prom: PrometheusQuerier,
                     results[jobid][uuid][metric.key] = None
 
 
+def timeseries_step(elapsed: int, requested: Optional[int] = None) -> int:
+    """Range-query step in seconds.
+
+    Never finer than the scrape interval -- there is no more data -- and coarse
+    enough to stay under Prometheus' ~11k points-per-series cap on long jobs,
+    which is the same bound src/jobscope/report.py uses.
+    """
+    if requested:
+        return max(1, requested)
+    return max(SAMPLING_PERIOD, elapsed // 10000 + 1)
+
+
+def emit_timeseries_csv(prom: PrometheusQuerier,
+                        jobs: Dict[int, Job],
+                        metrics: List[Metric],
+                        gpus: Dict[str, Gpu],
+                        step: Optional[int] = None,
+                        out=None) -> None:
+    """Write one CSV row per GPU per sample over each job's runtime.
+
+    Schema is deliberately the one `jobscope dcgm --ts --csv` emits
+    (JOBID,EPOCH,TIME,NODE,GPU,<metrics>) so this feeds `jobscope plot` directly.
+    GPU is the minor number, or minor.instance for a MIG slice, because plot
+    groups series by (NODE, GPU) and slices would otherwise merge.
+    """
+    out = out or sys.stdout
+    columns = build_columns(metrics)
+
+    by_job = defaultdict(list)
+    for gpu in gpus.values():
+        by_job[gpu.jobid].append(gpu)
+
+    # (job, metric) range queries are independent; fetch them concurrently and
+    # sort afterwards so row order stays deterministic.
+    tasks = []
+    for jobid, job_gpus in by_job.items():
+        job = jobs[jobid]
+        start, elapsed = job.get("start_epoch"), job.get("elapsed_seconds")
+        if not start or not elapsed or elapsed <= 0:
+            print("# Skipping timeseries for job %s: unknown runtime" % job["jobid"],
+                  file=sys.stderr)
+            continue
+        regex = "^(" + "|".join(g.uuid for g in job_gpus) + ")$"
+        span = timeseries_step(elapsed, step)
+        for metric in metrics:
+            tasks.append((jobid, regex, start, start + elapsed, span, metric))
+
+    if not tasks:
+        return
+
+    def run(task):
+        _jobid, regex, start, end, span, metric = task
+        query = f"{metric.promql}{{{metric.label}=~\"{regex}\"}}"
+        return task, prom.query_range(query, start, end, span)
+
+    # {uuid: {epoch: {metric_key: value}}}
+    samples = defaultdict(lambda: defaultdict(dict))
+    workers = min(_MAX_QUERY_WORKERS, len(tasks))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for task, results in pool.map(run, tasks):
+            jobid, _regex, _start, _end, _span, metric = task
+            for series in results:
+                uuid = series["metric"].get(metric.label)
+                gpu = gpus.get(uuid)
+                if gpu is None or gpu.jobid != jobid:
+                    continue
+                for stamp, raw in series.get("values", []):
+                    try:
+                        epoch = int(float(stamp))
+                    except (TypeError, ValueError):
+                        continue
+                    samples[uuid][epoch][metric.key] = _scale_value(
+                        raw, metric.scale, metric.decimals)
+
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"]
+                    + [header for _key, header, _w in columns])
+
+    derived = [(key, fn) for key, _h, deps, fn in DERIVED_COLUMNS
+               if {m.key for m in metrics}.issuperset(deps)]
+
+    for jobid in sorted(jobs, key=lambda j: job_sort_key(jobs[j])):
+        label = jobs[jobid]["jobid"]
+        for gpu in sorted(by_job.get(jobid, []), key=lambda g: (g.host, g.minor, g.uuid)):
+            for epoch in sorted(samples.get(gpu.uuid, {})):
+                values = samples[gpu.uuid][epoch]
+                for key, fn in derived:
+                    values[key] = fn(values)
+                writer.writerow(
+                    [label, epoch,
+                     time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(epoch)),
+                     gpu.host, gpu.csv_id]
+                    + ["" if values.get(k) is None else values[k]
+                       for k, _h, _w in columns])
+
+
 def build_columns(metrics: List[Metric]) -> List[Tuple[str, str, int]]:
     """(key, header, width) per displayed column, including derived ones."""
     cols = [(m.key, m.header) for m in metrics if m.show]
@@ -642,6 +780,21 @@ def main():
         help="average each metric over each job's runtime, so values are "
              "comparable to jobstats (default: instantaneous snapshot)",
     )
+    parser.add_argument(
+        "--ts",
+        action="store_true",
+        help="emit a timeseries CSV over each job's runtime instead of a table; "
+             "same schema as 'jobscope dcgm --ts --csv', so it pipes to "
+             "'jobscope plot'. Ignores --avg",
+    )
+    parser.add_argument(
+        "--step",
+        type=int,
+        default=None,
+        help=f"--ts sample interval in seconds (default: the {SAMPLING_PERIOD}s "
+             "scrape interval, widened on long jobs to stay under Prometheus' "
+             "point cap)",
+    )
 
     args = parser.parse_args()
 
@@ -671,13 +824,24 @@ def main():
             sys.exit(1)
         jobs = filter_jobs_by_runtime(jobs, min_runtime_seconds)
 
-    if jobs:
-        prom = PrometheusQuerier(args.prom)
-        gpu_metrics, gpus = query_gpu_metrics(prom, jobs, metrics, average=args.avg)
-    else:
-        gpu_metrics, gpus = {}, {}
+    if not jobs:
+        print_results(jobs, {}, {}, build_columns(metrics))
+        return
 
-    # Print
+    prom = PrometheusQuerier(args.prom)
+
+    if args.ts:
+        if args.avg:
+            print("# --avg ignored with --ts (the CSV carries every sample)",
+                  file=sys.stderr)
+        gpus = discover_job_gpus(prom, jobs)
+        if not gpus:
+            print("# No GPU data available in Prometheus", file=sys.stderr)
+            sys.exit(1)
+        emit_timeseries_csv(prom, jobs, metrics, gpus, step=args.step)
+        return
+
+    gpu_metrics, gpus = query_gpu_metrics(prom, jobs, metrics, average=args.avg)
     print_results(jobs, gpu_metrics, gpus, build_columns(metrics), average=args.avg)
 
 
