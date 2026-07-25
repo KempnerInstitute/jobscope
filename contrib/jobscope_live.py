@@ -38,8 +38,9 @@ from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 # One job's squeue fields (all str) plus elapsed_seconds (Optional[int]).
 Job = Dict[str, Any]
-# {raw_jobid: {gpu_minor: {metric_key: value}}}
-GpuMetrics = Dict[int, Dict[int, Dict[str, Optional[float]]]]
+# {raw_jobid: {gpu_uuid: {metric_key: value}}}. Keyed by UUID rather than
+# minor_number because minor_number is not unique -- see _gpu_labels.
+GpuMetrics = Dict[int, Dict[str, Dict[str, Optional[float]]]]
 
 # Concurrency for the per-job averaged queries; the averaged path needs one
 # query per job per metric, which is only tolerable in parallel.
@@ -60,6 +61,15 @@ except ImportError:
     PROM_SERVER = "http://localhost:9090"
 
 import requests
+
+
+class Gpu(NamedTuple):
+    """Identity of one schedulable GPU: a whole card, or a single MIG instance."""
+    uuid: str
+    jobid: int
+    host: str
+    minor: int
+    label: str          # display form, e.g. "GPU 2" or "MIG 2.0"
 
 
 class Metric(NamedTuple):
@@ -280,9 +290,36 @@ def squeue_running_jobs(partition: Optional[str] = None,
     return _parse_squeue(result.stdout, user=user)
 
 
+def _gpu_labels(found: List[Tuple[str, int, str, int]]) -> Dict[str, str]:
+    """Display label per GPU UUID, from (uuid, jobid, host, minor) tuples.
+
+    minor_number is NOT unique per schedulable GPU: on a MIG node every instance
+    inherits its parent card's minor_number and ordinal, so a 3g.20gb pair both
+    report minor 0. Only the UUID is unique -- MIG instances carry a "MIG-" UUID
+    where whole cards carry "GPU-". NVML exposes no instance index, so enumerate
+    the siblings sharing a (job, host, minor) by sorted UUID, which is stable for
+    as long as the partitioning is.
+    """
+    siblings = defaultdict(list)
+    for uuid, jobid, host, minor in found:
+        if uuid.startswith("MIG-"):
+            siblings[(jobid, host, minor)].append(uuid)
+
+    labels = {}
+    for uuid, jobid, host, minor in found:
+        if not uuid.startswith("MIG-"):
+            labels[uuid] = "GPU %d" % minor
+            continue
+        peers = sorted(siblings[(jobid, host, minor)])
+        # Say MIG explicitly: a slice's memory total is the slice, not the card.
+        labels[uuid] = ("MIG %d.%d" % (minor, peers.index(uuid))
+                        if len(peers) > 1 else "MIG %d" % minor)
+    return labels
+
+
 def discover_job_gpus(prom: PrometheusQuerier,
-                      jobs: Dict[int, Job]) -> Dict[str, Tuple[int, int]]:
-    """Map GPU UUID -> (raw_jobid, gpu_minor) for the given jobs.
+                      jobs: Dict[int, Job]) -> Dict[str, Gpu]:
+    """Map GPU UUID -> Gpu for the given jobs.
 
     The job ID is nvidia_gpu_jobId's *value*, not a label, so there is nothing to
     filter on server-side: one instant query returns every GPU's current job and we
@@ -290,7 +327,7 @@ def discover_job_gpus(prom: PrometheusQuerier,
     single GPU can host a dozen jobs in a day, so a windowed lookup would hand the
     same GPU to several of them.
     """
-    uuid_to_job = {}
+    found = []
     for s in prom.instant_query("nvidia_gpu_jobId"):
         try:
             jobid = int(float(s["value"][1]))
@@ -298,16 +335,19 @@ def discover_job_gpus(prom: PrometheusQuerier,
             continue
         if jobid not in jobs:
             continue
-        uuid = s["metric"].get("uuid")  # nvidia_* exporter uses lowercase "uuid"
-        minor = s["metric"].get("minor_number")
+        labels = s["metric"]
+        uuid = labels.get("uuid")  # nvidia_* exporter uses lowercase "uuid"
+        minor = labels.get("minor_number")
         if not uuid or minor is None:
             continue
         try:
-            uuid_to_job[uuid] = (jobid, int(minor))
+            found.append((uuid, jobid, labels.get("host", ""), int(minor)))
         except ValueError:
             continue
 
-    return uuid_to_job
+    display = _gpu_labels(found)
+    return {uuid: Gpu(uuid, jobid, host, minor, display[uuid])
+            for uuid, jobid, host, minor in found}
 
 
 def _scale_value(raw: str, scale: float, decimals: int) -> Optional[float]:
@@ -343,46 +383,47 @@ def _averaged_query(metric: Metric, uuid_regex: str,
 
 def query_gpu_metrics(prom: PrometheusQuerier,
                       jobs: Dict[int, Job],
-                      metrics: List[Tuple[str, str, str, float, int, str]],
-                      average: bool = False) -> GpuMetrics:
-    """Collect GPU metrics for the given jobs.
+                      metrics: List[Metric],
+                      average: bool = False) -> Tuple[GpuMetrics, Dict[str, Gpu]]:
+    """Collect GPU metrics. Returns (values keyed by job/UUID, GPU identities).
 
     average=False reads the current instant (one query per metric, all GPUs at
-    once). average=True averages each metric over each job's own runtime so the
-    numbers line up with jobstats, which costs one query per job per metric.
+    once). average=True folds each metric over each job's runtime -- averaging
+    utilization, peaking memory -- so the numbers line up with jobstats, which
+    costs one query per job per metric.
     """
     if not jobs:
-        return {}
+        return {}, {}
 
-    uuid_to_job = discover_job_gpus(prom, jobs)
-    if not uuid_to_job:
+    gpus = discover_job_gpus(prom, jobs)
+    if not gpus:
         print("# No GPU data available in Prometheus", file=sys.stderr)
-        return {}
+        return {}, {}
 
     results = defaultdict(lambda: defaultdict(dict))
 
     if average:
-        _collect_averaged(prom, jobs, metrics, uuid_to_job, results)
+        _collect_averaged(prom, jobs, metrics, gpus, results)
         _add_derived(results, metrics)
-        return results
+        return results, gpus
 
     # Instant: one query per metric covering every GPU we care about.
-    uuid_regex = "^(" + "|".join(uuid_to_job.keys()) + ")$"
+    uuid_regex = "^(" + "|".join(gpus) + ")$"
     for metric in metrics:
         q = f"{metric.promql}{{{metric.label}=~\"{uuid_regex}\"}}"
         for s in prom.instant_query(q):
             uuid = s["metric"].get(metric.label)
-            if uuid not in uuid_to_job:
+            gpu = gpus.get(uuid)
+            if gpu is None:
                 continue
-            jobid, minor = uuid_to_job[uuid]
             try:
-                results[jobid][minor][metric.key] = _scale_value(
+                results[gpu.jobid][uuid][metric.key] = _scale_value(
                     s["value"][1], metric.scale, metric.decimals)
             except (KeyError, IndexError):
-                results[jobid][minor][metric.key] = None
+                results[gpu.jobid][uuid][metric.key] = None
 
     _add_derived(results, metrics)
-    return results
+    return results, gpus
 
 
 def _add_derived(results: GpuMetrics, metrics: List[Metric]) -> None:
@@ -401,7 +442,7 @@ def _add_derived(results: GpuMetrics, metrics: List[Metric]) -> None:
 def _collect_averaged(prom: PrometheusQuerier,
                       jobs: Dict[int, Job],
                       metrics: List[Metric],
-                      uuid_to_job: Dict[str, Tuple[int, int]],
+                      gpus: Dict[str, Gpu],
                       results: GpuMetrics) -> None:
     """Fill `results` with each metric folded over each job's own runtime.
 
@@ -411,8 +452,8 @@ def _collect_averaged(prom: PrometheusQuerier,
     """
     # Group this job's GPUs so one query covers all of them at its window.
     job_uuids = defaultdict(list)
-    for uuid, (jobid, _minor) in uuid_to_job.items():
-        job_uuids[jobid].append(uuid)
+    for uuid, gpu in gpus.items():
+        job_uuids[gpu.jobid].append(uuid)
 
     tasks = []
     for jobid, uuids in job_uuids.items():
@@ -439,16 +480,15 @@ def _collect_averaged(prom: PrometheusQuerier,
             jobid, _window, _uuid_regex, metric = task
             for s in series:
                 uuid = s["metric"].get(metric.label)
-                mapped = uuid_to_job.get(uuid)
+                gpu = gpus.get(uuid)
                 # A GPU reassigned mid-window can surface under another job here.
-                if not mapped or mapped[0] != jobid:
+                if gpu is None or gpu.jobid != jobid:
                     continue
-                minor = mapped[1]
                 try:
-                    results[jobid][minor][metric.key] = _scale_value(
+                    results[jobid][uuid][metric.key] = _scale_value(
                         s["value"][1], metric.scale, metric.decimals)
                 except (KeyError, IndexError):
-                    results[jobid][minor][metric.key] = None
+                    results[jobid][uuid][metric.key] = None
 
 
 def build_columns(metrics: List[Metric]) -> List[Tuple[str, str, int]]:
@@ -465,31 +505,33 @@ def build_columns(metrics: List[Metric]) -> List[Tuple[str, str, int]]:
     return [(key, header, max(6, len(header))) for key, header in cols]
 
 
-def format_job_row(job: Job, gpu_data: Dict[int, Dict[str, Optional[float]]],
-                   columns: List[Tuple[str, str, int]]) -> str:
-    """Format one job row with GPU metrics per GPU."""
+def format_job_row(job: Job, gpu_data: Dict[str, Dict[str, Optional[float]]],
+                   gpus: List[Gpu], columns: List[Tuple[str, str, int]],
+                   gpu_width: int) -> str:
+    """Format one row per GPU of this job (one per MIG instance, where used)."""
     # Truncate to the column widths: array IDs and multi-node nodelists are long
     # enough to push the table out of alignment otherwise.
     jobid = job["jobid"][:12]
     user = job["user"][:12]
-    node = job["node"][:15]
     name = job["name"][:15]
-    lead = f"{jobid:<12} {user:<12} {node:<15} {name:<15}"
 
-    # Collect metrics across GPUs in this job
-    all_gpu_minors = sorted(gpu_data.keys())
-    if not all_gpu_minors:
-        # No GPU data; just show the job
-        return f"{lead} [no GPU data]"
+    if not gpus:
+        # No GPU data; fall back to squeue's nodelist for the node column
+        return (f"{jobid:<12} {user:<12} {job['node'][:15]:<15} {name:<15}"
+                " [no GPU data]")
 
     rows = []
-    for gpu_minor in all_gpu_minors:
-        values = gpu_data[gpu_minor]
+    # One row per GPU, so the node column can name that GPU's own host rather
+    # than a nodelist -- which matters for a job spread over several nodes.
+    for gpu in sorted(gpus, key=lambda g: (g.host, g.minor, g.uuid)):
+        values = gpu_data.get(gpu.uuid, {})
         cells = []
         for key, _header, width in columns:
             val = values.get(key)
             cells.append(f"{'-' if val is None else val:>{width}}")
-        rows.append(f"{lead} GPU{gpu_minor:>2}  " + "  ".join(cells))
+        host = (gpu.host or job["node"])[:15]
+        rows.append(f"{jobid:<12} {user:<12} {host:<15} {name:<15} "
+                    f"{gpu.label:>{gpu_width}}  " + "  ".join(cells))
 
     return "\n".join(rows)
 
@@ -515,6 +557,7 @@ def job_sort_key(job: Job) -> Tuple[int, int]:
 
 def print_results(jobs: Dict[int, Job],
                   gpu_metrics: GpuMetrics,
+                  gpus: Dict[str, Gpu],
                   columns: List[Tuple[str, str, int]],
                   average: bool = False) -> None:
     """Pretty-print the job metrics."""
@@ -527,11 +570,18 @@ def print_results(jobs: Dict[int, Job],
                   "memory peak (comparable to jobstats)"
                   if average else "instantaneous snapshot"))
 
+    by_job = defaultdict(list)
+    for gpu in gpus.values():
+        by_job[gpu.jobid].append(gpu)
+
+    # Widen the GPU column only if a longer label ("MIG 0.1") is actually present.
+    gpu_width = max([5] + [len(g.label) for g in gpus.values()])
+
     # Header
     headers = [f"{header:>{width}}" for _key, header, width in columns]
     header_line = (
-        f"{'JOBID':<12} {'USER':<12} {'NODE':<15} {'NAME':<15} {'GPU':>5}  "
-        + "  ".join(headers)
+        f"{'JOBID':<12} {'USER':<12} {'NODE':<15} {'NAME':<15} "
+        f"{'GPU':>{gpu_width}}  " + "  ".join(headers)
     )
     print(header_line)
     print("-" * len(header_line))
@@ -539,8 +589,8 @@ def print_results(jobs: Dict[int, Job],
     # Rows
     for jobid in sorted(jobs, key=lambda j: job_sort_key(jobs[j])):
         job = jobs[jobid]
-        gpu_data = gpu_metrics.get(jobid, {})
-        print(format_job_row(job, gpu_data, columns))
+        print(format_job_row(job, gpu_metrics.get(jobid, {}),
+                             by_job.get(jobid, []), columns, gpu_width))
 
 
 def main():
@@ -623,12 +673,12 @@ def main():
 
     if jobs:
         prom = PrometheusQuerier(args.prom)
-        gpu_metrics = query_gpu_metrics(prom, jobs, metrics, average=args.avg)
+        gpu_metrics, gpus = query_gpu_metrics(prom, jobs, metrics, average=args.avg)
     else:
-        gpu_metrics = {}
+        gpu_metrics, gpus = {}, {}
 
     # Print
-    print_results(jobs, gpu_metrics, build_columns(metrics), average=args.avg)
+    print_results(jobs, gpu_metrics, gpus, build_columns(metrics), average=args.avg)
 
 
 if __name__ == "__main__":
