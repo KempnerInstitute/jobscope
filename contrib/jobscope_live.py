@@ -5,6 +5,10 @@ Quick view of GPU utilization and DCGM metrics for jobs currently running on a
 given partition, using squeue (instant; no history) + Prometheus (at the current
 moment). No historical analysis or job reconstruction -- just the live snapshot.
 
+By default every number is an instantaneous reading, which will NOT agree with
+jobstats on a bursty job: jobstats averages over the whole runtime. Pass --avg to
+average over each job's runtime instead, which reproduces jobstats' numbers.
+
 Usage:
   ./jobscope_live.py                # all running jobs >1h (default)
   ./jobscope_live.py -j 34622920            # specific job by ID
@@ -13,6 +17,7 @@ Usage:
   ./jobscope_live.py -p kempner -u alice
   ./jobscope_live.py -p kempner --gpu      # GPU columns only
   ./jobscope_live.py -p kempner --all      # all DCGM metrics
+  ./jobscope_live.py -p kempner --avg      # averaged over runtime (= jobstats)
   ./jobscope_live.py -p kempner --min-runtime 5m  # jobs running >5 minutes
   ./jobscope_live.py -p kempner --min-runtime 0s  # all running jobs (no filter)
 
@@ -25,8 +30,18 @@ import argparse
 import subprocess
 import re
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+# One job's squeue fields (all str) plus elapsed_seconds (Optional[int]).
+Job = Dict[str, Any]
+# {raw_jobid: {gpu_minor: {metric_key: value}}}
+GpuMetrics = Dict[int, Dict[int, Dict[str, Optional[float]]]]
+
+# Concurrency for the per-job averaged queries; the averaged path needs one
+# query per job per metric, which is only tolerable in parallel.
+_MAX_QUERY_WORKERS = 8
 
 # Python 3.6 compatibility
 if sys.version_info >= (3, 7):
@@ -83,26 +98,32 @@ def parse_time_cutoff(cutoff_str: str) -> int:
     return value * multipliers[unit]
 
 
+def elapsed_seconds(start_time: str) -> Optional[int]:
+    """Seconds since a squeue %S start time, or None if it is not a timestamp.
+
+    squeue prints "N/A"/"Unknown" when a job has no start time yet.
+    """
+    try:
+        # Python 3.6 compatibility: strptime instead of fromisoformat
+        start_dt = datetime.strptime(start_time, "%Y-%m-%dT%H:%M:%S")
+    except (ValueError, TypeError):
+        return None
+    return int((datetime.now() - start_dt).total_seconds())
+
+
 def filter_jobs_by_runtime(
-    jobs: Dict[int, Dict[str, str]], min_runtime_seconds: int
-) -> Dict[int, Dict[str, str]]:
+    jobs: Dict[int, Job], min_runtime_seconds: int
+) -> Dict[int, Job]:
     """Filter jobs to keep only those running for > min_runtime_seconds."""
-    now = datetime.now()
     filtered = {}
 
     for jobid, job in jobs.items():
-        try:
-            # Parse start time: format is "YYYY-MM-DDTHH:MM:SS"
-            start_time_str = job["start_time"]
-            # Python 3.6 compatibility: use strptime instead of fromisoformat
-            start_dt = datetime.strptime(start_time_str, "%Y-%m-%dT%H:%M:%S")
-            elapsed = (now - start_dt).total_seconds()
-
-            if elapsed > min_runtime_seconds:
-                job["elapsed_seconds"] = int(elapsed)
-                filtered[jobid] = job
-        except (ValueError, KeyError) as e:
-            print(f"# Failed to parse start time for job {jobid}: {e}", file=sys.stderr)
+        elapsed = job["elapsed_seconds"]
+        if elapsed is None:
+            print(f"# No usable start time for job {job['jobid']}", file=sys.stderr)
+            continue
+        if elapsed > min_runtime_seconds:
+            filtered[jobid] = job
 
     return filtered
 
@@ -136,7 +157,7 @@ class PrometheusQuerier:
 _SQUEUE_FMT = "%A|%i|%u|%N|%g|%j|%G|%C|%S"
 
 
-def _parse_squeue(stdout: str, user: Optional[str] = None) -> Dict[int, Dict[str, str]]:
+def _parse_squeue(stdout: str, user: Optional[str] = None) -> Dict[int, Job]:
     """Parse squeue output in _SQUEUE_FMT into {raw_jobid: {field: value}}.
 
     Keyed by the raw job ID so the Prometheus join works for array elements too;
@@ -169,12 +190,15 @@ def _parse_squeue(stdout: str, user: Optional[str] = None) -> Dict[int, Dict[str
             "gpus": gpus,
             "cpus": cpus,
             "start_time": start_time,  # format: YYYY-MM-DDTHH:MM:SS
+            # Runtime is both the --min-runtime filter input and the averaging
+            # window for --avg, so derive it once here.
+            "elapsed_seconds": elapsed_seconds(start_time),
         }
 
     return jobs
 
 
-def squeue_job_by_id(jobid: str) -> Dict[int, Dict[str, str]]:
+def squeue_job_by_id(jobid: str) -> Dict[int, Job]:
     """Fetch one job by ID from squeue. Return {raw_jobid: {field: value}}.
 
     Accepts a plain job ID (34843528) or an array element (34843528_6).
@@ -192,7 +216,7 @@ def squeue_job_by_id(jobid: str) -> Dict[int, Dict[str, str]]:
 
 
 def squeue_running_jobs(partition: Optional[str] = None,
-                        user: Optional[str] = None) -> Dict[int, Dict[str, str]]:
+                        user: Optional[str] = None) -> Dict[int, Job]:
     """Fetch running jobs from squeue. Return {raw_jobid: {field: value}}."""
     cmd = ["squeue", "-h", "-t", "RUNNING", "-o", _SQUEUE_FMT]
 
@@ -209,20 +233,16 @@ def squeue_running_jobs(partition: Optional[str] = None,
     return _parse_squeue(result.stdout, user=user)
 
 
-def query_gpu_metrics(prom: PrometheusQuerier,
-                      jobs: Dict[int, Dict[str, str]],
-                      metrics: List[Tuple[str, str, str, float, int, str]]) -> Dict[int, Dict[int, Dict[str, Optional[float]]]]:
-    """Query Prometheus for GPU metrics. Return {jobid: {gpu_minor: {metric_key: value}}}."""
-    if not jobs:
-        return {}
+def discover_job_gpus(prom: PrometheusQuerier,
+                      jobs: Dict[int, Job]) -> Dict[str, Tuple[int, int]]:
+    """Map GPU UUID -> (raw_jobid, gpu_minor) for the given jobs.
 
-    # Map UUID -> (raw_jobid, gpu_minor) from nvidia_gpu_jobId. The job ID is the
-    # metric's *value*, not a label, so there is nothing to filter on server-side:
-    # one instant query returns every GPU's current job and we keep the ones we
-    # asked about. Deliberately instant rather than a range -- a single GPU can host
-    # a dozen jobs in a day, and the DCGM metrics below are read at this instant, so
-    # a windowed lookup would staple current utilization onto a job that has already
-    # left the GPU.
+    The job ID is nvidia_gpu_jobId's *value*, not a label, so there is nothing to
+    filter on server-side: one instant query returns every GPU's current job and we
+    keep the ones we asked about. Deliberately instant rather than windowed -- a
+    single GPU can host a dozen jobs in a day, so a windowed lookup would hand the
+    same GPU to several of them.
+    """
     uuid_to_job = {}
     for s in prom.instant_query("nvidia_gpu_jobId"):
         try:
@@ -240,42 +260,136 @@ def query_gpu_metrics(prom: PrometheusQuerier,
         except ValueError:
             continue
 
+    return uuid_to_job
+
+
+def _scale_value(raw: str, scale: float, decimals: int) -> Optional[float]:
+    """Apply a metric's scale factor and rounding. None if unparseable."""
+    try:
+        value = float(raw) * scale
+    except (TypeError, ValueError):
+        return None
+    return round(value, decimals) if decimals else int(round(value))
+
+
+def _averaged_query(metric: str, uuid_label: str, uuid_regex: str,
+                    window: int, raw_jobid: int) -> str:
+    """Build an avg_over_time query matching how jobstats averages a metric.
+
+    jobstats reports each GPU metric as an average over the job's whole runtime,
+    so an instant read will not agree with it on a bursty job. Mirror its form:
+    a [<runtime>s:] subquery.
+
+    For nvidia_* metrics we can additionally intersect with nvidia_gpu_jobId ==
+    <raw_jobid>, exactly as jobstats does. Both series come from the same exporter
+    and so carry identical label sets, which `and` requires; that clips the average
+    to the samples where this job actually owned the GPU, making the window length
+    a harmless upper bound. DCGM_* metrics come from a different exporter with
+    different labels (UUID/Hostname/gpu), so `and` cannot match and the window
+    alone bounds them -- the same compromise jobstats_extended makes.
+    """
+    selector = f"{metric}{{{uuid_label}=~\"{uuid_regex}\"}}"
+    if uuid_label == "uuid":
+        selector = f"({selector} and nvidia_gpu_jobId == {raw_jobid})"
+    return f"avg_over_time({selector}[{window}s:])"
+
+
+def query_gpu_metrics(prom: PrometheusQuerier,
+                      jobs: Dict[int, Job],
+                      metrics: List[Tuple[str, str, str, float, int, str]],
+                      average: bool = False) -> GpuMetrics:
+    """Collect GPU metrics for the given jobs.
+
+    average=False reads the current instant (one query per metric, all GPUs at
+    once). average=True averages each metric over each job's own runtime so the
+    numbers line up with jobstats, which costs one query per job per metric.
+    """
+    if not jobs:
+        return {}
+
+    uuid_to_job = discover_job_gpus(prom, jobs)
     if not uuid_to_job:
         print("# No GPU data available in Prometheus", file=sys.stderr)
         return {}
 
-    # Query each metric by UUID, store under minor_number
     results = defaultdict(lambda: defaultdict(dict))
+
+    if average:
+        _collect_averaged(prom, jobs, metrics, uuid_to_job, results)
+        return results
+
+    # Instant: one query per metric covering every GPU we care about.
     uuid_regex = "^(" + "|".join(uuid_to_job.keys()) + ")$"
-
-    for key, header, metric, scale, decimals, uuid_label in metrics:
-        try:
-            q = f"{metric}{{{uuid_label}=~\"{uuid_regex}\"}}"
-            res = prom.instant_query(q)
-
-            for s in res:
-                uuid = s["metric"].get(uuid_label)
-                if uuid not in uuid_to_job:
-                    continue
-
-                jobid, minor = uuid_to_job[uuid]
-                try:
-                    value = float(s["value"][1]) * scale
-                    if decimals:
-                        value = round(value, decimals)
-                    else:
-                        value = int(round(value))
-                    results[jobid][minor][key] = value
-                except (TypeError, ValueError, IndexError):
-                    results[jobid][minor][key] = None
-
-        except Exception as e:
-            print(f"# Failed to query {metric}: {e}", file=sys.stderr)
+    for key, _header, metric, scale, decimals, uuid_label in metrics:
+        q = f"{metric}{{{uuid_label}=~\"{uuid_regex}\"}}"
+        for s in prom.instant_query(q):
+            uuid = s["metric"].get(uuid_label)
+            if uuid not in uuid_to_job:
+                continue
+            jobid, minor = uuid_to_job[uuid]
+            try:
+                results[jobid][minor][key] = _scale_value(s["value"][1], scale, decimals)
+            except (KeyError, IndexError):
+                results[jobid][minor][key] = None
 
     return results
 
 
-def format_job_row(job: Dict[str, str], gpu_data: Dict[int, Dict[str, Optional[float]]],
+def _collect_averaged(prom: PrometheusQuerier,
+                      jobs: Dict[int, Job],
+                      metrics: List[Tuple[str, str, str, float, int, str]],
+                      uuid_to_job: Dict[str, Tuple[int, int]],
+                      results: GpuMetrics) -> None:
+    """Fill `results` with each metric averaged over each job's own runtime.
+
+    The averaging window differs per job and PromQL cannot vary a window per
+    series, so this is one query per (job, metric) -- run concurrently, since
+    that count grows quickly with partition size.
+    """
+    # Group this job's GPUs so one query covers all of them at its window.
+    job_uuids = defaultdict(list)
+    for uuid, (jobid, _minor) in uuid_to_job.items():
+        job_uuids[jobid].append(uuid)
+
+    tasks = []
+    for jobid, uuids in job_uuids.items():
+        window = jobs[jobid].get("elapsed_seconds")
+        if not window or window <= 0:
+            print(f"# Skipping average for job {jobs[jobid]['jobid']}: unknown runtime",
+                  file=sys.stderr)
+            continue
+        uuid_regex = "^(" + "|".join(uuids) + ")$"
+        for spec in metrics:
+            tasks.append((jobid, window, uuid_regex, spec))
+
+    if not tasks:
+        return
+
+    def run(task):
+        jobid, window, uuid_regex, spec = task
+        _key, _header, metric, _scale, _decimals, uuid_label = spec
+        q = _averaged_query(metric, uuid_label, uuid_regex, window, jobid)
+        return task, prom.instant_query(q)
+
+    workers = min(_MAX_QUERY_WORKERS, len(tasks))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for task, series in pool.map(run, tasks):
+            jobid, _window, _uuid_regex, spec = task
+            key, _header, _metric, scale, decimals, uuid_label = spec
+            for s in series:
+                uuid = s["metric"].get(uuid_label)
+                mapped = uuid_to_job.get(uuid)
+                # A GPU reassigned mid-window can surface under another job here.
+                if not mapped or mapped[0] != jobid:
+                    continue
+                minor = mapped[1]
+                try:
+                    results[jobid][minor][key] = _scale_value(s["value"][1], scale, decimals)
+                except (KeyError, IndexError):
+                    results[jobid][minor][key] = None
+
+
+def format_job_row(job: Job, gpu_data: Dict[int, Dict[str, Optional[float]]],
                    metrics: List[Tuple[str, str, str, float, int, str]]) -> str:
     """Format one job row with GPU metrics per GPU."""
     # Truncate to the column widths: array IDs and multi-node nodelists are long
@@ -309,7 +423,7 @@ def format_job_row(job: Dict[str, str], gpu_data: Dict[int, Dict[str, Optional[f
     return "\n".join(rows)
 
 
-def job_sort_key(job: Dict[str, str]) -> Tuple[int, int]:
+def job_sort_key(job: Job) -> Tuple[int, int]:
     """Sort key from the displayed job ID: (base id, array index).
 
     Keeps elements of one array together and in numeric index order; raw IDs are
@@ -328,13 +442,18 @@ def job_sort_key(job: Dict[str, str]) -> Tuple[int, int]:
     return (base_n, index_n)
 
 
-def print_results(jobs: Dict[int, Dict[str, str]],
-                  gpu_metrics: Dict[int, Dict[int, Dict[str, Optional[float]]]],
-                  metrics: List[Tuple[str, str, str, float, int, str]]) -> None:
-    """Pretty-print the live job metrics."""
+def print_results(jobs: Dict[int, Job],
+                  gpu_metrics: GpuMetrics,
+                  metrics: List[Tuple[str, str, str, float, int, str]],
+                  average: bool = False) -> None:
+    """Pretty-print the job metrics."""
     if not jobs:
         print("# No running jobs in this partition", file=sys.stderr)
         return
+
+    # Say which reading this is; the two are not comparable on a bursty job.
+    print("# " + ("averaged over each job's runtime (comparable to jobstats)"
+                  if average else "instantaneous snapshot"))
 
     # Header
     headers = [f"{h:>6}" for _, h, *_ in metrics]
@@ -395,6 +514,12 @@ def main():
         action="store_true",
         help="all DCGM metrics (extended catalog)",
     )
+    parser.add_argument(
+        "--avg",
+        action="store_true",
+        help="average each metric over each job's runtime, so values are "
+             "comparable to jobstats (default: instantaneous snapshot)",
+    )
 
     args = parser.parse_args()
 
@@ -426,12 +551,12 @@ def main():
 
     if jobs:
         prom = PrometheusQuerier(args.prom)
-        gpu_metrics = query_gpu_metrics(prom, jobs, metrics)
+        gpu_metrics = query_gpu_metrics(prom, jobs, metrics, average=args.avg)
     else:
         gpu_metrics = {}
 
     # Print
-    print_results(jobs, gpu_metrics, metrics)
+    print_results(jobs, gpu_metrics, metrics, average=args.avg)
 
 
 if __name__ == "__main__":
