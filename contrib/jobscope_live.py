@@ -86,6 +86,16 @@ ALL_METRICS = [
 ]
 
 
+def mask_url(text: str) -> str:
+    """Redact credentials embedded in a URL's userinfo.
+
+    PROM_SERVER carries a Grafana Cloud API token as basic auth, and this string
+    otherwise reaches --help output and requests' exception messages -- which land
+    in shell history, logs and pasted terminal output.
+    """
+    return re.sub(r"//[^/@\s]+@", "//<redacted>@", text)
+
+
 def parse_time_cutoff(cutoff_str: str) -> int:
     """Parse time cutoff string (e.g., '5m', '1h', '2d') to seconds."""
     match = re.match(r"^(\d+)([smhd])$", cutoff_str.strip())
@@ -146,7 +156,8 @@ class PrometheusQuerier:
             payload = resp.json()
             return payload["data"]["result"] if payload.get("status") == "success" else []
         except Exception as e:
-            print(f"# Prometheus query failed: {e}", file=sys.stderr)
+            # requests puts the request URL in its exception text, so mask it.
+            print(f"# Prometheus query failed: {mask_url(str(e))}", file=sys.stderr)
             return []
 
 
@@ -502,7 +513,8 @@ def main():
     parser.add_argument(
         "--prom",
         default=PROM_SERVER,
-        help=f"Prometheus URL (default: {PROM_SERVER})",
+        # Masked: the site default embeds an API token.
+        help=f"Prometheus URL (default: {mask_url(PROM_SERVER)})",
     )
     parser.add_argument(
         "--gpu",
