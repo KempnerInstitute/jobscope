@@ -6,8 +6,10 @@ given partition, using squeue (instant; no history) + Prometheus (at the current
 moment). No historical analysis or job reconstruction -- just the live snapshot.
 
 By default every number is an instantaneous reading, which will NOT agree with
-jobstats on a bursty job: jobstats averages over the whole runtime. Pass --avg to
-average over each job's runtime instead, which reproduces jobstats' numbers.
+jobstats on a bursty job: jobstats folds over the whole runtime. Pass --avg to do
+the same -- averaging utilization and peaking memory, as jobstats does -- which
+reproduces its numbers. MEM_GB/MEM% correspond to jobstats' "GPU memory usage per
+node - maximum used/total".
 
 Usage:
   ./jobscope_live.py                # all running jobs >1h (default)
@@ -32,7 +34,7 @@ import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 # One job's squeue fields (all str) plus elapsed_seconds (Optional[int]).
 Job = Dict[str, Any]
@@ -60,29 +62,63 @@ except ImportError:
 import requests
 
 
-# DCGM metrics (same catalog as the main jobscope package)
-# Note: nvidia_gpu_duty_cycle uses lowercase "uuid", DCGM_* metrics use uppercase "UUID"
+class Metric(NamedTuple):
+    """One queryable GPU metric and how to render it."""
+    key: str            # key under which the value is stored
+    header: str         # column header
+    promql: str         # bare Prometheus metric name
+    scale: float        # multiply the raw value by this
+    decimals: int       # 0 renders as an integer
+    label: str          # GPU UUID label: nvidia_* uses "uuid", DCGM_* uses "UUID"
+    agg: str = "avg"    # how --avg folds it over the runtime: "avg" or "max"
+    show: bool = True   # False = fetched only to feed a derived column
+
+
+# Utilization metrics are time-averaged; memory is a peak (max), matching how
+# jobstats treats each -- see _averaged_query.
 DCGM_METRICS = [
-    ("duty", "DUTY%", "nvidia_gpu_duty_cycle", 1, 0, "uuid"),
-    ("smact", "SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE", 100, 1, "UUID"),
-    ("occ", "OCC%", "DCGM_FI_PROF_SM_OCCUPANCY", 100, 1, "UUID"),
-    ("tensor", "TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE", 100, 1, "UUID"),
-    ("dram", "DRAM%", "DCGM_FI_PROF_DRAM_ACTIVE", 100, 1, "UUID"),
-    ("power", "POWER_W", "DCGM_FI_DEV_POWER_USAGE", 1, 0, "UUID"),
+    Metric("duty", "DUTY%", "nvidia_gpu_duty_cycle", 1, 0, "uuid"),
+    Metric("smact", "SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE", 100, 1, "UUID"),
+    Metric("occ", "OCC%", "DCGM_FI_PROF_SM_OCCUPANCY", 100, 1, "UUID"),
+    Metric("tensor", "TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE", 100, 1, "UUID"),
+    Metric("dram", "DRAM%", "DCGM_FI_PROF_DRAM_ACTIVE", 100, 1, "UUID"),
+    Metric("power", "POWER_W", "DCGM_FI_DEV_POWER_USAGE", 1, 0, "UUID"),
+    # Same source and aggregation jobstats uses for "GPU memory usage per node
+    # - maximum used/total", so MEM_GB/MEM% are directly comparable to it.
+    Metric("mem", "MEM_GB", "nvidia_gpu_memory_used_bytes",
+           1 / 1024 ** 3, 1, "uuid", agg="max"),
+    Metric("memtot", "", "nvidia_gpu_memory_total_bytes",
+           1 / 1024 ** 3, 1, "uuid", agg="max", show=False),
 ]
 
 GPU_SUMMARY_METRICS = DCGM_METRICS[1:]  # all except duty
 ALL_METRICS = [
-    ("engine", "ENGINE%", "DCGM_FI_PROF_GR_ENGINE_ACTIVE", 100, 1, "UUID"),
-    ("hmma", "HMMA%", "DCGM_FI_PROF_PIPE_TENSOR_HMMA_ACTIVE", 100, 1, "UUID"),
-    ("imma", "IMMA%", "DCGM_FI_PROF_PIPE_TENSOR_IMMA_ACTIVE", 100, 1, "UUID"),
-    ("dfma", "DFMA%", "DCGM_FI_PROF_PIPE_TENSOR_DFMA_ACTIVE", 100, 1, "UUID"),
-    ("fp16", "FP16%", "DCGM_FI_PROF_PIPE_FP16_ACTIVE", 100, 1, "UUID"),
-    ("fp32", "FP32%", "DCGM_FI_PROF_PIPE_FP32_ACTIVE", 100, 1, "UUID"),
-    ("fp64", "FP64%", "DCGM_FI_PROF_PIPE_FP64_ACTIVE", 100, 1, "UUID"),
-    ("memcp", "MEMCP%", "DCGM_FI_DEV_MEM_COPY_UTIL", 1, 0, "UUID"),
-    ("temp", "TEMP_C", "DCGM_FI_DEV_GPU_TEMP", 1, 0, "UUID"),
-    ("fbused", "FB_USED_GB", "DCGM_FI_DEV_FB_USED", 1 / 1024, 1, "UUID"),
+    Metric("engine", "ENGINE%", "DCGM_FI_PROF_GR_ENGINE_ACTIVE", 100, 1, "UUID"),
+    Metric("hmma", "HMMA%", "DCGM_FI_PROF_PIPE_TENSOR_HMMA_ACTIVE", 100, 1, "UUID"),
+    Metric("imma", "IMMA%", "DCGM_FI_PROF_PIPE_TENSOR_IMMA_ACTIVE", 100, 1, "UUID"),
+    Metric("dfma", "DFMA%", "DCGM_FI_PROF_PIPE_TENSOR_DFMA_ACTIVE", 100, 1, "UUID"),
+    Metric("fp16", "FP16%", "DCGM_FI_PROF_PIPE_FP16_ACTIVE", 100, 1, "UUID"),
+    Metric("fp32", "FP32%", "DCGM_FI_PROF_PIPE_FP32_ACTIVE", 100, 1, "UUID"),
+    Metric("fp64", "FP64%", "DCGM_FI_PROF_PIPE_FP64_ACTIVE", 100, 1, "UUID"),
+    Metric("memcp", "MEMCP%", "DCGM_FI_DEV_MEM_COPY_UTIL", 1, 0, "UUID"),
+    Metric("temp", "TEMP_C", "DCGM_FI_DEV_GPU_TEMP", 1, 0, "UUID"),
+    # DCGM's own framebuffer reading; MEM_GB above is the jobstats-comparable one.
+    Metric("fbused", "FB_USED_GB", "DCGM_FI_DEV_FB_USED", 1 / 1024, 1, "UUID", agg="max"),
+]
+
+
+def _mem_percent(values: Dict[str, Optional[float]]) -> Optional[float]:
+    """Peak GPU memory used as a percentage of the card's total."""
+    used, total = values.get("mem"), values.get("memtot")
+    if used is None or not total:
+        return None
+    return round(used / total * 100, 1)
+
+
+# Columns computed from fetched metrics rather than queried. Each declares the
+# keys it needs so it only appears when those metrics were actually collected.
+DERIVED_COLUMNS = [
+    ("mempct", "MEM%", ("mem", "memtot"), _mem_percent),
 ]
 
 
@@ -283,26 +319,26 @@ def _scale_value(raw: str, scale: float, decimals: int) -> Optional[float]:
     return round(value, decimals) if decimals else int(round(value))
 
 
-def _averaged_query(metric: str, uuid_label: str, uuid_regex: str,
+def _averaged_query(metric: Metric, uuid_regex: str,
                     window: int, raw_jobid: int) -> str:
-    """Build an avg_over_time query matching how jobstats averages a metric.
+    """Build the over-the-runtime query matching how jobstats folds this metric.
 
-    jobstats reports each GPU metric as an average over the job's whole runtime,
-    so an instant read will not agree with it on a bursty job. Mirror its form:
-    a [<runtime>s:] subquery.
+    jobstats reports utilization as an average over the job's whole runtime but
+    memory as the peak, so an instant read will not agree with it on a bursty job.
+    Mirror both: a [<runtime>s:] subquery under the metric's own aggregation.
 
     For nvidia_* metrics we can additionally intersect with nvidia_gpu_jobId ==
     <raw_jobid>, exactly as jobstats does. Both series come from the same exporter
-    and so carry identical label sets, which `and` requires; that clips the average
+    and so carry identical label sets, which `and` requires; that clips the window
     to the samples where this job actually owned the GPU, making the window length
     a harmless upper bound. DCGM_* metrics come from a different exporter with
     different labels (UUID/Hostname/gpu), so `and` cannot match and the window
     alone bounds them -- the same compromise jobstats_extended makes.
     """
-    selector = f"{metric}{{{uuid_label}=~\"{uuid_regex}\"}}"
-    if uuid_label == "uuid":
+    selector = f"{metric.promql}{{{metric.label}=~\"{uuid_regex}\"}}"
+    if metric.label == "uuid":
         selector = f"({selector} and nvidia_gpu_jobId == {raw_jobid})"
-    return f"avg_over_time({selector}[{window}s:])"
+    return f"{metric.agg}_over_time({selector}[{window}s:])"
 
 
 def query_gpu_metrics(prom: PrometheusQuerier,
@@ -327,35 +363,51 @@ def query_gpu_metrics(prom: PrometheusQuerier,
 
     if average:
         _collect_averaged(prom, jobs, metrics, uuid_to_job, results)
+        _add_derived(results, metrics)
         return results
 
     # Instant: one query per metric covering every GPU we care about.
     uuid_regex = "^(" + "|".join(uuid_to_job.keys()) + ")$"
-    for key, _header, metric, scale, decimals, uuid_label in metrics:
-        q = f"{metric}{{{uuid_label}=~\"{uuid_regex}\"}}"
+    for metric in metrics:
+        q = f"{metric.promql}{{{metric.label}=~\"{uuid_regex}\"}}"
         for s in prom.instant_query(q):
-            uuid = s["metric"].get(uuid_label)
+            uuid = s["metric"].get(metric.label)
             if uuid not in uuid_to_job:
                 continue
             jobid, minor = uuid_to_job[uuid]
             try:
-                results[jobid][minor][key] = _scale_value(s["value"][1], scale, decimals)
+                results[jobid][minor][metric.key] = _scale_value(
+                    s["value"][1], metric.scale, metric.decimals)
             except (KeyError, IndexError):
-                results[jobid][minor][key] = None
+                results[jobid][minor][metric.key] = None
 
+    _add_derived(results, metrics)
     return results
+
+
+def _add_derived(results: GpuMetrics, metrics: List[Metric]) -> None:
+    """Fill in derived columns whose input metrics were all collected."""
+    fetched = {m.key for m in metrics}
+    applicable = [(key, fn) for key, _hdr, deps, fn in DERIVED_COLUMNS
+                  if fetched.issuperset(deps)]
+    if not applicable:
+        return
+    for per_gpu in results.values():
+        for values in per_gpu.values():
+            for key, fn in applicable:
+                values[key] = fn(values)
 
 
 def _collect_averaged(prom: PrometheusQuerier,
                       jobs: Dict[int, Job],
-                      metrics: List[Tuple[str, str, str, float, int, str]],
+                      metrics: List[Metric],
                       uuid_to_job: Dict[str, Tuple[int, int]],
                       results: GpuMetrics) -> None:
-    """Fill `results` with each metric averaged over each job's own runtime.
+    """Fill `results` with each metric folded over each job's own runtime.
 
-    The averaging window differs per job and PromQL cannot vary a window per
-    series, so this is one query per (job, metric) -- run concurrently, since
-    that count grows quickly with partition size.
+    The window differs per job and PromQL cannot vary a window per series, so
+    this is one query per (job, metric) -- run concurrently, since that count
+    grows quickly with partition size.
     """
     # Group this job's GPUs so one query covers all of them at its window.
     job_uuids = defaultdict(list)
@@ -370,38 +422,51 @@ def _collect_averaged(prom: PrometheusQuerier,
                   file=sys.stderr)
             continue
         uuid_regex = "^(" + "|".join(uuids) + ")$"
-        for spec in metrics:
-            tasks.append((jobid, window, uuid_regex, spec))
+        for metric in metrics:
+            tasks.append((jobid, window, uuid_regex, metric))
 
     if not tasks:
         return
 
     def run(task):
-        jobid, window, uuid_regex, spec = task
-        _key, _header, metric, _scale, _decimals, uuid_label = spec
-        q = _averaged_query(metric, uuid_label, uuid_regex, window, jobid)
-        return task, prom.instant_query(q)
+        jobid, window, uuid_regex, metric = task
+        return task, prom.instant_query(
+            _averaged_query(metric, uuid_regex, window, jobid))
 
     workers = min(_MAX_QUERY_WORKERS, len(tasks))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for task, series in pool.map(run, tasks):
-            jobid, _window, _uuid_regex, spec = task
-            key, _header, _metric, scale, decimals, uuid_label = spec
+            jobid, _window, _uuid_regex, metric = task
             for s in series:
-                uuid = s["metric"].get(uuid_label)
+                uuid = s["metric"].get(metric.label)
                 mapped = uuid_to_job.get(uuid)
                 # A GPU reassigned mid-window can surface under another job here.
                 if not mapped or mapped[0] != jobid:
                     continue
                 minor = mapped[1]
                 try:
-                    results[jobid][minor][key] = _scale_value(s["value"][1], scale, decimals)
+                    results[jobid][minor][metric.key] = _scale_value(
+                        s["value"][1], metric.scale, metric.decimals)
                 except (KeyError, IndexError):
-                    results[jobid][minor][key] = None
+                    results[jobid][minor][metric.key] = None
+
+
+def build_columns(metrics: List[Metric]) -> List[Tuple[str, str, int]]:
+    """(key, header, width) per displayed column, including derived ones."""
+    cols = [(m.key, m.header) for m in metrics if m.show]
+    fetched = {m.key for m in metrics}
+    for key, header, deps, _fn in DERIVED_COLUMNS:
+        if not fetched.issuperset(deps):
+            continue
+        # Sit beside the column it is derived from rather than at the far end.
+        from_deps = [i for i, (k, _h) in enumerate(cols) if k in deps]
+        cols.insert(max(from_deps) + 1 if from_deps else len(cols), (key, header))
+    # Widen to the header, so long ones like FB_USED_GB do not skew the table.
+    return [(key, header, max(6, len(header))) for key, header in cols]
 
 
 def format_job_row(job: Job, gpu_data: Dict[int, Dict[str, Optional[float]]],
-                   metrics: List[Tuple[str, str, str, float, int, str]]) -> str:
+                   columns: List[Tuple[str, str, int]]) -> str:
     """Format one job row with GPU metrics per GPU."""
     # Truncate to the column widths: array IDs and multi-node nodelists are long
     # enough to push the table out of alignment otherwise.
@@ -409,27 +474,22 @@ def format_job_row(job: Job, gpu_data: Dict[int, Dict[str, Optional[float]]],
     user = job["user"][:12]
     node = job["node"][:15]
     name = job["name"][:15]
+    lead = f"{jobid:<12} {user:<12} {node:<15} {name:<15}"
 
     # Collect metrics across GPUs in this job
     all_gpu_minors = sorted(gpu_data.keys())
     if not all_gpu_minors:
         # No GPU data; just show the job
-        return f"{jobid:<12} {user:<12} {node:<15} {name:<15} [no GPU data]"
+        return f"{lead} [no GPU data]"
 
     rows = []
     for gpu_minor in all_gpu_minors:
-        gpu_metrics = gpu_data[gpu_minor]
-        metric_vals = []
-        for key, header, *_ in metrics:
-            val = gpu_metrics.get(key)
-            if val is not None:
-                metric_vals.append(f"{val:>6}")
-            else:
-                metric_vals.append("    -")
-        row = f"{jobid:<12} {user:<12} {node:<15} {name:<15} GPU{gpu_minor:>2}  " + "  ".join(
-            metric_vals
-        )
-        rows.append(row)
+        values = gpu_data[gpu_minor]
+        cells = []
+        for key, _header, width in columns:
+            val = values.get(key)
+            cells.append(f"{'-' if val is None else val:>{width}}")
+        rows.append(f"{lead} GPU{gpu_minor:>2}  " + "  ".join(cells))
 
     return "\n".join(rows)
 
@@ -455,7 +515,7 @@ def job_sort_key(job: Job) -> Tuple[int, int]:
 
 def print_results(jobs: Dict[int, Job],
                   gpu_metrics: GpuMetrics,
-                  metrics: List[Tuple[str, str, str, float, int, str]],
+                  columns: List[Tuple[str, str, int]],
                   average: bool = False) -> None:
     """Pretty-print the job metrics."""
     if not jobs:
@@ -463,11 +523,12 @@ def print_results(jobs: Dict[int, Job],
         return
 
     # Say which reading this is; the two are not comparable on a bursty job.
-    print("# " + ("averaged over each job's runtime (comparable to jobstats)"
+    print("# " + ("folded over each job's runtime -- utilization averaged, "
+                  "memory peak (comparable to jobstats)"
                   if average else "instantaneous snapshot"))
 
     # Header
-    headers = [f"{h:>6}" for _, h, *_ in metrics]
+    headers = [f"{header:>{width}}" for _key, header, width in columns]
     header_line = (
         f"{'JOBID':<12} {'USER':<12} {'NODE':<15} {'NAME':<15} {'GPU':>5}  "
         + "  ".join(headers)
@@ -479,8 +540,7 @@ def print_results(jobs: Dict[int, Job],
     for jobid in sorted(jobs, key=lambda j: job_sort_key(jobs[j])):
         job = jobs[jobid]
         gpu_data = gpu_metrics.get(jobid, {})
-        row = format_job_row(job, gpu_data, metrics)
-        print(row)
+        print(format_job_row(job, gpu_data, columns))
 
 
 def main():
@@ -568,7 +628,7 @@ def main():
         gpu_metrics = {}
 
     # Print
-    print_results(jobs, gpu_metrics, metrics, average=args.avg)
+    print_results(jobs, gpu_metrics, build_columns(metrics), average=args.avg)
 
 
 if __name__ == "__main__":
