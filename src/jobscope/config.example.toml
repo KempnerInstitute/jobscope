@@ -20,11 +20,12 @@
 sampling_period = 60
 
 # Backward-compatibility bridge: instead of setting url above, jobscope can read
-# PROM_SERVER (and SAMPLING_PERIOD) from an existing site jobstats config module.
-# Give the directory that contains that config.py; it is added to sys.path and
-# imported only when a Prometheus URL is otherwise unavailable. On the Kempner AI
-# Cluster this is /usr/local/bin, which lets you use jobscope without a token.
-# site_jobstats_config_path = "/usr/local/bin"
+# PROM_SERVER (and SAMPLING_PERIOD) from an existing jobstats config.py. Give the
+# directory that holds that config.py; it is imported (by full path) only when no
+# Prometheus URL is available otherwise. jobscope ALREADY auto-discovers this
+# next to the 'jobstats' binary on your PATH, so wherever jobstats is installed
+# you need no config file at all. Set this only to point at a config.py elsewhere.
+# site_jobstats_config_path = "/opt/jobstats"
 
 [thresholds]
 # Red cutoffs (percent) for plot color grading. A %-metric value below its cutoff

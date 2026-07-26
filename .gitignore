@@ -1,8 +1,27 @@
 __pycache__/
 *.pyc
 *.sif
-.venv/
 .DS_Store
-*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+.venv*/
+
+# Build / packaging artifacts
 build/
 dist/
+*.egg-info/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Local jobscope config (may hold Prometheus credentials): never commit it.
+# Only config.example.toml is tracked.
+config.toml
+*.local.toml

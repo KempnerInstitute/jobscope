@@ -82,31 +82,31 @@ DCGM_HEADERS: List[str] = [spec.header for spec in GPU_SUMMARY_SPECS]
 DESCRIPTIONS: Dict[str, str] = {
     "DUTY%": "jobstats' GPU%. Coarse duty cycle: fraction of the run during which at least one "
              "kernel was executing on the GPU. Says the GPU was occupied in time, NOT how "
-             "intensely -- a 1-thread kernel and a full-GPU kernel both read ~100%.",
+             "intensely: a 1-thread kernel and a full-GPU kernel both read ~100%.",
     "SM_ACT%": "Fraction of time at least one warp was resident on an SM, averaged across all SMs. "
-               "Distinguishes 'one SM busy' from 'all SMs busy' -- low while DUTY% is high means the "
+               "Distinguishes 'one SM busy' from 'all SMs busy'; low while DUTY% is high means the "
                "GPU was barely loaded (parked / underfed).",
     "OCC%": "SM occupancy: the fraction of warp slots that were filled, averaged over SMs and "
             "time (active warps / the hardware max per SM). Low occupancy means kernels under-fill "
-            "the GPU -- small launches, or register / shared-memory limits.",
+            "the GPU: small launches, or register / shared-memory limits.",
     "TENSOR%": "Fraction of time the tensor-core pipe was active. High only for mixed-precision "
                "matmul-heavy work (fp16/bf16/tf32 training or inference); ~0 means the tensor cores "
                "sat idle.",
-    "DRAM%": "Fraction of time the device-memory (HBM) interface was busy moving data -- a "
+    "DRAM%": "Fraction of time the device-memory (HBM) interface was busy moving data, a "
              "memory-bandwidth duty cycle. High while SM_ACT% is low suggests the job is "
              "memory-bound, not compute-bound.",
     "POWER_W": "Mean board power draw over the run, in watts. Compare to the GPU's TDP (~700 W for "
                "H100/H200, ~400 W for A100); near-idle watts mean the GPU was not really working.",
-    "ENGINE%": "Fraction of time the graphics/compute engine had work in flight -- a finer-grained "
+    "ENGINE%": "Fraction of time the graphics/compute engine had work in flight, a finer-grained "
                "successor to the DUTY% duty cycle.",
     "HMMA%": "Tensor-core activity for half-precision matrix ops (fp16/bf16). A precision breakdown "
              "of TENSOR%.",
-    "IMMA%": "Tensor-core activity for integer matrix ops (int8). Precision breakdown of TENSOR% -- "
+    "IMMA%": "Tensor-core activity for integer matrix ops (int8). Precision breakdown of TENSOR%: "
              "nonzero for quantized / int8 inference.",
     "DFMA%": "Tensor-core activity for double-precision matrix ops (fp64). Precision breakdown of "
-             "TENSOR% -- relevant to fp64 HPC on tensor cores.",
+             "TENSOR%: relevant to fp64 HPC on tensor cores.",
     "FP16%": "Fraction of time the (non-tensor) fp16 floating-point pipe was active.",
-    "FP32%": "Fraction of time the (non-tensor) fp32 floating-point pipe was active -- the default "
+    "FP32%": "Fraction of time the (non-tensor) fp32 floating-point pipe was active, the default "
              "precision for much numerical code.",
     "FP64%": "Fraction of time the fp64 (double-precision) pipe was active. High for "
              "double-precision HPC (CFD, MD, dense linear algebra).",
@@ -116,14 +116,14 @@ DESCRIPTIONS: Dict[str, str] = {
     "ENERGY_kWh": "Total energy the GPU consumed over the run, in kWh (from the monotonic energy "
                   "counter, end minus start). Useful for cost / efficiency accounting.",
     "FB_USED_GB": "Mean GPU (framebuffer) memory in use over the run, in GiB. Complements jobstats' "
-                  "GMEM%, which is the PEAK -- a job that loads a model then idles shows high peak but a "
+                  "GMEM%, which is the PEAK: a job that loads a model then idles shows high peak but a "
                   "lower mean.",
     "FB_FREE_GB": "Mean free GPU memory over the run, in GiB.",
     "FB_RSVD_GB": "Mean GPU memory reserved by the driver/system over the run, in GiB (not available to "
                   "your job).",
     "PCIE_TX_MBs": "Mean PCIe transmit throughput (GPU -> host), in MB/s. A bottleneck if the GPU waits "
                    "on host transfers. (DCGM rate; treat the absolute value as approximate.)",
-    "PCIE_RX_MBs": "Mean PCIe receive throughput (host -> GPU), in MB/s -- e.g. input batches streamed to "
+    "PCIE_RX_MBs": "Mean PCIe receive throughput (host -> GPU), in MB/s, e.g. input batches streamed to "
                    "the GPU. (DCGM rate; absolute value approximate.)",
     "NVLINK_MBs": "Mean NVLink throughput, in MiB/s. ~0 for single-GPU jobs; nonzero indicates "
                   "multi-GPU communication (e.g. NCCL all-reduce). (DCGM rate; absolute approximate.)",
@@ -179,7 +179,7 @@ def discover_gpus(record: JobRecord, client: PrometheusClient,
     """The GPUs that ran a job, as ``{uuid, node, minor}`` sorted by (node, minor).
 
     Empty for CPU-only jobs or when no GPU samples exist. Joins via
-    ``nvidia_gpu_jobId`` -- the same mapping jobstats uses.
+    ``nvidia_gpu_jobId``, the same mapping jobstats uses.
     """
     if not (record.gpus and record.jobid_raw and record.duration):
         return []
@@ -258,7 +258,7 @@ def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],
 
     The per-job queries are network I/O-bound, so a thread pool overlaps them and
     speeds up wide selections even on one CPU core. The per-metric queries within a
-    job stay sequential -- the parallelism is across jobs.
+    job stay sequential; the parallelism is across jobs.
     """
     gpu_jobs = [jid for jid in jobids if jid in records and records[jid].gpus]
     if not gpu_jobs:
