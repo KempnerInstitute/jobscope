@@ -6,7 +6,7 @@ utilization data Slurm already stores in each job's `sacct` AdminComment
 pulled from Prometheus, and can render any view as a terminal chart.
 
 For completed jobs the CPU/MEM/GPU/GMEM numbers match `jobstats`, because
-jobscope decodes the same stored blob -- but in one bulk `sacct` query, with no
+jobscope decodes the same stored blob, but in one bulk `sacct` query, with no
 per-job calls and no job-count cap.
 
 ## Screenshots
@@ -44,7 +44,7 @@ Mean:                       94     7       67.7     18.5    1.3      12.1    363
 
 jobscope is a command-line tool, so install it with
 [`uv`](https://docs.astral.sh/uv/). `uv` provisions its own Python and puts the
-`jobscope` executable on your `PATH` -- there is no virtualenv to create or
+`jobscope` executable on your `PATH`; there is no virtualenv to create or
 activate, and it never touches the system Python (which on clusters like
 FASRC/RHEL8 is too old to build `pyproject.toml` projects anyway).
 
@@ -55,7 +55,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
 Then restart your shell so `uv` is on your `PATH`. (Alternatives: `wget -qO-
-https://astral.sh/uv/install.sh | sh`, `pipx install uv`, or `brew install uv` --
+https://astral.sh/uv/install.sh | sh`, `pipx install uv`, or `brew install uv`;
 see the [uv install docs](https://docs.astral.sh/uv/getting-started/installation/).)
 
 Now install jobscope:
@@ -65,10 +65,15 @@ uv tool install jobscope      # from PyPI
 uv tool install .             # from a source checkout
 ```
 
+> [!NOTE]
+> jobscope is not on PyPI yet, so `uv tool install jobscope` will work only once
+> the first release is published. Until then, install from a source checkout with
+> `uv tool install .`.
+
 Upgrade or remove it later with `uv tool upgrade jobscope` or `uv tool uninstall
 jobscope`.
 
-For development from a checkout there's nothing to install -- `uv` runs
+For development from a checkout there's nothing to install; `uv` runs
 everything straight from the source tree, creating the environment on demand:
 
 ```bash
@@ -106,7 +111,7 @@ jobscope config                                              # show the path in 
 ```
 
 The config file also sets the DCGM sampling period, plot color thresholds, and
-default timeout / worker counts -- see `jobscope config --example` for the full,
+default timeout / worker counts; see `jobscope config --example` for the full,
 commented template.
 
 The Prometheus URL commonly embeds a credential: jobscope never prints it, and a
@@ -169,13 +174,13 @@ jobscope dcgm --ts --csv JOBID   | jobscope plot --compact        # time series
 
 `jobscope plot` reads `summary`, `dcgm`, and `dcgm --ts` CSV; the `detail` CSV is
 for machine consumption, not charts. Do not pass `-n` when piping to `jobscope
-plot` -- the plot needs the CSV header row.
+plot`: the plot needs the CSV header row.
 
 ## Contrib
 
 `contrib/jobstats_extended.py` is a site-specific prototype that folds DCGM
 metrics into the jobstats blob itself. It depends on an upstream jobstats install
-and is not part of the package -- see [`contrib/README.md`](contrib/README.md).
+and is not part of the package; see [`contrib/README.md`](contrib/README.md).
 
 ## Building and publishing (maintainers)
 
@@ -196,12 +201,12 @@ uv run --no-project --python 3.10 \
 ```
 
 Publish to TestPyPI first, then to PyPI. Generate an **account-scoped** API token
-for the first upload of a new project -- a project-scoped token cannot create a
-project that does not exist yet -- and note that each version can be uploaded
+for the first upload of a new project (a project-scoped token cannot create a
+project that does not exist yet), and note that each version can be uploaded
 only once (bump the version to re-release):
 
 ```bash
-# TestPyPI -- token from https://test.pypi.org/manage/account/token/
+# TestPyPI: token from https://test.pypi.org/manage/account/token/
 UV_PUBLISH_TOKEN=<test-token> \
   uv publish --publish-url https://test.pypi.org/legacy/ dist/*
 
@@ -210,7 +215,7 @@ uv run --no-project --python 3.10 \
   --index https://test.pypi.org/simple/ --index-strategy unsafe-best-match \
   --with jobscope jobscope --help
 
-# PyPI -- token from https://pypi.org/manage/account/token/
+# PyPI: token from https://pypi.org/manage/account/token/
 UV_PUBLISH_TOKEN=<token> uv publish dist/*
 ```
 
