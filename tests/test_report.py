@@ -1,8 +1,9 @@
 """Tests for the summary / detail / dcgm renderers and the CSV contract."""
 
+import dataclasses
 import io
 
-from jobscope import plot
+from jobscope import plot, report
 from jobscope.dcgm import DEFAULT_SPECS
 from jobscope.report import (
     SUMMARY_COLUMNS,
@@ -154,3 +155,84 @@ def test_dcgm_timeseries_csv(gpu_record):
     assert columns[:5] == ["JOBID", "EPOCH", "TIME", "NODE", "GPU"]
     assert [r["SM_ACT%"] for r in rows] == ["80.0", "60.0"]
     assert rows[0]["EPOCH"] == "1000"
+
+
+def _render_stream(renderer_cls, context, options, chunks):
+    out = io.StringIO()
+    renderer = renderer_cls(context, options, out)
+    for jobids, records, dcgm_data in chunks:
+        renderer.add(jobids, records, dcgm_data)
+    renderer.finish()
+    return out.getvalue()
+
+
+def _two_gpu_chunks(gpu_record):
+    """Two single-job chunks plus the equivalent all-at-once arguments."""
+    rec2 = dataclasses.replace(gpu_record, jobid="101", name="eval")
+    records = {"100": gpu_record, "101": rec2}
+    dcgm = {"100": ({"SM_ACT%": 60.0, "OCC%": 20.0, "TENSOR%": 5.0, "DRAM%": 10.0,
+                     "POWER_W": 400.0}, {}),
+            "101": ({"SM_ACT%": 30.0, "OCC%": 10.0, "TENSOR%": 2.0, "DRAM%": 5.0,
+                     "POWER_W": 200.0}, {})}
+    chunks = [(["100"], records, {"100": dcgm["100"]}),
+              (["101"], records, {"101": dcgm["101"]})]
+    return ["100", "101"], records, dcgm, chunks
+
+
+def test_summary_renderer_two_adds_equals_summarize_text(gpu_record):
+    jobids, records, dcgm, chunks = _two_gpu_chunks(gpu_record)
+    options = RenderOptions(view="gpu", show_dcgm=True, diagnose=True, csv=False, header=True)
+    single = _render(summarize, jobids, records, dcgm, CTX, options)
+    streamed = _render_stream(report.SummaryRenderer, CTX, options, chunks)
+    assert streamed == single
+    assert streamed.count("Mean:") == 1
+
+
+def test_summary_renderer_two_adds_equals_summarize_csv(gpu_record):
+    jobids, records, dcgm, chunks = _two_gpu_chunks(gpu_record)
+    options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
+    single = _render(summarize, jobids, records, dcgm, CTX, options)
+    streamed = _render_stream(report.SummaryRenderer, CTX, options, chunks)
+    assert streamed == single
+    _, rows = plot.parse_csv(io.StringIO(streamed))
+    assert len(rows) == 2  # Mean row dropped by the parser
+
+
+def test_summary_renderer_single_row_no_mean(gpu_record, cpu_record):
+    # The second chunk is filtered out by the gpu view, so only one row renders
+    # and the Mean footer must stay suppressed.
+    options = RenderOptions(view="gpu", show_dcgm=False, csv=False, header=True)
+    streamed = _render_stream(report.SummaryRenderer, CTX, options,
+                              [(["100"], {"100": gpu_record}, {}),
+                               (["200"], {"200": cpu_record}, {})])
+    assert "100" in streamed
+    assert "Mean:" not in streamed
+
+
+def test_summary_renderer_all_filtered_empty_message(cpu_record):
+    options = RenderOptions(view="gpu", show_dcgm=False, csv=False, header=True)
+    streamed = _render_stream(report.SummaryRenderer, CTX, options,
+                              [(["200"], {"200": cpu_record}, {})])
+    assert "(no GPU jobs" in streamed
+    csv_options = RenderOptions(view="gpu", show_dcgm=False, csv=True, header=True)
+    streamed_csv = _render_stream(report.SummaryRenderer, CTX, csv_options,
+                                  [(["200"], {"200": cpu_record}, {})])
+    assert "(no GPU jobs" not in streamed_csv
+
+
+def test_detail_renderer_two_adds_equals_detail(gpu_record):
+    jobids, records, dcgm, chunks = _two_gpu_chunks(gpu_record)
+    for csv_mode in (False, True):
+        options = RenderOptions(view="cgpu", show_dcgm=False, csv=csv_mode, header=True)
+        single = _render(detail, jobids, records, {}, CTX, options)
+        streamed = _render_stream(report.DetailRenderer, CTX, options,
+                                  [(ids, recs, {}) for ids, recs, _ in chunks])
+        assert streamed == single
+
+
+def test_detail_renderer_empty_message_ignores_header_flag(cpu_record):
+    # detail's text-mode empty message prints even with --noheader.
+    options = RenderOptions(view="gpu", show_dcgm=False, csv=False, header=False)
+    streamed = _render_stream(report.DetailRenderer, CTX, options,
+                              [(["200"], {"200": cpu_record}, {})])
+    assert "(no GPU jobs in this selection)" in streamed
