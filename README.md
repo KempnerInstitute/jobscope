@@ -13,9 +13,9 @@ per-job calls and no job-count cap.
 
 <table width="800">
   <tr><td><strong>Per-job DCGM time series</strong></td></tr>
-  <tr><td><img src="docs/timeseries.svg" alt="per-job DCGM time series" width="800"></td></tr>
+  <tr><td><img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/timeseries.svg" alt="per-job DCGM time series" width="800"></td></tr>
   <tr><td><strong>Aggregated utilization across jobs</strong></td></tr>
-  <tr><td><img src="docs/aggregated.svg" alt="aggregated mean-utilization bars" width="800"></td></tr>
+  <tr><td><img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/aggregated.svg" alt="aggregated mean-utilization bars" width="800"></td></tr>
 </table>
 
 ```text

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jobscope"
-version = "0.1.0"
+version = "0.1.1"
 description = "Slurm job efficiency and GPU utilization reporting from sacct and DCGM/Prometheus"
 readme = "README.md"
 requires-python = ">=3.9"
