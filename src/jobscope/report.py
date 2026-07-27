@@ -171,153 +171,220 @@ def extend_detail_row(row, per_gpu, duration=None, min_runtime=None, diagnose_on
     return out
 
 
-def summarize(jobids: List[str], records: Dict[str, JobRecord],
-              dcgm_data: Dict[str, Tuple[dict, dict]], context: List[Tuple[str, str]],
-              options: RenderOptions, out=None) -> None:
-    """One row per job: blob metrics, optional DCGM columns, optional DIAG."""
-    out = out or sys.stdout
-    do_dcgm = options.show_dcgm
-    if options.view == "gpu":
-        jobids = [j for j in jobids if j in records and records[j].gpus]
-    columns = cols_for(SUMMARY_COLUMNS, options.view, options.show_dcgm, options.diagnose)
-    headers = [c.header for c in columns]
-    writer = csv.writer(out, lineterminator="\n") if options.csv else None
+class SummaryRenderer:
+    """Streaming form of summarize(): add() chunks as they arrive, then finish().
 
-    def line(row: dict) -> str:
-        return " ".join(c.fmt.format(str(row.get(c.header, ""))) for c in columns)
+    Output is byte-identical to one summarize() call over the concatenated
+    chunks: the context/header block prints once (on the first add or finish),
+    rows print per add, and the Mean footer (when more than one row rendered)
+    or the empty-selection message prints on finish.
+    """
 
-    if options.header:
-        if options.csv:
-            for label, value in context:
-                writer.writerow([label, value])
-            writer.writerow(headers)
+    def __init__(self, context: List[Tuple[str, str]], options: RenderOptions, out=None) -> None:
+        self.out = out or sys.stdout
+        self.options = options
+        self.context = context
+        self.columns = cols_for(SUMMARY_COLUMNS, options.view, options.show_dcgm, options.diagnose)
+        self.headers = [c.header for c in self.columns]
+        self.writer = csv.writer(self.out, lineterminator="\n") if options.csv else None
+        self.count = 0
+        self.sums = {key: [0, 0] for key in ("cpu", "mem", "gpu", "gmem")}  # [total, count]
+        self.sums_dcgm = {header: [0.0, 0] for header in DCGM_HEADERS}
+        self._started = False
+
+    def _line(self, row: dict) -> str:
+        return " ".join(c.fmt.format(str(row.get(c.header, ""))) for c in self.columns)
+
+    def _start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        if not self.options.header:
+            return
+        if self.options.csv:
+            for label, value in self.context:
+                self.writer.writerow([label, value])
+            self.writer.writerow(self.headers)
         else:
-            for label, value in context:
-                print(fmt_context(label, value), file=out)
-            header_line = line({c.header: c.header for c in columns})
-            print(header_line, file=out)
-            print("-" * len(header_line), file=out)
+            for label, value in self.context:
+                print(fmt_context(label, value), file=self.out)
+            header_line = self._line({c.header: c.header for c in self.columns})
+            print(header_line, file=self.out)
+            print("-" * len(header_line), file=self.out)
 
-    if not jobids:
-        if options.header and not options.csv:
-            print("  (no GPU jobs in this selection)", file=out)
-        return
+    def add(self, jobids: List[str], records: Dict[str, JobRecord],
+            dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
+        self._start()
+        options = self.options
+        do_dcgm = options.show_dcgm
+        if options.view == "gpu":
+            jobids = [j for j in jobids if j in records and records[j].gpus]
+        self.count += len(jobids)
+        for jid in jobids:
+            record = records.get(jid)
+            row = {
+                "JOBID": jid,
+                "STATE": record.state if record else "?",
+                "NODES": record.nodes if record else "-",
+                "GPUS": str(record.gpus) if record and record.gpus else "-",
+                "RUNTIME": record.runtime if record else "-",
+                "NAME": record.name if record else "(job not found)",
+            }
+            metrics = blob_metrics(record.stats if record else None)
+            if metrics is None:
+                for col in ("CPU%", "MEM%", "GPU%", "GMEM%"):
+                    row[col] = "-"
+            else:
+                for key, col, value in zip(("cpu", "mem", "gpu", "gmem"),
+                                           ("CPU%", "MEM%", "GPU%", "GMEM%"), metrics):
+                    row[col] = "-" if value is None else str(value)
+                    if value is not None:
+                        self.sums[key][0] += value
+                        self.sums[key][1] += 1
+            if do_dcgm:
+                overall = dcgm_data.get(jid, ({}, {}))[0]
+                for header in DCGM_HEADERS:
+                    value = overall.get(header)
+                    row[header] = format_by_header(header, value)
+                    if value is not None:
+                        self.sums_dcgm[header][0] += value
+                        self.sums_dcgm[header][1] += 1
+                if options.diagnose:
+                    row["DIAG"] = diagnose_dcgm(overall, record.duration if record else None,
+                                                options.min_runtime)
+            if options.csv:
+                self.writer.writerow([row[h] for h in self.headers])
+            else:
+                print(self._line(row), file=self.out)
+        self.out.flush()
 
-    sums = {key: [0, 0] for key in ("cpu", "mem", "gpu", "gmem")}  # [total, count]
-    sums_dcgm = {header: [0.0, 0] for header in DCGM_HEADERS}
-    for jid in jobids:
-        record = records.get(jid)
-        row = {
-            "JOBID": jid,
-            "STATE": record.state if record else "?",
-            "NODES": record.nodes if record else "-",
-            "GPUS": str(record.gpus) if record and record.gpus else "-",
-            "RUNTIME": record.runtime if record else "-",
-            "NAME": record.name if record else "(job not found)",
-        }
-        metrics = blob_metrics(record.stats if record else None)
-        if metrics is None:
-            for col in ("CPU%", "MEM%", "GPU%", "GMEM%"):
-                row[col] = "-"
-        else:
-            for key, col, value in zip(("cpu", "mem", "gpu", "gmem"),
-                                       ("CPU%", "MEM%", "GPU%", "GMEM%"), metrics):
-                row[col] = "-" if value is None else str(value)
-                if value is not None:
-                    sums[key][0] += value
-                    sums[key][1] += 1
-        if do_dcgm:
-            overall = dcgm_data.get(jid, ({}, {}))[0]
-            for header in DCGM_HEADERS:
-                value = overall.get(header)
-                row[header] = format_by_header(header, value)
-                if value is not None:
-                    sums_dcgm[header][0] += value
-                    sums_dcgm[header][1] += 1
-            if options.diagnose:
-                row["DIAG"] = diagnose_dcgm(overall, record.duration if record else None,
-                                            options.min_runtime)
-        if options.csv:
-            writer.writerow([row[h] for h in headers])
-        else:
-            print(line(row), file=out)
+    def finish(self) -> None:
+        self._start()
+        options = self.options
+        if self.count == 0:
+            if options.header and not options.csv:
+                print("  (no GPU jobs in this selection)", file=self.out)
+            return
+        if self.count == 1:
+            return
 
-    if len(jobids) > 1:
         def mean(key: str) -> str:
-            total, count = sums[key]
+            total, count = self.sums[key]
             return str(round(total / count)) if count else "-"
 
         mean_row = {c.header: "" for c in SUMMARY_COLUMNS}
         mean_row["CPU%"], mean_row["MEM%"] = mean("cpu"), mean("mem")
         mean_row["GPU%"], mean_row["GMEM%"] = mean("gpu"), mean("gmem")
-        if do_dcgm:
+        if options.show_dcgm:
             for header in DCGM_HEADERS:
-                total, count = sums_dcgm[header]
+                total, count = self.sums_dcgm[header]
                 mean_row[header] = format_by_header(header, total / count) if count else "-"
         if options.csv:
             mean_row["JOBID"] = "Mean"
-            writer.writerow([mean_row[h] for h in headers])
+            self.writer.writerow([mean_row[h] for h in self.headers])
         else:
             mean_row["JOBID"] = "Mean:"
             if options.header:
-                print("-" * len(line({c.header: c.header for c in columns})), file=out)
-            print(line(mean_row), file=out)
+                print("-" * len(self._line({c.header: c.header for c in self.columns})),
+                      file=self.out)
+            print(self._line(mean_row), file=self.out)
+
+
+class DetailRenderer:
+    """Streaming form of detail(): independent per-job blocks per add().
+
+    detail has no footer; finish() only emits the text-mode empty-selection
+    message when nothing rendered.
+    """
+
+    def __init__(self, context: List[Tuple[str, str]], options: RenderOptions, out=None) -> None:
+        self.out = out or sys.stdout
+        self.options = options
+        self.context = context
+        self.columns = cols_for(DETAIL_COLUMNS, options.view, options.show_dcgm, options.diagnose)
+        self.writer = csv.writer(self.out, lineterminator="\n") if options.csv else None
+        self.count = 0
+        self._started = False
+
+    def _line(self, cells) -> str:
+        return " ".join(c.fmt.format(str(cells[c.index])) for c in self.columns)
+
+    def _start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        if not self.options.header:
+            return
+        if self.options.csv:
+            for label, value in self.context:
+                self.writer.writerow([label, value])
+            self.writer.writerow(["JOBID"] + [c.header for c in self.columns])
+        else:
+            for label, value in self.context:
+                print(fmt_context(label, value), file=self.out)
+            print(file=self.out)
+
+    def _rows_for(self, jid: str, record: Optional[JobRecord],
+                  dcgm_data: Dict[str, Tuple[dict, dict]]):
+        rows = blob_detail(record.stats if record else None)
+        if self.options.show_dcgm:
+            per_gpu = dcgm_data.get(jid, ({}, {}))[1]
+            rows = [extend_detail_row(r, per_gpu, record.duration if record else None,
+                                      self.options.min_runtime, self.options.diagnose)
+                    for r in rows]
+        return rows
+
+    def add(self, jobids: List[str], records: Dict[str, JobRecord],
+            dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
+        self._start()
+        options = self.options
+        if options.view == "gpu":
+            jobids = [j for j in jobids if j in records and records[j].gpus]
+        self.count += len(jobids)
+        if options.csv:
+            for jid in jobids:
+                record = records.get(jid)
+                for row in self._rows_for(jid, record, dcgm_data):
+                    self.writer.writerow([jid] + [row[c.index] for c in self.columns])
+        else:
+            for jid in jobids:
+                record = records.get(jid)
+                print("Job %s  [%s]  %s" % (jid, record.state if record else "?",
+                                            record.name if record else "?"), file=self.out)
+                rows = self._rows_for(jid, record, dcgm_data)
+                if not rows:
+                    print("  (no jobstats data)\n", file=self.out)
+                    continue
+                header_line = self._line(DETAIL_HEADER)
+                print("  " + header_line, file=self.out)
+                print("  " + "-" * len(header_line), file=self.out)
+                for row in rows:
+                    print("  " + self._line(row), file=self.out)
+                print(file=self.out)
+        self.out.flush()
+
+    def finish(self) -> None:
+        self._start()
+        if self.count == 0 and not self.options.csv:
+            print("(no GPU jobs in this selection)", file=self.out)
+
+
+def summarize(jobids: List[str], records: Dict[str, JobRecord],
+              dcgm_data: Dict[str, Tuple[dict, dict]], context: List[Tuple[str, str]],
+              options: RenderOptions, out=None) -> None:
+    """One row per job: blob metrics, optional DCGM columns, optional DIAG."""
+    renderer = SummaryRenderer(context, options, out)
+    renderer.add(jobids, records, dcgm_data)
+    renderer.finish()
 
 
 def detail(jobids: List[str], records: Dict[str, JobRecord],
            dcgm_data: Dict[str, Tuple[dict, dict]], context: List[Tuple[str, str]],
            options: RenderOptions, out=None) -> None:
     """Per-node / per-GPU breakdown for each job."""
-    out = out or sys.stdout
-    do_dcgm = options.show_dcgm
-    if options.view == "gpu":
-        jobids = [j for j in jobids if j in records and records[j].gpus]
-    columns = cols_for(DETAIL_COLUMNS, options.view, options.show_dcgm, options.diagnose)
-
-    def line(cells) -> str:
-        return " ".join(c.fmt.format(str(cells[c.index])) for c in columns)
-
-    def rows_for(jid: str, record: Optional[JobRecord]):
-        rows = blob_detail(record.stats if record else None)
-        if do_dcgm:
-            per_gpu = dcgm_data.get(jid, ({}, {}))[1]
-            rows = [extend_detail_row(r, per_gpu, record.duration if record else None,
-                                      options.min_runtime, options.diagnose) for r in rows]
-        return rows
-
-    if options.csv:
-        writer = csv.writer(out, lineterminator="\n")
-        if options.header:
-            for label, value in context:
-                writer.writerow([label, value])
-            writer.writerow(["JOBID"] + [c.header for c in columns])
-        for jid in jobids:
-            record = records.get(jid)
-            for row in rows_for(jid, record):
-                writer.writerow([jid] + [row[c.index] for c in columns])
-        return
-
-    if options.header:
-        for label, value in context:
-            print(fmt_context(label, value), file=out)
-        print(file=out)
-    if not jobids:
-        print("(no GPU jobs in this selection)", file=out)
-        return
-    for jid in jobids:
-        record = records.get(jid)
-        print("Job %s  [%s]  %s" % (jid, record.state if record else "?",
-                                    record.name if record else "?"), file=out)
-        rows = rows_for(jid, record)
-        if not rows:
-            print("  (no jobstats data)\n", file=out)
-            continue
-        header_line = line(DETAIL_HEADER)
-        print("  " + header_line, file=out)
-        print("  " + "-" * len(header_line), file=out)
-        for row in rows:
-            print("  " + line(row), file=out)
-        print(file=out)
+    renderer = DetailRenderer(context, options, out)
+    renderer.add(jobids, records, dcgm_data)
+    renderer.finish()
 
 
 def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],

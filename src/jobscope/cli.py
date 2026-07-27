@@ -14,16 +14,24 @@ from .dcgm import ALL_SPECS, DEFAULT_SPECS, GPU_SUMMARY_SPECS, compute_dcgm
 from .errors import JobscopeError
 from .prometheus import client_from_config
 from .report import (
+    DetailRenderer,
     RenderOptions,
+    SummaryRenderer,
     context_pairs,
     dcgm_report,
     dcgm_timeseries,
     describe,
     describe_dcgm,
-    detail,
-    summarize,
 )
-from .sacct import Selection, days_to_window, default_user, end_of_day, fetch, select_jobs
+from .sacct import (
+    Selection,
+    days_to_window,
+    default_user,
+    end_of_day,
+    fetch,
+    fetch_chunks,
+    select_jobs,
+)
 
 SUBCOMMANDS = ("summary", "detail", "dcgm", "plot", "describe", "config")
 
@@ -226,11 +234,15 @@ def _no_jobs(selection: Selection, desc: str) -> None:
     print("No matching jobs for user '%s' (%s)." % (selection.user, desc), file=sys.stderr)
 
 
-def _view_common(args):
-    """Shared setup for the summary and detail views.
+def _view_common(args, renderer_cls) -> None:
+    """Fetch and render the summary/detail views batch by batch.
 
-    Returns ``(jobids, records, dcgm_data, context, options)`` or None when the
-    selection is empty.
+    Time-window selections stream: each sacct batch is fetched, its DCGM
+    metrics computed, and its rows rendered before the next batch is queried,
+    so large selections show results as they arrive. A mid-stream error (sacct
+    timeout, missing Prometheus endpoint) can therefore surface after a partial
+    table. Explicit-JOBID selections render in one pass, since their context
+    header lists the owners of every record.
     """
     cfg = _apply_config(args)
     selection = _prepare_selection(args)
@@ -246,32 +258,37 @@ def _view_common(args):
     jobids, desc = select_jobs(selection, timeout)
     if not jobids:
         _no_jobs(selection, desc)
-        return None
-    records = fetch(jobids, timeout)
-
-    dcgm_data = {}
-    if show_dcgm:
-        gpu_jobs = [j for j in jobids if j in records and records[j].gpus]
-        if gpu_jobs:
-            client = client_from_config(cfg, timeout)
-            dcgm_data = compute_dcgm(records, jobids, GPU_SUMMARY_SPECS, client, timeout, workers)
-
-    context = context_pairs(selection, desc, records)
+        return
     options = RenderOptions(view=view, show_dcgm=show_dcgm, diagnose=diagnose,
                             csv=args.csv, header=args.header, min_runtime=_min_runtime(args, cfg))
-    return jobids, records, dcgm_data, context, options
+
+    if selection.jobids:
+        records = fetch(jobids, timeout)
+        context = context_pairs(selection, desc, records)
+        chunks = iter([(jobids, records)])
+    else:
+        context = context_pairs(selection, desc, {})  # window branch never reads records
+        chunks = fetch_chunks(jobids, timeout)
+
+    renderer = renderer_cls(context, options)
+    client = None
+    for chunk_ids, records in chunks:
+        dcgm_chunk = {}
+        if show_dcgm and any(j in records and records[j].gpus for j in chunk_ids):
+            if client is None:
+                client = client_from_config(cfg, timeout)
+            dcgm_chunk = compute_dcgm(records, chunk_ids, GPU_SUMMARY_SPECS,
+                                      client, timeout, workers)
+        renderer.add(chunk_ids, records, dcgm_chunk)
+    renderer.finish()
 
 
 def handle_summary(args) -> None:
-    result = _view_common(args)
-    if result is not None:
-        summarize(*result)
+    _view_common(args, SummaryRenderer)
 
 
 def handle_detail(args) -> None:
-    result = _view_common(args)
-    if result is not None:
-        detail(*result)
+    _view_common(args, DetailRenderer)
 
 
 def handle_dcgm(args) -> None:
