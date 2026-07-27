@@ -8,6 +8,7 @@ from jobscope.sacct import (
     Selection,
     days_to_window,
     default_user,
+    end_of_day,
     epoch,
     fetch,
     query_jobid,
@@ -26,6 +27,18 @@ def test_default_user_from_env(monkeypatch):
 def test_days_to_window_orders():
     start, end = days_to_window(3)
     assert start < end
+
+
+def test_end_of_day_from_date():
+    assert end_of_day("2026-07-15") == "2026-07-16T00:00:00"
+
+
+def test_end_of_day_from_datetime_closes_that_calendar_day():
+    assert end_of_day("2026-07-15T14:30:00") == "2026-07-16T00:00:00"
+
+
+def test_end_of_day_unparseable_returns_none():
+    assert end_of_day("now-2days") is None
 
 
 def test_epoch():

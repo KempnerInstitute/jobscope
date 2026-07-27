@@ -5,7 +5,7 @@ import argparse
 import pytest
 
 from jobscope import cli
-from jobscope.cli import _inject_default_subcommand, _prepare_selection, main
+from jobscope.cli import _inject_default_subcommand, _prepare_selection, build_parser, main
 from jobscope.errors import JobscopeError
 
 
@@ -20,8 +20,8 @@ def test_inject_default_subcommand():
 
 
 def _sel_args(**kw):
-    base = dict(user="alice", jobids=[], account=None, partition=None, state="all",
-                lastn=None, days=None, starttime=None, endtime=None)
+    base = dict(user="alice", jobids=[], jobids_opt=None, account=None, partition=None,
+                state="all", lastn=None, days=None, starttime=None, endtime=None)
     base.update(kw)
     return argparse.Namespace(**base)
 
@@ -52,6 +52,66 @@ def test_days_conflicts_with_window():
 def test_lastn_must_be_positive():
     with pytest.raises(JobscopeError):
         _prepare_selection(_sel_args(lastn=-1))
+
+
+def test_starttime_alone_selects_single_day():
+    sel = _prepare_selection(_sel_args(starttime="2026-07-15"))
+    assert sel.starttime == "2026-07-15"
+    assert sel.endtime == "2026-07-16T00:00:00"
+
+
+def test_starttime_with_endtime_left_alone():
+    sel = _prepare_selection(_sel_args(starttime="2026-07-15", endtime="2026-07-20"))
+    assert sel.endtime == "2026-07-20"
+
+
+def test_starttime_relative_leaves_window_open():
+    sel = _prepare_selection(_sel_args(starttime="now-2days"))
+    assert sel.endtime is None
+
+
+def test_args_order_independent():
+    _, subparsers = build_parser()
+    summary = subparsers.choices["summary"]
+    a1 = summary.parse_intermixed_args(["-D", "3", "111", "222"])
+    a2 = summary.parse_intermixed_args(["111", "-D", "3", "222"])
+    a3 = summary.parse_intermixed_args(["111", "222", "-D", "3"])
+    assert a1.jobids == a2.jobids == a3.jobids == ["111", "222"]
+    assert a1.days == a2.days == a3.days == 3
+
+
+def test_jobid_flag_merges_with_positional():
+    _, subparsers = build_parser()
+    summary = subparsers.choices["summary"]
+    for argv in (["111", "222"], ["-j", "111", "-j", "222"]):
+        args = summary.parse_intermixed_args(argv)
+        args.user = "alice"
+        assert _prepare_selection(args).jobids == ["111", "222"]
+    # Mixing the positional and -j still collects both IDs.
+    mixed = summary.parse_intermixed_args(["-j", "111", "222"])
+    mixed.user = "alice"
+    assert set(_prepare_selection(mixed).jobids) == {"111", "222"}
+
+
+def test_jobids_warn_on_ignored_selectors(capsys):
+    sel = _prepare_selection(_sel_args(jobids=["1"], days=3))
+    err = capsys.readouterr().err
+    assert "ignoring time selectors" in err and "-D/--days" in err
+    assert sel.jobids == ["1"] and sel.days is None
+
+
+def test_main_jobid_intermixed_with_flags(monkeypatch, cpu_record):
+    seen = {}
+
+    def fake_select(selection, timeout):
+        seen["jobids"] = list(selection.jobids)
+        return (list(selection.jobids), "1 job ID(s)")
+
+    monkeypatch.setattr(cli, "select_jobs", fake_select)
+    monkeypatch.setattr(cli, "fetch", lambda ids, timeout: {i: cpu_record for i in ids})
+    # JOBID before a flag, and no subcommand -> exercises injection + intermixed parse.
+    main(["--cpu", "111", "-u", "bob"])
+    assert seen["jobids"] == ["111"]
 
 
 def test_describe_command(capsys):

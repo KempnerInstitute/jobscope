@@ -89,7 +89,7 @@ def _run_plot(tmp_path, name, csv_text, capsys, extra=None):
     path = tmp_path / name
     path.write_text(csv_text)
     argv = ["plot", "-f", str(path), "--no-color"] + (extra or [])
-    args = build_parser().parse_args(argv)
+    args = build_parser()[0].parse_args(argv)
     args.func(args)
     return capsys.readouterr().out
 
@@ -129,12 +129,12 @@ def test_render_line_by_metric(tmp_path, capsys):
 def test_render_heat_max_rows_note(tmp_path, capsys):
     path = tmp_path / "h.csv"
     path.write_text(HEAT_CSV)
-    args = build_parser().parse_args(["plot", "-f", str(path), "--no-color", "--max-rows", "1"])
+    args = build_parser()[0].parse_args(["plot", "-f", str(path), "--no-color", "--max-rows", "1"])
     args.func(args)
     assert "showing 1 of 2" in capsys.readouterr().err
 
 
 def test_plot_no_input_errors(tmp_path):
-    args = build_parser().parse_args(["plot", "-f", str(tmp_path / "missing.csv")])
+    args = build_parser()[0].parse_args(["plot", "-f", str(tmp_path / "missing.csv")])
     with pytest.raises(JobscopeError):
         args.func(args)

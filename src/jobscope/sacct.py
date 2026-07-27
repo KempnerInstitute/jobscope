@@ -12,6 +12,7 @@ import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from .blob import decode_admin_comment, gpus_from_tres
@@ -73,6 +74,25 @@ def days_to_window(days: int) -> Tuple[str, str]:
     now = time.time()
     return (time.strftime(TIMESTAMP_FORMAT, time.localtime(now - days * 86400)),
             time.strftime(TIMESTAMP_FORMAT, time.localtime(now)))
+
+
+def end_of_day(start: str) -> Optional[str]:
+    """sacct end-time that closes the calendar day of ``start`` (the following
+    midnight), so ``-S <date>`` alone selects just that day.
+
+    Returns None when ``start`` is not an ISO date/datetime we can parse (e.g. a
+    relative form like ``now-2days``), leaving the window open-ended.
+    """
+    for fmt in (TIMESTAMP_FORMAT, "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(start, fmt)
+            break
+        except ValueError:
+            continue
+    else:
+        return None
+    nxt = (dt + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return nxt.strftime(TIMESTAMP_FORMAT)
 
 
 def epoch(value: str) -> Optional[int]:

@@ -23,7 +23,7 @@ from .report import (
     detail,
     summarize,
 )
-from .sacct import Selection, days_to_window, default_user, fetch, select_jobs
+from .sacct import Selection, days_to_window, default_user, end_of_day, fetch, select_jobs
 
 SUBCOMMANDS = ("summary", "detail", "dcgm", "plot", "describe", "config")
 
@@ -32,33 +32,62 @@ _SUMMARY_DESC = (
     "AdminComment blob (offline); the gpu view also pulls time-averaged DCGM\n"
     "profiling columns (SM_ACT%/OCC%/TENSOR%/DRAM%/POWER_W) from Prometheus.")
 
+_SUMMARY_EPILOG = (
+    "examples:\n"
+    "  jobscope 30012345              one job by ID\n"
+    "  jobscope -j 30012345           the same job, using the -j flag\n"
+    "  jobscope -D 3                  your jobs from the last 3 days\n"
+    "  jobscope -N 20 --cpu           last 20 jobs, CPU columns (offline)\n"
+    "  jobscope -u alice -D 7 --csv | jobscope plot\n"
+    "\n"
+    "Flags and JOBIDs may be given in any order.")
 
-def build_parser() -> argparse.ArgumentParser:
-    """Construct the full argument parser with all subcommands."""
+
+def build_parser():
+    """Construct the argument parser; return ``(parser, subparsers_action)``.
+
+    The subparsers action is returned so callers can parse on a specific
+    subparser (``subparsers.choices[name]``) with ``parse_intermixed_args`` --
+    which the top parser cannot do, since the subcommand is itself a positional.
+    """
     base = argparse.ArgumentParser(add_help=False)
     base.add_argument("-c", "--config", dest="config_path", metavar="PATH",
                       help="path to a jobscope config file (overrides $JOBSCOPE_CONFIG)")
 
     selector = argparse.ArgumentParser(add_help=False)
-    selector.add_argument("jobids", nargs="*", help="specific job IDs (bypass time selection)")
-    selector.add_argument("-u", "--user", help="user (default: current user, $USER)")
-    selector.add_argument("-A", "--account", help="narrow to this account")
-    selector.add_argument("-p", "--partition", help="narrow to this partition")
-    selector.add_argument("-t", "--state", choices=["all", "completed", "failed"], default="all",
-                          help="job state filter (default: all)")
-    selector.add_argument("-N", "--lastn", type=int, help="the most recent N jobs")
-    selector.add_argument("-D", "--days", type=int, help="jobs in the last N days")
-    selector.add_argument("-S", "--starttime", help="window start (sacct format)")
-    selector.add_argument("-E", "--endtime", help="window end (sacct format)")
-    selector.add_argument("-n", "--noheader", dest="header", action="store_false",
-                          help="suppress the header/context block")
-    selector.add_argument("--csv", action="store_true",
-                          help="machine-readable output (pipe to 'jobscope plot')")
-    selector.add_argument("--timeout", type=float, default=None,
-                          help="seconds per sacct/Prometheus call (default from config; 0 disables)")
-    selector.add_argument("--workers", type=int, default=None,
-                          help="max concurrent Prometheus query-sets for the gpu view "
-                               "(default from config; the queries are I/O-bound so >1 helps)")
+    sel_scope = selector.add_argument_group("job selection")
+    sel_scope.add_argument("jobids", nargs="*", metavar="JOBID",
+                           help="specific job IDs (bypass time selection)")
+    sel_scope.add_argument("-j", "--jobid", action="append", dest="jobids_opt", metavar="JOBID",
+                           help="a job ID (repeatable; alternative to the positional JOBID)")
+    sel_scope.add_argument("-N", "--lastn", type=int, metavar="N",
+                           help="the most recent N jobs")
+    sel_scope.add_argument("-D", "--days", type=int, metavar="N",
+                           help="jobs in the last N days")
+    sel_scope.add_argument("-S", "--starttime", metavar="TIME",
+                           help="window start, e.g. 2026-07-15 or 2026-07-15T09:00:00 "
+                                "(sacct format); without -E, selects just that day")
+    sel_scope.add_argument("-E", "--endtime", metavar="TIME",
+                           help="window end, same format as -S "
+                                "(default: end of the -S day, else now)")
+
+    sel_filter = selector.add_argument_group("filters")
+    sel_filter.add_argument("-u", "--user", help="user (default: current user, $USER)")
+    sel_filter.add_argument("-A", "--account", help="narrow to this account")
+    sel_filter.add_argument("-p", "--partition", help="narrow to this partition")
+    sel_filter.add_argument("-t", "--state", choices=["all", "completed", "failed"], default="all",
+                            help="job state filter (default: all)")
+
+    sel_output = selector.add_argument_group("output")
+    sel_output.add_argument("-n", "--noheader", dest="header", action="store_false",
+                            help="suppress the header/context block")
+    sel_output.add_argument("--csv", action="store_true",
+                            help="machine-readable output (pipe to 'jobscope plot')")
+    sel_output.add_argument("--timeout", type=float, default=None,
+                            help="seconds per sacct/Prometheus call (default from config; 0 disables)")
+    sel_output.add_argument("--workers", type=int, default=None,
+                            help="max concurrent Prometheus query-sets for the gpu view "
+                                 "(default from config; the queries are I/O-bound so >1 helps)")
 
     parser = argparse.ArgumentParser(
         prog="jobscope",
@@ -68,6 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_summary = subparsers.add_parser(
         "summary", parents=[base, selector], description=_SUMMARY_DESC,
+        epilog=_SUMMARY_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         help="one row per job (default subcommand)")
     _add_view_options(p_summary)
@@ -113,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
                           help="print the config path jobscope would read")
     p_config.set_defaults(func=handle_config)
 
-    return parser
+    return parser, subparsers
 
 
 def _add_view_options(subparser: argparse.ArgumentParser) -> None:
@@ -161,8 +191,20 @@ def _prepare_selection(args) -> Selection:
         raise JobscopeError("could not determine the current user from $USER; pass -u/--user")
     days, lastn = args.days, args.lastn
     start, end = args.starttime, args.endtime
-    jobids = list(args.jobids)
-    if lastn is None and days is None and not start and not end and not jobids:
+    jobids = list(args.jobids) + list(getattr(args, "jobids_opt", None) or [])
+    if jobids:
+        # Explicit JOBIDs win; time selectors do not apply. Warn rather than
+        # silently drop them, then proceed with the given IDs.
+        ignored = [name for name, on in (
+            ("-D/--days", days is not None), ("-N/--lastn", lastn is not None),
+            ("-S/--starttime", bool(start)), ("-E/--endtime", bool(end)),
+        ) if on]
+        if ignored:
+            print("jobscope: note: explicit JOBIDs given; ignoring time selectors (%s)"
+                  % ", ".join(ignored), file=sys.stderr)
+        return Selection(user=user, jobids=jobids, account=args.account,
+                         partition=args.partition, state=args.state)
+    if lastn is None and days is None and not start and not end:
         days = 1
     if days is not None:
         if days <= 0:
@@ -172,6 +214,8 @@ def _prepare_selection(args) -> Selection:
         if start or end:
             raise JobscopeError("-D/--days sets the window; do not also pass -S/-E")
         start, end = days_to_window(days)
+    elif start and not end:
+        end = end_of_day(start)  # -S alone selects just that calendar day
     if lastn is not None and lastn <= 0:
         raise JobscopeError("-N/--lastn must be a positive integer")
     return Selection(user=user, jobids=jobids, account=args.account, partition=args.partition,
@@ -298,8 +342,14 @@ def _inject_default_subcommand(argv):
 def main(argv=None) -> None:
     argv = sys.argv[1:] if argv is None else list(argv)
     argv = _inject_default_subcommand(argv)
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    parser, subparsers = build_parser()
+    if argv[0] in subparsers.choices:
+        # Parse on the chosen subparser so JOBIDs and flags may appear in any
+        # order. parse_intermixed_args can't run on the top parser, where the
+        # subcommand is itself a positional.
+        args = subparsers.choices[argv[0]].parse_intermixed_args(argv[1:])
+    else:  # -h / --help / --version
+        args = parser.parse_args(argv)
     handler = getattr(args, "func", None)
     if handler is None:
         parser.print_help()
