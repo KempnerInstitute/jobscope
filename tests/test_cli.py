@@ -1,6 +1,7 @@
 """Tests for CLI argument handling, validation, and dispatch."""
 
 import argparse
+import dataclasses
 
 import pytest
 
@@ -139,10 +140,85 @@ def test_version(capsys):
 
 def test_summary_cpu_offline(monkeypatch, capsys, cpu_record):
     monkeypatch.setattr(cli, "select_jobs", lambda selection, timeout: (["200"], "last 1 day"))
-    monkeypatch.setattr(cli, "fetch", lambda ids, timeout: {"200": cpu_record})
+    monkeypatch.setattr(cli, "fetch_chunks",
+                        lambda ids, timeout: iter([(list(ids), {"200": cpu_record})]))
     main(["summary", "--cpu", "-D", "1", "-u", "bob"])
     out = capsys.readouterr().out
     assert "200" in out and "CPU%" in out
+
+
+def test_summary_streams_chunks_per_batch(monkeypatch, capsys, gpu_record):
+    rec2 = dataclasses.replace(gpu_record, jobid="101", name="eval")
+    records = {"100": gpu_record, "101": rec2}
+    monkeypatch.setattr(cli, "select_jobs",
+                        lambda selection, timeout: (["100", "101"], "last 1 day"))
+    monkeypatch.setattr(cli, "fetch_chunks",
+                        lambda ids, timeout: iter([(["100"], records), (["101"], records)]))
+    clients = []
+    monkeypatch.setattr(cli, "client_from_config",
+                        lambda cfg, timeout: clients.append(1) or object())
+    overall = {"SM_ACT%": 60.0, "OCC%": 20.0, "TENSOR%": 5.0, "DRAM%": 10.0, "POWER_W": 400.0}
+    seen_chunks = []
+
+    def fake_compute(records_arg, chunk_ids, *a, **k):
+        seen_chunks.append(list(chunk_ids))
+        return {j: (overall, {}) for j in chunk_ids}
+
+    monkeypatch.setattr(cli, "compute_dcgm", fake_compute)
+    main(["summary", "--gpu", "-D", "1", "-u", "alice"])
+    out = capsys.readouterr().out
+    assert seen_chunks == [["100"], ["101"]]  # DCGM computed per chunk
+    assert len(clients) == 1                  # Prometheus client created once
+    assert "100" in out and "101" in out
+    assert out.count("Mean:") == 1
+    assert out.index("Mean:") > out.index("101")
+
+
+def test_summary_gpu_chunk_without_gpu_defers_client(monkeypatch, capsys, gpu_record, cpu_record):
+    monkeypatch.setattr(cli, "select_jobs",
+                        lambda selection, timeout: (["200", "100"], "last 1 day"))
+    monkeypatch.setattr(cli, "fetch_chunks",
+                        lambda ids, timeout: iter([
+                            (["200"], {"200": cpu_record}),
+                            (["100"], {"200": cpu_record, "100": gpu_record})]))
+    clients = []
+    monkeypatch.setattr(cli, "client_from_config",
+                        lambda cfg, timeout: clients.append(1) or object())
+    monkeypatch.setattr(cli, "compute_dcgm", lambda *a, **k: {"100": ({}, {})})
+    main(["summary", "--gpu", "-D", "1", "-u", "alice"])
+    out = capsys.readouterr().out
+    assert len(clients) == 1  # not created for the cpu-only chunk, once for the gpu one
+    assert "100" in out
+
+
+def test_explicit_jobids_do_not_stream(monkeypatch, capsys, cpu_record):
+    called = {}
+
+    def fake_fetch(ids, timeout):
+        called["ids"] = list(ids)
+        return {"111": cpu_record}
+
+    def no_stream(*a, **k):
+        raise AssertionError("fetch_chunks must not be used for explicit job IDs")
+
+    monkeypatch.setattr(cli, "fetch", fake_fetch)
+    monkeypatch.setattr(cli, "fetch_chunks", no_stream)
+    main(["summary", "--cpu", "111", "-u", "bob"])
+    assert called["ids"] == ["111"]
+    assert "111" in capsys.readouterr().out
+
+
+def test_detail_streams_chunks(monkeypatch, capsys, cpu_record):
+    rec2 = dataclasses.replace(cpu_record, jobid="201")
+    monkeypatch.setattr(cli, "select_jobs",
+                        lambda selection, timeout: (["200", "201"], "last 1 day"))
+    monkeypatch.setattr(cli, "fetch_chunks",
+                        lambda ids, timeout: iter([
+                            (["200"], {"200": cpu_record}),
+                            (["201"], {"200": cpu_record, "201": rec2})]))
+    main(["detail", "--cpu", "-D", "1", "-u", "bob"])
+    out = capsys.readouterr().out
+    assert out.index("Job 200") < out.index("Job 201")
 
 
 def test_summary_gpu_wires_dcgm(monkeypatch, capsys, gpu_record):

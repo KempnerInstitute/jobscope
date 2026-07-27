@@ -1,19 +1,22 @@
-"""Job selection and the single bulk sacct fetch.
+"""Job selection and the bulk sacct fetch.
 
 Jobs are selected with one ``sacct`` query, then all of their data is retrieved
-with a second bulk ``sacct -j`` query -- no per-job jobstats calls and no
-job-count cap. The AdminComment blob returned by the second query is decoded into
-each :class:`JobRecord`.
+with bulk ``sacct -j`` queries -- no per-job jobstats calls and no job-count
+cap. When the id list would exceed the kernel's per-argument size limit the
+``-j`` query is split into batches (see :data:`JOBID_ARG_LIMIT`), with progress
+notes on stderr. The AdminComment blob returned by the bulk query is decoded
+into each :class:`JobRecord`.
 """
 
 import getpass
 import os
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from .blob import decode_admin_comment, gpus_from_tres
 from .errors import JobscopeError
@@ -22,6 +25,15 @@ TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 FAILED_STATES = ("FAILED,TIMEOUT,OUT_OF_MEMORY,NODE_FAIL,CANCELLED,"
                  "DEADLINE,BOOT_FAIL,PREEMPTED")
+
+# Chunk bounds for the batched sacct -j queries. JOBS_PER_CHUNK is the primary
+# bound: sacct costs ~35 ms per call regardless of id count, so small batches
+# stream first rows sooner at negligible overhead. JOBID_ARG_LIMIT backstops the
+# Linux per-argument cap (MAX_ARG_STRLEN, 128 KiB) for pathologically long ids.
+# NOTE_EVERY throttles the stderr progress notes to one per that many jobs.
+JOBID_ARG_LIMIT = 16384
+JOBS_PER_CHUNK = 200
+NOTE_EVERY = 4096
 
 
 @dataclass
@@ -116,6 +128,31 @@ def query_jobid(jobid: str) -> str:
     return jobid.split("_", 1)[0] if "_[" in jobid else jobid
 
 
+def chunk_jobids(ids: List[str], limit: int,
+                 max_count: Optional[int] = None) -> List[List[str]]:
+    """Split ids into runs whose comma-joined form stays within limit bytes.
+
+    Order is preserved and every id appears exactly once. An id longer than
+    the limit gets its own chunk (it cannot be split). With ``max_count``, a
+    chunk also holds at most that many ids.
+    """
+    chunks: List[List[str]] = []
+    current: List[str] = []
+    joined = 0
+    for jobid in ids:
+        added = len(jobid) + (1 if current else 0)  # +1 for the comma
+        if current and (joined + added > limit
+                        or (max_count is not None and len(current) >= max_count)):
+            chunks.append(current)
+            current, joined = [], 0
+            added = len(jobid)
+        current.append(jobid)
+        joined += added
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def run_capture(cmd: List[str], timeout: Optional[float], what: str,
                 soft: bool = False) -> Optional[str]:
     """Run ``cmd`` and capture stdout with a hard, process-group timeout.
@@ -129,6 +166,12 @@ def run_capture(cmd: List[str], timeout: Optional[float], what: str,
                                  universal_newlines=True, start_new_session=True)
     except FileNotFoundError:
         raise JobscopeError("command not found: %s" % cmd[0])
+    except OSError as exc:  # e.g. E2BIG when the argv exceeds the kernel limit
+        if soft:
+            return None
+        raise JobscopeError(
+            "%s could not be started (%s) -- if the argument list is too long,\n"
+            "narrow the selection with -N, -D, or -S/-E." % (what, exc))
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -196,31 +239,8 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
     return ids, desc
 
 
-def fetch(jobids: List[str], timeout: Optional[float]) -> Dict[str, JobRecord]:
-    """One bulk sacct query for all jobs, keyed by JobID.
-
-    Array ids are de-bracketed to their base for the query (see query_jobid), then
-    each record is also aliased back to the originally-requested id so a caller that
-    looks it up by that id still resolves it.
-    """
-    records: Dict[str, JobRecord] = {}
-    if not jobids:
-        return records
-
-    query_ids, seen = [], set()
-    for jobid in jobids:
-        base = query_jobid(jobid)
-        if base not in seen:
-            seen.add(base)
-            query_ids.append(base)
-
-    # AdminComment (a '|'-free base64 blob) is queried last so a fixed maxsplit is safe.
-    out = run_capture(
-        ["sacct", "-j", ",".join(query_ids), "-X", "-P", "-n", "--units=G",
-         "-o", "JobID,State,JobName,Elapsed,NNodes,AllocTRES,"
-               "Start,End,JobIDRaw,Cluster,User,AdminComment"],
-        timeout, "sacct query")
-
+def _parse_fetch_lines(out: str, records: Dict[str, JobRecord]) -> None:
+    """Parse one bulk-query output into records, keyed by JobID."""
     for line in out.splitlines():
         parts = line.split("|", 11)
         if len(parts) < 12:
@@ -244,8 +264,77 @@ def fetch(jobids: List[str], timeout: Optional[float]) -> Dict[str, JobRecord]:
             cluster=cluster,
             user=user or "?",
         )
-    for requested in jobids:
-        base = query_jobid(requested)
-        if requested not in records and base in records:
-            records[requested] = records[base]
+
+
+def fetch_chunks(jobids: List[str], timeout: Optional[float],
+                 ) -> Iterator[Tuple[List[str], Dict[str, JobRecord]]]:
+    """Fetch job data batch by batch, yielding ``(ready_ids, records)`` pairs.
+
+    ``ready_ids`` is the next run of requested ids (in input order) whose data
+    has been queried, so callers can render incrementally; ``records`` is the
+    cumulative dict shared across yields (do not mutate). Concatenating every
+    ``ready_ids`` reproduces ``jobids`` exactly, so emission order always
+    matches the input. Array ids are de-bracketed to their base for the query
+    (see query_jobid) and aliased back to the requested id at emission.
+    ``timeout`` applies to each batch call. When there is more than one batch,
+    stderr gets one upfront note (printed lazily, on first iteration), then a
+    progress note per :data:`NOTE_EVERY` fetched jobs and on the final batch.
+    """
+    if not jobids:
+        return
+
+    query_ids, seen = [], set()
+    for jobid in jobids:
+        base = query_jobid(jobid)
+        if base not in seen:
+            seen.add(base)
+            query_ids.append(base)
+
+    chunks = chunk_jobids(query_ids, JOBID_ARG_LIMIT, JOBS_PER_CHUNK)
+    if len(chunks) > 1:
+        print("note: %d jobs selected -- fetching sacct data in %d batches"
+              % (len(query_ids), len(chunks)), file=sys.stderr)
+    records: Dict[str, JobRecord] = {}
+    queried: set = set()
+    pos, done = 0, 0
+    for i, chunk in enumerate(chunks, 1):
+        # AdminComment (a '|'-free base64 blob) is queried last so a fixed maxsplit is safe.
+        out = run_capture(
+            ["sacct", "-j", ",".join(chunk), "-X", "-P", "-n", "--units=G",
+             "-o", "JobID,State,JobName,Elapsed,NNodes,AllocTRES,"
+                   "Start,End,JobIDRaw,Cluster,User,AdminComment"],
+            timeout, "sacct query")
+        _parse_fetch_lines(out, records)
+        queried.update(chunk)
+        done += len(chunk)
+        if len(chunks) > 1 and (done // NOTE_EVERY > (done - len(chunk)) // NOTE_EVERY
+                                or i == len(chunks)):
+            print("note: batch %d/%d done (%d/%d jobs)"
+                  % (i, len(chunks), done, len(query_ids)), file=sys.stderr)
+        # Emit the longest run of not-yet-emitted requested ids whose base has
+        # been queried; a base shared across distant requested ids can defer
+        # ids to a later yield, but never reorder them.
+        ready: List[str] = []
+        while pos < len(jobids) and query_jobid(jobids[pos]) in queried:
+            requested = jobids[pos]
+            base = query_jobid(requested)
+            if requested not in records and base in records:
+                records[requested] = records[base]
+            ready.append(requested)
+            pos += 1
+        yield ready, records
+
+
+def fetch(jobids: List[str], timeout: Optional[float]) -> Dict[str, JobRecord]:
+    """Bulk sacct query for all jobs, keyed by JobID.
+
+    Drains :func:`fetch_chunks`: array ids are de-bracketed to their base for
+    the query (see query_jobid) and aliased back to the originally-requested id,
+    and id lists whose joined form would exceed the kernel's per-argument limit
+    are queried in batches (with progress notes on stderr); ``timeout`` applies
+    to each batch call.
+    """
+    records: Dict[str, JobRecord] = {}
+    for _ready, chunk_records in fetch_chunks(jobids, timeout):
+        records = chunk_records
     return records
