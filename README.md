@@ -65,11 +65,6 @@ uv tool install jobscope      # from PyPI
 uv tool install .             # from a source checkout
 ```
 
-> [!NOTE]
-> jobscope is not on PyPI yet, so `uv tool install jobscope` will work only once
-> the first release is published. Until then, install from a source checkout with
-> `uv tool install .`.
-
 Upgrade or remove it later with `uv tool upgrade jobscope` or `uv tool uninstall
 jobscope`.
 
@@ -179,47 +174,6 @@ plot`: the plot needs the CSV header row.
 `contrib/jobstats_extended.py` is a site-specific prototype that folds DCGM
 metrics into the jobstats blob itself. It depends on an upstream jobstats install
 and is not part of the package; see [`contrib/README.md`](contrib/README.md).
-
-## Building and publishing (maintainers)
-
-The package uses a standard `pyproject.toml` build (setuptools backend, no
-`setup.py`). Build both distribution artifacts with
-[`uv`](https://docs.astral.sh/uv/) and validate their metadata:
-
-```bash
-uv build                     # writes the sdist + wheel to dist/
-uvx twine check dist/*       # validate long-description and metadata
-```
-
-Smoke-test the built wheel in a throwaway environment before publishing:
-
-```bash
-uv run --no-project --python 3.10 \
-  --with dist/jobscope-*-py3-none-any.whl jobscope --help
-```
-
-Publish to TestPyPI first, then to PyPI. Generate an **account-scoped** API token
-for the first upload of a new project (a project-scoped token cannot create a
-project that does not exist yet), and note that each version can be uploaded
-only once (bump the version to re-release):
-
-```bash
-# TestPyPI: token from https://test.pypi.org/manage/account/token/
-UV_PUBLISH_TOKEN=<test-token> \
-  uv publish --publish-url https://test.pypi.org/legacy/ dist/*
-
-# verify: TestPyPI does not host the runtime deps, so pull them from real PyPI
-uv run --no-project --python 3.10 \
-  --index https://test.pypi.org/simple/ --index-strategy unsafe-best-match \
-  --with jobscope jobscope --help
-
-# PyPI: token from https://pypi.org/manage/account/token/
-UV_PUBLISH_TOKEN=<token> uv publish dist/*
-```
-
-To keep the token out of your shell history, read it interactively instead of
-inlining it: `read -rs -p 'token: ' T && UV_PUBLISH_TOKEN="$T" uv publish ... ;
-unset T`.
 
 ## References
 
