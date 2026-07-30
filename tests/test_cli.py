@@ -340,15 +340,17 @@ def test_live_describe_needs_no_cluster_access(capsys, monkeypatch):
     monkeypatch.setattr(cli, "client_from_config", boom)
     main(["live", "--describe"])
     out = capsys.readouterr().out
-    assert "jobscope live columns" in out and "DUTY%" in out
+    assert "jobscope live columns" in out and "GPU%" in out
 
 
 def test_live_describe_reflects_the_column_selection(capsys):
-    main(["live", "--gpu", "--describe"])
+    main(["live", "--all", "--describe"])
     out = capsys.readouterr().out
     assert "SM_ACT%" in out and "MEM%" in out
-    # The DUTY% column is dropped by --gpu, so it is not described either.
-    assert "nvidia_gpu_duty_cycle" not in out
+    # --all pulls in the extended catalog...
+    assert "NVLINK_MBs" in out
+    # ...but never the delta-reduced counter, which a snapshot cannot express.
+    assert "ENERGY_kWh" not in out
 
 
 class _LiveClient:

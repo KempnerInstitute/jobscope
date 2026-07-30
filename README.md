@@ -150,14 +150,14 @@ jobscope live -j 12345 --ts | jobscope plot
 
 Because a snapshot lands wherever the job happens to be, it will **not** match
 jobstats on a bursty job -- one that alternates compute with gaps is genuinely
-bimodal, and a single scrape can read `DUTY% 0` on a GPU averaging ~88%. Use
+bimodal, and a single scrape can read `GPU% 0` on a GPU averaging ~88%. Use
 `--avg` for a jobstats-comparable number, or `--ts` to see the phases themselves.
 
-Columns are `DUTY%`, the DCGM profiling set, and `MEM_GB`/`MEM%` (NVML GPU memory,
-peaked, so `--avg` matches jobstats' "maximum used/total"). `--gpu` drops `DUTY%`;
-`--all` adds the extended catalog. On a MIG node the DCGM columns read `-`: NVML
-identifies an instance by a `MIG-…` UUID where DCGM reports the physical `GPU-…`
-one, and nothing in the metrics maps between them.
+Columns are `GPU%`, the DCGM profiling set, and `MEM_GB`/`MEM%` (NVML GPU memory,
+peaked, so `--avg` matches jobstats' "maximum used/total"); `--all` adds the
+extended catalog. On a MIG node the DCGM columns read `-`: NVML identifies an
+instance by a `MIG-…` UUID where DCGM reports the physical `GPU-…` one, and nothing
+in the metrics maps between them.
 
 ## Views
 
@@ -169,6 +169,10 @@ one, and nothing in the metrics maps between them.
 
 Run `jobscope describe` for column definitions, `jobscope describe --dcgm --ext`
 for the full metric catalog, and `jobscope live --describe` for the live columns.
+
+For the pipeline behind those numbers — which source wins, how each metric is
+reduced over time and across GPUs, the raw-vs-display job ID rule, MIG limits, and
+how to verify a value by hand — see [`docs/metrics.md`](docs/metrics.md).
 
 ## Plotting
 

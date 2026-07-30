@@ -44,7 +44,11 @@ LiveMetrics = Dict[int, Dict[str, Dict[str, Optional[float]]]]
 # %A first, then %i: %A is the raw per-element job ID that nvidia_gpu_jobId
 # reports, %i the display form (they differ for array elements). Pipe-delimited
 # because the start time contains colons.
-SQUEUE_FORMAT = "%A|%i|%u|%N|%g|%j|%G|%C|%S"
+#
+# Note %b (tres-per-node, e.g. "gres/gpu:1") for the GPU request -- NOT %G, which
+# is the numeric group ID. GPU rows come from Prometheus regardless; this field is
+# only the job's allocation as Slurm records it.
+SQUEUE_FORMAT = "%A|%i|%u|%N|%g|%j|%b|%C|%S"
 
 DEFAULT_MIN_ELAPSED = "1h"
 
@@ -114,19 +118,21 @@ DERIVED_COLUMNS: List[Derived] = [
 ]
 
 # The live catalogs. DEFAULT_SPECS + LIVE_SPECS already lands in the intended
-# column order (duty, smact, occ, tensor, dram, power, mem, memtot).
+# column order (GPU%, smact, occ, tensor, dram, power, mem, memtot).
+#
+# There is no narrower catalog than this one. The historical views omit GPU% from
+# their DCGM columns because they render it from the blob instead, but a running
+# job has no blob, so here it is the only place GPU utilization appears.
 DEFAULT_LIVE_SPECS: List[MetricSpec] = DEFAULT_SPECS + LIVE_SPECS
-# --gpu drops DUTY%, whose NVML duty cycle is the coarsest of the columns.
-GPU_LIVE_SPECS: List[MetricSpec] = [s for s in DEFAULT_LIVE_SPECS if s.key != "duty"]
 # --all appends the extended catalog, minus delta-reduced counters (ENERGY_kWh):
 # a delta needs two points, so it is meaningless in an instant snapshot.
 EXTENDED_LIVE_SPECS: List[MetricSpec] = DEFAULT_LIVE_SPECS + [
     s for s in ALL_SPECS if s.group == "all" and s.reducer != "delta"]
 
 
-def specs_for(view: str) -> List[MetricSpec]:
-    """The metric catalog for a live view: ``default``, ``gpu``, or ``all``."""
-    return {"gpu": GPU_LIVE_SPECS, "all": EXTENDED_LIVE_SPECS}.get(view, DEFAULT_LIVE_SPECS)
+def specs_for(view: Optional[str]) -> List[MetricSpec]:
+    """The metric catalog for a live view: the default set, or ``all``."""
+    return EXTENDED_LIVE_SPECS if view == "all" else DEFAULT_LIVE_SPECS
 
 
 def parse_duration(text: str) -> int:
@@ -174,7 +180,7 @@ def parse_squeue(stdout: str) -> Dict[int, LiveJob]:
         parts = line.split("|")
         if len(parts) < 9:
             continue
-        raw_id, disp_id, user, nodelist, group, name, gpus, cpus, start_time = parts[:9]
+        raw_id, disp_id, user, nodelist, group, name, gres, cpus, start_time = parts[:9]
         try:
             raw_jobid = int(raw_id)
         except ValueError:
@@ -186,7 +192,7 @@ def parse_squeue(stdout: str) -> Dict[int, LiveJob]:
             "node": nodelist,       # kept whole: compressed ranges must not be split
             "group": group,
             "name": name,
-            "gpus": gpus,
+            "gres": gres,       # as Slurm records it, e.g. "gres/gpu:1"
             "cpus": cpus,
             "start_time": start_time,
             # Runtime drives the --min-elapsed filter, the --avg window and the

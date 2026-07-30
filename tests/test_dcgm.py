@@ -1,5 +1,8 @@
 """Tests for the DCGM metric catalog and the Prometheus join/compute logic."""
 
+import dataclasses
+
+from jobscope.blob import blob_metrics
 from jobscope.dcgm import (
     ALL_SPECS,
     DCGM_HEADERS,
@@ -13,6 +16,7 @@ from jobscope.dcgm import (
     format_by_header,
     format_value,
     gpu_minor_key,
+    stored_utilization,
     window_query,
 )
 
@@ -94,9 +98,40 @@ def test_dcgm_for_job_scales_and_aggregates(gpu_record):
     overall, per_gpu = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
     assert overall["SM_ACT%"] == 60.0          # mean(80, 40), 0-1 fraction scaled to percent
     assert overall["POWER_W"] == 400.0         # mean(300, 500)
-    assert "DUTY%" not in overall              # no samples for it
     assert per_gpu[("node01", "0")]["SM_ACT%"] == 80.0
     assert per_gpu[("node01", "1")]["POWER_W"] == 500.0
+
+
+def test_utilization_comes_from_the_blob_not_a_recomputation(gpu_record):
+    """A finished job must report the utilization Slurm stored, in every view.
+
+    The fake client serves no duty samples at all, so this value can only have
+    come from the blob -- and it is the same number blob_metrics gives the summary
+    view, which is the point: the two cannot drift apart.
+    """
+    overall, per_gpu = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
+    assert per_gpu[("node01", "0")]["GPU%"] == 90.0   # the blob's own per-GPU values
+    assert per_gpu[("node01", "1")]["GPU%"] == 50.0
+    assert overall["GPU%"] == 70.0                   # mean(90, 50)
+    assert overall["GPU%"] == blob_metrics(gpu_record.stats)[2]
+
+
+def test_running_job_keeps_the_prometheus_utilization(gpu_record):
+    """With no blob there is nothing to defer to, so the query stands."""
+    running = dataclasses.replace(gpu_record, state="RUNNING", stats={})
+    overall, per_gpu = dcgm_for_job(running, DEFAULT_SPECS, _client(), None)
+    # _client() serves no duty samples, so the column is simply absent rather
+    # than silently borrowed from somewhere else.
+    assert "GPU%" not in overall
+    assert "GPU%" not in per_gpu[("node01", "0")]
+
+
+def test_stored_utilization_is_keyed_by_node_and_minor_string(gpu_record):
+    assert stored_utilization(gpu_record) == {("node01", "0"): 90.0, ("node01", "1"): 50.0}
+
+
+def test_stored_utilization_empty_without_a_blob(gpu_record):
+    assert stored_utilization(dataclasses.replace(gpu_record, stats={})) == {}
 
 
 def test_dcgm_for_job_cpu_only(cpu_record):
@@ -149,5 +184,15 @@ def test_dcgm_for_job_no_uuids(gpu_record):
 
 def test_dcgm_for_job_metric_error_keeps_gpu(gpu_record):
     overall, per_gpu = dcgm_for_job(gpu_record, DEFAULT_SPECS, _DiscoveryOnlyClient(), None)
+    # Every metric query fails, so nothing Prometheus-derived survives; the GPU row
+    # itself is kept, carrying only what the stored blob already knew.
+    assert set(overall) == {"GPU%"}
+    assert set(per_gpu) == {("node01", "0")}
+    assert set(per_gpu[("node01", "0")]) == {"GPU%"}
+
+
+def test_dcgm_for_job_metric_error_on_a_running_job_yields_nothing(gpu_record):
+    running = dataclasses.replace(gpu_record, state="RUNNING", stats={})
+    overall, per_gpu = dcgm_for_job(running, DEFAULT_SPECS, _DiscoveryOnlyClient(), None)
     assert overall == {}
     assert per_gpu == {("node01", "0"): {}}

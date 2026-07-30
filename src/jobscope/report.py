@@ -674,7 +674,7 @@ a single slice would be wrong.
 
 An instantaneous reading will not agree with jobstats on a bursty job: one that
 alternates compute with gaps is genuinely bimodal, and a single scrape can read
-DUTY% 0 on a GPU averaging ~88%. Use --avg for a jobstats-comparable number, or
+GPU% 0 on a GPU averaging ~88%. Use --avg for a jobstats-comparable number, or
 --ts to see the phases themselves."""
 
 
@@ -694,7 +694,7 @@ def describe_live(specs: List[MetricSpec], average: bool = False, n_all: int = 0
         # Recomputed from already-reduced inputs, so it has no reducer of its own.
         source[derived.header] = (derived.source, "-")
 
-    print("jobscope live columns. One row per GPU. DUTY%%/MEM_GB/MEM%% come from the NVML\n"
+    print("jobscope live columns. One row per GPU. GPU%%/MEM_GB/MEM%% come from the NVML\n"
           "exporter (nvidia_gpu_*), every other metric from dcgm-exporter (DCGM_FI_*).\n"
           "Showing %d of %d columns (%s)."
           % (len(columns), n_all or len(columns),

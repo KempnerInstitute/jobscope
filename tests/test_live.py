@@ -10,7 +10,7 @@ from jobscope.errors import JobscopeError
 from jobscope.live import (
     DEFAULT_LIVE_SPECS,
     EXTENDED_LIVE_SPECS,
-    GPU_LIVE_SPECS,
+    SQUEUE_FORMAT,
     Gpu,
     LiveSelection,
     build_columns,
@@ -30,8 +30,8 @@ from jobscope.live_blob import synthesize_stats
 from jobscope.report import RenderOptions, live_report, live_timeseries
 from jobscope.sacct import JobRecord
 
-# squeue -o "%A|%i|%u|%N|%g|%j|%G|%C|%S": raw id, display id, user, nodelist,
-# group, name, gpus, cpus, start. For array element 12345_6 the raw id differs --
+# squeue -o "%A|%i|%u|%N|%g|%j|%b|%C|%S": raw id, display id, user, nodelist,
+# group, name, gres, cpus, start. For array element 12345_6 the raw id differs --
 # and Prometheus keys on the raw one, which is the whole reason %A is read.
 ARRAY_LINE = "34843629|34843528_6|alice|holygpu01|kempner|train|gpu:1|16|2026-07-24T09:00:00"
 PLAIN_LINE = "34622920|34622920|bob|holygpu02|kempner|infer|gpu:2|8|2026-07-24T10:00:00"
@@ -54,6 +54,19 @@ def test_parse_squeue_raw_and_display_agree_for_plain_jobs():
 def test_parse_squeue_skips_headers_short_and_unparseable_lines():
     text = "\n".join(["JOBID|...", "", "too|few|fields", "notanid|x|u|n|g|j|G|C|S", PLAIN_LINE])
     assert list(parse_squeue(text)) == [34622920]
+
+
+def test_squeue_format_asks_for_gres_not_the_group_id():
+    """%b is tres-per-node; %G is the numeric group ID, which looks like data.
+
+    Reading %G here yielded values such as 5137 in a field named "gpus" -- a
+    plausible-looking number that is not a GPU count at all.
+    """
+    assert "%b" in SQUEUE_FORMAT and "%G" not in SQUEUE_FORMAT
+
+
+def test_parse_squeue_records_the_gres_request():
+    assert parse_squeue(ARRAY_LINE)[34843629]["gres"] == "gpu:1"
 
 
 def test_parse_squeue_keeps_the_whole_nodelist():
@@ -162,12 +175,14 @@ def test_timeseries_step_never_finer_than_the_scrape_interval():
 
 def test_live_catalog_column_order_and_membership():
     assert [h for _k, h, _d in build_columns(DEFAULT_LIVE_SPECS)] == [
-        "DUTY%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "MEM_GB", "MEM%"]
+        "GPU%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "MEM_GB", "MEM%"]
 
 
-def test_gpu_view_drops_duty_only():
-    headers = [h for _k, h, _d in build_columns(GPU_LIVE_SPECS)]
-    assert "DUTY%" not in headers and "SM_ACT%" in headers and "MEM%" in headers
+def test_gpu_utilization_is_always_present_in_the_live_view():
+    # A running job has no blob, so this is the only place GPU% comes from; there
+    # is deliberately no narrower catalog that could drop it.
+    assert "GPU%" in [h for _k, h, _d in build_columns(DEFAULT_LIVE_SPECS)]
+    assert "GPU%" in [h for _k, h, _d in build_columns(EXTENDED_LIVE_SPECS)]
 
 
 def test_total_memory_is_queried_but_not_shown():
@@ -183,7 +198,6 @@ def test_extended_catalog_excludes_delta_reduced_counters():
 
 
 def test_specs_for_maps_the_view_names():
-    assert specs_for("gpu") is GPU_LIVE_SPECS
     assert specs_for("all") is EXTENDED_LIVE_SPECS
     assert specs_for(None) is DEFAULT_LIVE_SPECS
 
@@ -206,7 +220,7 @@ def test_mem_percent_is_per_gpu_and_handles_a_missing_total():
 # --- the runtime-window clip ------------------------------------------------
 
 def test_clip_applies_to_nvidia_metrics_only():
-    duty, smact = SPEC_BY_HEADER["DUTY%"], SPEC_BY_HEADER["SM_ACT%"]
+    duty, smact = SPEC_BY_HEADER["GPU%"], SPEC_BY_HEADER["SM_ACT%"]
     # Same exporter as nvidia_gpu_jobId, so `and` can match on identical labels.
     assert clip_to_job(duty, 42) == "nvidia_gpu_jobId == 42"
     # DCGM carries different labels, so `and` never matches; the window alone bounds it.
@@ -214,7 +228,7 @@ def test_clip_applies_to_nvidia_metrics_only():
 
 
 def test_clipped_window_query_is_well_formed():
-    duty = SPEC_BY_HEADER["DUTY%"]
+    duty = SPEC_BY_HEADER["GPU%"]
     query = window_query(duty, ["GPU-a"], 900, clip=clip_to_job(duty, 42))
     assert query == ('avg_over_time((nvidia_gpu_duty_cycle{uuid=~"^(GPU-a)$"} '
                      'and nvidia_gpu_jobId == 42)[900s:])')
@@ -382,7 +396,7 @@ def test_live_report_row_for_a_job_with_no_gpu_samples():
 
 def test_live_report_csv_header_matches_the_table_columns():
     rows = [r for r in _one_gpu_render(csv=True).splitlines() if r]
-    assert rows[1].startswith("JOBID,USER,NODE,NAME,GPU,DUTY%")
+    assert rows[1].startswith("JOBID,USER,NODE,NAME,GPU,GPU%")
 
 
 def test_live_timeseries_uses_the_schema_plot_reads():

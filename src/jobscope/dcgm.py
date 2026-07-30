@@ -41,7 +41,7 @@ class MetricSpec:
 
 
 METRICS: List[MetricSpec] = [
-    MetricSpec("duty", "DUTY%", "nvidia_gpu_duty_cycle", 1, 0, "default", uuid_label="uuid"),
+    MetricSpec("duty", "GPU%", "nvidia_gpu_duty_cycle", 1, 0, "default", uuid_label="uuid"),
     MetricSpec("smact", "SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE", 100, 1, "default"),
     MetricSpec("occ", "OCC%", "DCGM_FI_PROF_SM_OCCUPANCY", 100, 1, "default"),
     MetricSpec("tensor", "TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE", 100, 1, "default"),
@@ -88,16 +88,19 @@ DEFAULT_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group == "de
 ALL_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group != "live"]
 LIVE_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group == "live"]
 
-# GPU summary columns: the default group minus DUTY% (== the blob's GPU%, already shown).
+# GPU summary columns: the default group minus GPU%, which the summary and detail
+# views already render from the blob (and which, for a finished job, is the very
+# same number -- see _prefer_stored_utilization).
 GPU_SUMMARY_SPECS: List[MetricSpec] = [spec for spec in DEFAULT_SPECS if spec.key != "duty"]
 DCGM_HEADERS: List[str] = [spec.header for spec in GPU_SUMMARY_SPECS]
 
 DESCRIPTIONS: Dict[str, str] = {
-    "DUTY%": "jobstats' GPU%. Coarse duty cycle: fraction of the run during which at least one "
-             "kernel was executing on the GPU. Says the GPU was occupied in time, NOT how "
-             "intensely -- a 1-thread kernel and a full-GPU kernel both read ~100%.",
+    "GPU%": "NVML's duty cycle: the fraction of the run during which at least one kernel was "
+            "executing on the GPU -- the same number jobstats reports. Says the GPU was occupied "
+            "in time, NOT how intensely: a 1-thread kernel and a full-GPU kernel both read ~100%. "
+            "For a finished job this comes from the stored blob, so every view agrees.",
     "SM_ACT%": "Fraction of time at least one warp was resident on an SM, averaged across all SMs. "
-               "Distinguishes 'one SM busy' from 'all SMs busy' -- low while DUTY% is high means the "
+               "Distinguishes 'one SM busy' from 'all SMs busy' -- low while GPU% is high means the "
                "GPU was barely loaded (parked / underfed).",
     "OCC%": "SM occupancy: the fraction of warp slots that were filled, averaged over SMs and "
             "time (active warps / the hardware max per SM). Low occupancy means kernels under-fill "
@@ -111,7 +114,7 @@ DESCRIPTIONS: Dict[str, str] = {
     "POWER_W": "Mean board power draw over the run, in watts. Compare to the GPU's TDP (~700 W for "
                "H100/H200, ~400 W for A100); near-idle watts mean the GPU was not really working.",
     "ENGINE%": "Fraction of time the graphics/compute engine had work in flight -- a finer-grained "
-               "successor to the DUTY% duty cycle.",
+               "successor to the GPU% duty cycle.",
     "HMMA%": "Tensor-core activity for half-precision matrix ops (fp16/bf16). A precision breakdown "
              "of TENSOR%.",
     "IMMA%": "Tensor-core activity for integer matrix ops (int8). Precision breakdown of TENSOR% -- "
@@ -159,18 +162,19 @@ DESCRIPTIONS: Dict[str, str] = {
 # metrics need extra warnings there; keeping them separate leaves the wording of
 # `describe --dcgm` unchanged.
 LIVE_DESCRIPTIONS: Dict[str, str] = {
-    "DUTY%": "jobstats' \"GPU utilization\". NVML's coarse duty cycle: the fraction of time at "
-             "least one kernel was executing on the GPU. Says the GPU was occupied in time, NOT "
-             "how intensely -- a 1-thread kernel and a full-GPU kernel both read ~100%. NVML "
-             "stops reporting it once MIG is enabled, so it is \"-\" on MIG nodes.",
+    "GPU%": "NVML's duty cycle -- jobstats' \"GPU utilization\": the fraction of time at least "
+            "one kernel was executing. Says the GPU was occupied in time, NOT how intensely: a "
+            "1-thread kernel and a full-GPU kernel both read ~100%. Here it is read live from "
+            "Prometheus (a running job has no stored blob), and NVML stops reporting it once MIG "
+            "is enabled, so it is \"-\" on MIG nodes.",
     "SM_ACT%": "Fraction of time at least one warp was resident on an SM, averaged across all "
-               "SMs. Distinguishes 'one SM busy' from 'all SMs busy' -- low while DUTY% is high "
+               "SMs. Distinguishes 'one SM busy' from 'all SMs busy' -- low while GPU% is high "
                "means the GPU was barely loaded (parked / underfed). Measured cluster-wide it "
-               "runs ~20 points BELOW DUTY% on 93% of active GPUs, so do not read it as "
+               "runs ~20 points BELOW GPU% on 93% of active GPUs, so do not read it as "
                "\"GPU utilization\"; the gap between the two is the diagnostic signal.",
     "ENGINE%": "Fraction of time the graphics/compute engine had work in flight -- DCGM's "
-               "finer-grained analogue of DUTY%. Tracks it closely over a job-length window "
-               "(median |delta| 1.2, r=0.99 at 1h), so it is a usable stand-in for DUTY%; the "
+               "finer-grained analogue of GPU%. Tracks it closely over a job-length window "
+               "(median |delta| 1.2, r=0.99 at 1h), so it is a usable stand-in for GPU%; the "
                "two disagree far more on a single scrape, as they are scraped independently.",
     "FB_USED_GB": "dcgm-exporter's own framebuffer reading -- the same quantity as MEM_GB from "
                   "the other exporter, so the two disagree by a few tenths of a GiB. MEM_GB is "
@@ -300,12 +304,65 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
     per_gpu = {(node, minor): per_uuid.get(uuid, {}) for node, minor, uuid in gpus}
     overall: Dict[str, float] = {}
     for spec in specs:
+        # Aggregated across UUIDs rather than per_gpu keys: per_gpu is keyed by
+        # (node, minor), which MIG siblings share, so averaging it would drop
+        # instances.
         values = [per_uuid[u][spec.header] for u in uuids if spec.header in per_uuid[u]]
         if values:
             overall[spec.header] = (sum(values) if spec.agg == "sum"
                                     else max(values) if spec.agg == "max"
                                     else sum(values) / len(values))
+    _prefer_stored_utilization(record, specs, per_gpu, overall)
     return overall, per_gpu
+
+
+def stored_utilization(record: JobRecord) -> Dict[Tuple[str, str], float]:
+    """Per-GPU utilization from the job's stored blob, keyed ``(node, minor)``.
+
+    Empty when the job has no blob (which is every running job -- Slurm writes it
+    at job end).
+    """
+    found: Dict[Tuple[str, str], float] = {}
+    for node, info in (record.stats or {}).get("nodes", {}).items():
+        for minor, value in (info.get("gpu_utilization") or {}).items():
+            try:
+                found[(node, str(minor))] = float(value)
+            except (TypeError, ValueError):
+                continue
+    return found
+
+
+def _prefer_stored_utilization(record: JobRecord, specs: List[MetricSpec],
+                               per_gpu: Dict[Tuple[str, str], dict],
+                               overall: Dict[str, float]) -> None:
+    """Overwrite the GPU% column with the blob's value where the blob has one.
+
+    Both come from ``nvidia_gpu_duty_cycle`` averaged over the job's runtime, so
+    they measure the same thing -- but the blob is what jobstats computed at job
+    end, while recomputing here has to reconstruct the window from sacct's Start
+    and End. On a short job that boundary is worth several points (a 570s job at a
+    60s scrape interval has ~10 samples, so one sample in or out moves the mean by
+    ~8), which showed up as this view disagreeing with the summary view's GPU% for
+    the same job.
+
+    Rather than tune the window to imitate an instant we cannot recover, defer to
+    the stored value: a finished job then reports exactly what Slurm recorded, in
+    every view. Running jobs have no blob, so they keep the Prometheus value --
+    reconstructed by :mod:`jobscope.live_blob` for the blob columns, so those agree
+    with each other by construction.
+    """
+    spec = next((s for s in specs if s.key == "duty"), None)
+    if spec is None:
+        return
+    stored = stored_utilization(record)
+    if not stored:
+        return
+    for node_minor, value in stored.items():
+        if node_minor in per_gpu:
+            per_gpu[node_minor][spec.header] = value
+    # The job-level figure is the mean over the blob's own GPUs, which is exactly
+    # what blob_metrics reports as the summary view's GPU%.
+    overall[spec.header] = sum(stored.values()) / len(stored)
 
 
 def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],

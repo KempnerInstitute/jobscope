@@ -189,11 +189,8 @@ def build_parser():
                             help="only jobs running longer than this (default: %s; "
                                  "e.g. '5m', '2h', '0s' for no floor)" % DEFAULT_MIN_ELAPSED)
     live_cols = p_live.add_argument_group("columns")
-    live_group = live_cols.add_mutually_exclusive_group()
-    live_group.add_argument("--gpu", action="store_const", const="gpu", dest="view",
-                            help="drop DUTY%%, the coarsest column")
-    live_group.add_argument("--all", "--ext", action="store_const", const="all", dest="view",
-                            help="the extended DCGM catalog (clocks, temps, PCIe, NVLink, ...)")
+    live_cols.add_argument("--all", "--ext", action="store_const", const="all", dest="view",
+                           help="the extended DCGM catalog (clocks, temps, PCIe, NVLink, ...)")
     live_cols.add_argument("--avg", action="store_true",
                            help="fold each metric over each job's runtime, making the values "
                                 "comparable to jobstats (default: an instantaneous snapshot)")
