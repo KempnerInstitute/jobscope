@@ -150,6 +150,12 @@ GPU_SUMMARY_SPECS: List[MetricSpec] = [spec for spec in DEFAULT_SPECS
                                        if spec.key not in BLOB_BACKED_KEYS]
 DCGM_HEADERS: List[str] = [spec.header for spec in GPU_SUMMARY_SPECS]
 
+# The column headers those keys produce, including the derived GMEM%. Renderers use
+# this to keep a blob-backed quantity out of the profiling block.
+DCGM_BLOB_HEADERS: Tuple[str, ...] = tuple(
+    [spec.header for spec in METRICS if spec.key in BLOB_BACKED_KEYS]
+    + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(BLOB_BACKED_KEYS)])
+
 DESCRIPTIONS: Dict[str, str] = {
     "GPU%": "NVML's duty cycle: the fraction of the run during which at least one kernel was "
             "executing on the GPU -- the same number jobstats reports. Says the GPU was occupied "

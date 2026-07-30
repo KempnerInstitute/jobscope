@@ -382,8 +382,9 @@ def test_live_table_renders(monkeypatch, capsys):
     monkeypatch.setattr(cli, "client_from_config", lambda cfg, timeout: _LiveClient())
     main(["live", "-j", "100_6"])
     out = capsys.readouterr().out
-    assert "100_6" in out and "alice" in out
-    assert "GPU 3" in out and "77.6" in out
+    assert "100_6" in out and "alice" in out and "RUNNING" in out
+    # One row per job now, so the per-GPU label is gone and SM_ACT% is aggregated.
+    assert "77.6" in out and "GPU 3" not in out
 
 
 def test_live_reports_the_jobs_owner_not_the_filter(monkeypatch, capsys):

@@ -39,8 +39,9 @@ from .dcgm import (
     window_query,
 )
 from .errors import JobscopeError
+from .live_blob import host_stats, stats_dict
 from .prometheus import PrometheusClient
-from .sacct import run_capture
+from .sacct import JobRecord, run_capture
 
 # One job's squeue fields, plus the derived start_epoch / elapsed_seconds.
 LiveJob = Dict[str, Any]
@@ -492,3 +493,126 @@ def collect_timeseries(client: PrometheusClient, jobs: Dict[int, LiveJob],
 
 # The live and dcgm views lay out the same columns, so they share one builder.
 build_columns = columns_for
+
+
+def aggregate_by_job(metrics: LiveMetrics, specs: List[MetricSpec],
+                     ) -> Dict[int, Dict[str, Optional[float]]]:
+    """Reduce per-GPU values to one row per job, keyed by column header.
+
+    Uses each spec's own cross-GPU aggregation -- mean for utilization, max for
+    peaks -- so the job-level figure means the same thing it does in the historical
+    views. Derived columns are recomputed from the aggregated inputs rather than
+    averaged, since a ratio of means is not the mean of ratios.
+    """
+    per_job: Dict[int, Dict[str, Optional[float]]] = {}
+    derived = applicable_derived(specs)
+    for raw_jobid, by_uuid in metrics.items():
+        keyed: Dict[str, Optional[float]] = {}
+        for spec in specs:
+            values = [v[spec.key] for v in by_uuid.values()
+                      if v.get(spec.key) is not None]
+            if not values:
+                continue
+            keyed[spec.key] = (sum(values) if spec.agg == "sum"
+                               else max(values) if spec.agg == "max"
+                               else sum(values) / len(values))
+        for column in derived:
+            computed = column.fn(keyed)
+            if computed is not None:
+                keyed[column.key] = computed
+        by_header = {spec.header: keyed[spec.key] for spec in specs if spec.key in keyed}
+        by_header.update({d.header: keyed[d.key] for d in derived if d.key in keyed})
+        per_job[raw_jobid] = by_header
+    return per_job
+
+
+def live_records(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu],
+                 metrics: LiveMetrics, specs: List[MetricSpec],
+                 client: PrometheusClient, timeout: Optional[float],
+                 workers: int = 1) -> Dict[str, JobRecord]:
+    """Turn squeue jobs into :class:`~jobscope.sacct.JobRecord`s, keyed by display ID.
+
+    This is what lets the live view render through the same code as the historical
+    ones: once a running job looks like a record with a utilization blob, the summary
+    renderer cannot tell the difference, and the two views cannot drift apart.
+
+    The blob's CPU and host-memory fields come from ``cgroup_*``; its GPU maps are
+    built from the values already collected per GPU, so they honour the
+    instant-versus-``--avg`` choice instead of silently re-querying a window.
+    """
+    gpus_per_job: Dict[int, List[Gpu]] = defaultdict(list)
+    for gpu in gpus.values():
+        gpus_per_job[gpu.jobid].append(gpu)
+
+    def build(item):
+        raw_jobid, job = item
+        elapsed = job.get("elapsed_seconds") or 0
+        at = int(time.time())
+        nodes = host_stats(str(raw_jobid), elapsed, at, client, timeout) if elapsed > 0 else {}
+        stats = stats_dict(elapsed, nodes, _gpu_node_map(gpus_per_job[raw_jobid],
+                                                        metrics.get(raw_jobid, {})))
+        return raw_jobid, stats
+
+    stats_by_job: Dict[int, dict] = {}
+    items = list(jobs.items())
+    if workers > 1 and len(items) > 1:
+        with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
+            for raw_jobid, stats in pool.map(build, items):
+                stats_by_job[raw_jobid] = stats
+    else:
+        for item in items:
+            raw_jobid, stats = build(item)
+            stats_by_job[raw_jobid] = stats
+
+    records: Dict[str, JobRecord] = {}
+    for raw_jobid, job in jobs.items():
+        elapsed = job.get("elapsed_seconds")
+        start = job.get("start_epoch")
+        records[job["jobid"]] = JobRecord(
+            jobid=job["jobid"],
+            state="RUNNING",
+            name=job.get("name", "?"),
+            runtime=format_elapsed(elapsed),
+            # NODE is a count, as in the historical views; squeue gives a nodelist,
+            # so count the hosts the job's GPUs are on, falling back to 1.
+            nodes=str(len({g.host for g in gpus_per_job[raw_jobid]}) or 1),
+            gpus=len(gpus_per_job[raw_jobid]),
+            stats=stats_by_job.get(raw_jobid, {}),
+            start=start,
+            end=(start + elapsed) if start and elapsed else int(time.time()),
+            duration=elapsed,
+            jobid_raw=str(raw_jobid),
+            cluster="",
+            user=job.get("user", "?"),
+        )
+    return records
+
+
+def _gpu_node_map(job_gpus: List[Gpu], by_uuid: Dict[str, dict]) -> Dict[str, dict]:
+    """The blob's per-node GPU maps, from values already collected per GPU."""
+    nodes: Dict[str, dict] = {}
+    for gpu in job_gpus:
+        values = by_uuid.get(gpu.uuid, {})
+        for blob_field, key in (("gpu_utilization", "duty"),
+                                ("gpu_used_memory", "mem"),
+                                ("gpu_total_memory", "memtot")):
+            value = values.get(key)
+            if value is None:
+                continue
+            # Scaled back to bytes: the blob stores raw byte counts, and blob_metrics
+            # divides used by total, so the two must share a unit.
+            if key in ("mem", "memtot"):
+                value = value * 1024 ** 3
+            nodes.setdefault(gpu.host, {}).setdefault(blob_field, {})[str(gpu.minor)] = value
+    return nodes
+
+
+def format_elapsed(seconds: Optional[int]) -> str:
+    """``D-HH:MM:SS`` / ``HH:MM:SS``, matching sacct's Elapsed formatting."""
+    if not seconds or seconds < 0:
+        return "-"
+    days, rest = divmod(int(seconds), 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    stamp = "%02d:%02d:%02d" % (hours, minutes, secs)
+    return "%d-%s" % (days, stamp) if days else stamp

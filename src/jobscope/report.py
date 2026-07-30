@@ -10,11 +10,12 @@ import textwrap
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .blob import blob_detail, blob_metrics
 from .dcgm import (
     ALL_SPECS,
+    DCGM_BLOB_HEADERS,
     DCGM_HEADERS,
     DEFAULT_SPECS,
     DERIVED_COLUMNS,
@@ -30,7 +31,7 @@ from .dcgm import (
     values_by_key,
 )
 from .diagnose import LEGEND, diagnose_dcgm
-from .live import Gpu, LiveJob, LiveMetrics, build_columns, job_sort_key
+from .live import Gpu, LiveJob, build_columns, job_sort_key
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, Selection
 
@@ -45,13 +46,23 @@ class Column:
     index: Optional[int] = None
 
 
+# One row per job, and the same set for every per-job view -- summary, dcgm and
+# live -- so a job reads identically whether it has finished or is still running:
+#
+#   JOBID USER STATE NODE CPU% MEM% #GPU GPU% GMEM% SM_ACT% OCC% TENSOR% DRAM% POWER_W RUNTIME
+#
+# NODE is the node count (a name would truncate on a multi-node job and the row is
+# already per-job, not per-node); #GPU is the allocated GPU count. The blob group
+# is shown by every view, since CPU% next to SM_ACT% is the comparison that tells
+# you whether a GPU job is actually CPU-bound -- previously no single view had both.
 SUMMARY_COLUMNS: List[Column] = [
     Column("JOBID", "{:<12}", "id"),
+    Column("USER", "{:<12}", "id"),
     Column("STATE", "{:<9}", "id"),
-    Column("NODES", "{:<5}", "cpu"),
-    Column("GPUS", "{:<4}", "gpu"),
+    Column("NODE", "{:<5}", "blob"),
     Column("CPU%", "{:<6}", "cpu"),
     Column("MEM%", "{:<6}", "cpu"),
+    Column("#GPU", "{:<5}", "gpu"),
     Column("GPU%", "{:<6}", "gpu"),
     Column("GMEM%", "{:<7}", "gpu"),
     Column("SM_ACT%", "{:<8}", "dcgm"),
@@ -61,8 +72,30 @@ SUMMARY_COLUMNS: List[Column] = [
     Column("POWER_W", "{:<8}", "dcgm"),
     Column("DIAG", "{:<22}", "diag"),
     Column("RUNTIME", "{:<12}", "id"),
-    Column("NAME", "{}", "id"),
 ]
+
+
+def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
+    """:data:`SUMMARY_COLUMNS` with its DCGM block taken from ``specs``.
+
+    The identity and blob columns are fixed; only the profiling block varies, which
+    is what lets `dcgm --ext` widen the table without becoming a different view.
+    Blob-backed metrics are dropped from the block -- GPU% and the GMEM columns are
+    already rendered from the blob, and one number deserves one column.
+    """
+    if specs is None:
+        return list(SUMMARY_COLUMNS)
+    block = [Column(header, "{:<%d}" % max(7, len(header) + 1), "dcgm")
+             for _key, header, _dec in columns_for(specs)
+             if header not in DCGM_BLOB_HEADERS]
+    out = []
+    for col in SUMMARY_COLUMNS:
+        if col.group == "dcgm":
+            out.extend(block)
+            block = []          # splice the whole block in at the first dcgm slot
+        else:
+            out.append(col)
+    return out
 
 DETAIL_COLUMNS: List[Column] = [
     Column("NODE", "{:<16}", "id", 0),
@@ -133,14 +166,16 @@ def cols_for(columns: List[Column], view: str, dcgm: bool = False,
              diagnose: bool = False) -> List[Column]:
     """The columns to show for the chosen view.
 
-    DCGM columns belong to the gpu view only (the only one that pulls DCGM); DIAG
-    is added by --diagnose there. cpu/cgpu are blob-only and offline.
+    ``blob`` and ``id`` columns are always shown. ``cpu``/``gpu`` narrow to one
+    resource for the ``--cpu``/``--cgpu`` views, which stay offline; DCGM columns
+    belong to the gpu view (the only one that reaches Prometheus for them), and DIAG
+    is added there by --diagnose.
     """
     out = []
     for col in columns:
         group = col.group
-        if (group == "id"
-                or (group == "cpu" and view in ("cpu", "cgpu"))
+        if (group in ("id", "blob")
+                or (group == "cpu" and view in ("cpu", "cgpu", "gpu"))
                 or (group == "gpu" and view in ("gpu", "cgpu"))
                 or (group == "dcgm" and dcgm and view == "gpu")
                 or (group == "diag" and diagnose and dcgm and view == "gpu")):
@@ -187,16 +222,19 @@ class SummaryRenderer:
     or the empty-selection message prints on finish.
     """
 
-    def __init__(self, context: List[Tuple[str, str]], options: RenderOptions, out=None) -> None:
+    def __init__(self, context: List[Tuple[str, str]], options: RenderOptions, out=None,
+                 specs: Optional[List[MetricSpec]] = None) -> None:
         self.out = out or sys.stdout
         self.options = options
         self.context = context
-        self.columns = cols_for(SUMMARY_COLUMNS, options.view, options.show_dcgm, options.diagnose)
+        self.columns = cols_for(summary_columns(specs), options.view,
+                                options.show_dcgm, options.diagnose)
         self.headers = [c.header for c in self.columns]
+        self.dcgm_headers = [c.header for c in self.columns if c.group == "dcgm"]
         self.writer = csv.writer(self.out, lineterminator="\n") if options.csv else None
         self.count = 0
         self.sums = {key: [0, 0] for key in ("cpu", "mem", "gpu", "gmem")}  # [total, count]
-        self.sums_dcgm = {header: [0.0, 0] for header in DCGM_HEADERS}
+        self.sums_dcgm = {header: [0.0, 0] for header in self.dcgm_headers}
         self._started = False
 
     def _line(self, row: dict) -> str:
@@ -231,11 +269,11 @@ class SummaryRenderer:
             record = records.get(jid)
             row = {
                 "JOBID": jid,
+                "USER": record.user if record else "?",
                 "STATE": record.state if record else "?",
-                "NODES": record.nodes if record else "-",
-                "GPUS": str(record.gpus) if record and record.gpus else "-",
+                "NODE": record.nodes if record else "-",
+                "#GPU": str(record.gpus) if record and record.gpus else "-",
                 "RUNTIME": record.runtime if record else "-",
-                "NAME": record.name if record else "(job not found)",
             }
             metrics = blob_metrics(record.stats if record else None)
             if metrics is None:
@@ -250,7 +288,7 @@ class SummaryRenderer:
                         self.sums[key][1] += 1
             if do_dcgm:
                 overall = dcgm_data.get(jid, ({}, {}))[0]
-                for header in DCGM_HEADERS:
+                for header in self.dcgm_headers:
                     value = overall.get(header)
                     row[header] = format_by_header(header, value)
                     if value is not None:
@@ -279,11 +317,11 @@ class SummaryRenderer:
             total, count = self.sums[key]
             return str(round(total / count)) if count else "-"
 
-        mean_row = {c.header: "" for c in SUMMARY_COLUMNS}
+        mean_row = {c.header: "" for c in self.columns}
         mean_row["CPU%"], mean_row["MEM%"] = mean("cpu"), mean("mem")
         mean_row["GPU%"], mean_row["GMEM%"] = mean("gpu"), mean("gmem")
         if options.show_dcgm:
-            for header in DCGM_HEADERS:
+            for header in self.dcgm_headers:
                 total, count = self.sums_dcgm[header]
                 mean_row[header] = format_by_header(header, total / count) if count else "-"
         if options.csv:
@@ -394,130 +432,19 @@ def detail(jobids: List[str], records: Dict[str, JobRecord],
     renderer.finish()
 
 
-# Identity columns shared by the per-GPU views, with their display widths. One row
-# is one GPU, so NODE names that GPU's own host rather than the job's nodelist, and
-# GPU is sized to the widest label present ("MIG 0.1" needs more than "0").
-#
-# The same set serves finished and running jobs: STATE is RUNNING for everything
-# the live view selects, and DUR_S is the elapsed runtime either way. Keeping them
-# identical is what lets one pair of eyes -- or one script -- read both.
-GPU_ID_COLUMNS: List[Tuple[str, int]] = [
-    ("JOBID", 12), ("USER", 12), ("STATE", 9), ("NODE", 15), ("NAME", 15)]
-
-# CSV carries DUR_S as well; the table omits it to stay narrow, since the runtime
-# is already in the summary view and rarely what you scan a GPU table for.
-GPU_CSV_ID_COLUMNS: List[str] = [h for h, _w in GPU_ID_COLUMNS] + ["GPU", "DUR_S"]
-
-
-class GpuRow(NamedTuple):
-    """One rendered row: a single GPU of a single job, however it was sourced."""
-
-    jobid: str
-    user: str
-    state: str
-    node: str
-    name: str
-    gpu_label: str                      # display form, e.g. "GPU 2" / "MIG 2.0"
-    gpu_id: str                         # CSV form: "2" / "2.0"
-    duration: Optional[int]             # elapsed seconds, for DUR_S
-    values: Dict[str, Optional[float]]  # keyed by column header
-    found: bool = True                  # False = no GPU samples for this job
-
-
-def gpu_table(rows: List[GpuRow], columns: List[Tuple[str, str, int]],
-              context: List[Tuple[str, str]], options: RenderOptions,
-              empty: str = "(no GPU jobs in this selection)", out=None) -> None:
-    """Render per-GPU rows as a flat table, or as CSV.
-
-    Shared by :func:`dcgm_report` and :func:`live_report` so a job is described by
-    the same columns whether it has finished or is still running. Values are looked
-    up by column header, which is what both callers store them under.
-    """
-    out = out or sys.stdout
-    gpu_width = max([3] + [len(r.gpu_label) for r in rows])
-    widths = [max(6, len(header)) for _key, header, _dec in columns]
-
-    def cells(row: GpuRow, missing: str = "-") -> List[str]:
-        return [format_number(row.values.get(header), dec, missing=missing)
-                for _key, header, dec in columns]
-
-    if options.csv:
-        writer = csv.writer(out, lineterminator="\n")
-        if options.header:
-            for label, value in context:
-                writer.writerow([label, value])
-            writer.writerow(GPU_CSV_ID_COLUMNS + [h for _k, h, _d in columns])
-        for row in rows:
-            writer.writerow([row.jobid, row.user, row.state, row.node, row.name,
-                             row.gpu_id, "" if row.duration is None else row.duration]
-                            + cells(row, missing=""))
-        return
-
-    if options.header:
-        for label, value in context:
-            print(fmt_context(label, value), file=out)
-    if not rows:
-        print("  " + empty, file=out)
-        return
-
-    header_line = "%s %s  %s" % (
-        " ".join("%-*s" % (w, h) for h, w in GPU_ID_COLUMNS),
-        "%*s" % (gpu_width, "GPU"),
-        "  ".join("%*s" % (w, h) for (_k, h, _d), w in zip(columns, widths)))
-    if options.header:
-        print(header_line, file=out)
-        print("-" * len(header_line), file=out)
-
-    for row in rows:
-        identity = " ".join("%-*s" % (w, str(v)[:w]) for v, w in zip(
-            (row.jobid, row.user, row.state, row.node, row.name),
-            (w for _h, w in GPU_ID_COLUMNS)))
-        print("%s %s  %s" % (identity, "%*s" % (gpu_width, row.gpu_label),
-                             "  ".join("%*s" % (w, c) for c, w in zip(cells(row), widths))),
-              file=out)
-
 def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
                 dcgm_data: Dict[str, Tuple[dict, dict]], specs: List[MetricSpec],
                 context: List[Tuple[str, str]], options: RenderOptions,
                 out=None) -> None:
-    """Per-GPU DCGM profiling table, one row per GPU.
+    """One row per job, with the profiling block taken from ``specs``.
 
-    Shares :func:`gpu_table` with the live view, so a finished job and a running one
-    are described by identical columns. Rows keep the selection's job order, then
-    sort by (node, GPU) within each job.
+    The same renderer the summary view uses, so the two print identical columns;
+    ``--ext`` only widens the profiling block. Per-GPU numbers live in
+    ``jobscope detail`` and in the ``--ts`` time series.
     """
-    rows = []
-    for jid in [j for j in jobids if j in records and records[j].gpus]:
-        record = records.get(jid)
-        per_gpu = dcgm_data.get(jid, ({}, {}))[1]
-        if not per_gpu:
-            # Too short, no DCGM data, or beyond retention -- keep the job visible
-            # with dashes rather than dropping it silently.
-            rows.append(_dcgm_row(jid, record, "-", "", {}, found=False))
-            continue
-        for node, minor in sorted(per_gpu, key=lambda nm: (nm[0], gpu_minor_key(nm[1]))):
-            rows.append(_dcgm_row(jid, record, "GPU %s" % minor, str(minor),
-                                  per_gpu[(node, minor)], node=node))
-    gpu_table(rows, columns_for(specs), context, options, out=out)
-
-
-def _dcgm_row(jid: str, record: Optional[JobRecord], gpu_label: str, gpu_id: str,
-              values: dict, node: Optional[str] = None, found: bool = True) -> GpuRow:
-    """One :class:`GpuRow` from a sacct record and its per-GPU metric dict."""
-    return GpuRow(
-        jobid=jid,
-        user=record.user if record else "?",
-        state=record.state if record else "?",
-        # A row is one GPU, so name that GPU's host; fall back to the job's
-        # nodelist only when there is no GPU to attribute it to.
-        node=node if node is not None else (record.nodes if record else "?"),
-        name=record.name if record else "?",
-        gpu_label=gpu_label,
-        gpu_id=gpu_id,
-        duration=record.duration if record else None,
-        values=values,
-        found=found,
-    )
+    renderer = SummaryRenderer(context, options, out, specs=specs)
+    renderer.add(jobids, records, dcgm_data)
+    renderer.finish()
 
 
 def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
@@ -588,13 +515,6 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
 # How each spec's window reducer reads in the --describe output.
 _REDUCER_NAME = {"avg": "mean", "max": "peak", "delta": "delta"}
 
-LIVE_READINGS = {
-    False: "instantaneous snapshot (one scrape; not comparable to jobstats)",
-    True: "folded over each job's runtime -- utilization averaged, memory peak "
-          "(comparable to jobstats)",
-}
-
-
 def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
     """Yield ``(job, gpu_or_None)`` in display order: by job, then by GPU.
 
@@ -612,37 +532,6 @@ def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
             continue
         for gpu in found:
             yield job, gpu
-
-
-def live_report(jobs: Dict[int, LiveJob], metrics: LiveMetrics, gpus: Dict[str, Gpu],
-                specs: List[MetricSpec], context: List[Tuple[str, str]],
-                options: RenderOptions, average: bool = False, out=None) -> None:
-    """The live table: one row per GPU, across all selected jobs.
-
-    Values arrive keyed by metric key here (the live collectors' convention), so
-    they are re-keyed to headers for the shared renderer.
-    """
-    columns = build_columns(specs)
-    by_header = {key: header for key, header, _dec in columns}
-    rows = []
-    for job, gpu in _live_rows(jobs, gpus):
-        keyed = metrics.get(gpu.jobid, {}).get(gpu.uuid, {}) if gpu else {}
-        rows.append(GpuRow(
-            jobid=job["jobid"],
-            user=job.get("user", "?"),
-            # Everything squeue selected here is running by definition, but the
-            # column exists so the live and dcgm tables stay identical.
-            state="RUNNING",
-            node=(gpu.host if gpu else job.get("node", "?")),
-            name=job.get("name", "?"),
-            gpu_label=(gpu.label if gpu else "-"),
-            gpu_id=(gpu.csv_id if gpu else ""),
-            duration=job.get("elapsed_seconds"),
-            values={by_header[k]: v for k, v in keyed.items() if k in by_header},
-            found=gpu is not None,
-        ))
-    gpu_table(rows, columns, context, options,
-              empty="(no running jobs in this selection)", out=out)
 
 
 def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]],

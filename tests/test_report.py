@@ -4,7 +4,7 @@ import dataclasses
 import io
 
 from jobscope import plot, report
-from jobscope.dcgm import DEFAULT_SPECS
+from jobscope.dcgm import DEFAULT_SPECS, GPU_SUMMARY_SPECS
 from jobscope.report import (
     SUMMARY_COLUMNS,
     RenderOptions,
@@ -36,9 +36,14 @@ def test_cols_for_views():
     cpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "cpu")]
     assert "CPU%" in cpu and "GPU%" not in cpu and "SM_ACT%" not in cpu
     gpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "gpu", dcgm=True, diagnose=True)]
-    assert "GPU%" in gpu and "SM_ACT%" in gpu and "DIAG" in gpu and "NODES" not in gpu
+    # The gpu view now carries CPU%/MEM% as well, so one table shows whether a GPU
+    # job was actually held up on the host.
+    assert "GPU%" in gpu and "SM_ACT%" in gpu and "DIAG" in gpu
+    assert "CPU%" in gpu and "MEM%" in gpu
     cgpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "cgpu")]
     assert "CPU%" in cgpu and "GPU%" in cgpu and "SM_ACT%" not in cgpu
+    # NODE identifies the row in every view, offline ones included.
+    assert all("NODE" in cols for cols in (cpu, gpu, cgpu))
 
 
 def test_cols_for_diag_requires_dcgm():
@@ -80,7 +85,10 @@ def test_summarize_gpu_text(gpu_record):
     text = _render(summarize, ["100"], {"100": gpu_record}, {"100": (overall, {})}, CTX, options)
     assert "User:" in text
     assert "SM_ACT%" in text and "60.0" in text and "400" in text
-    assert "train" in text
+    # NAME is no longer a column; a row is identified by JOBID/USER/STATE.
+    assert "100" in text and "alice" in text and "COMPLETED" in text
+    # CPU% sits beside SM_ACT% now, so one table answers "is this job CPU-bound".
+    assert "CPU%" in text and "#GPU" in text
 
 
 def test_summary_csv_roundtrips(gpu_record):
@@ -120,44 +128,57 @@ def test_detail_text_and_csv(gpu_record):
     assert len(rows) == 2 and rows[0]["NODE"] == "node01"
 
 
-def test_dcgm_report_text_and_csv(gpu_record):
-    per_gpu = {("node01", "0"): {"SM_ACT%": 80.0, "POWER_W": 300.0},
-               ("node01", "1"): {"SM_ACT%": 40.0, "POWER_W": 500.0}}
-    dcgm_data = {"100": ({}, per_gpu)}
-    options = RenderOptions(view="gpu", show_dcgm=True, csv=False, header=True)
-    text = _render(dcgm_report, ["100"], {"100": gpu_record}, dcgm_data, DEFAULT_SPECS, CTX, options)
-    # A flat table: the job identity is on every row, not in a block header.
-    assert "SM_ACT%" in text and "80.0" in text
-    assert text.count("100") >= 2                     # one row per GPU
-    assert "COMPLETED" in text and "alice" in text     # state and owner per row
-    csv_options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
+def test_dcgm_report_is_one_row_per_job(gpu_record):
+    overall = {"SM_ACT%": 60.0, "POWER_W": 400.0}
+    dcgm_data = {"100": (overall, {})}
+    options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
     csv_text = _render(dcgm_report, ["100"], {"100": gpu_record}, dcgm_data, DEFAULT_SPECS, CTX,
-                       csv_options)
+                       options)
     columns, rows = plot.parse_csv(io.StringIO(csv_text))
-    assert columns[:7] == ["JOBID", "USER", "STATE", "NODE", "NAME", "GPU", "DUR_S"]
-    assert rows[0]["NODE"] == "node01" and rows[0]["SM_ACT%"] == "80.0"
+    assert columns == ["JOBID", "USER", "STATE", "NODE", "CPU%", "MEM%", "#GPU", "GPU%", "GMEM%",
+                       "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME"]
+    assert len(rows) == 1                       # one row per job, not per GPU
+    assert rows[0]["SM_ACT%"] == "60.0"
+    # Blob columns still come from the blob: cpu 75, mem 50, gpu 70, gmem 50.
+    assert (rows[0]["CPU%"], rows[0]["GPU%"], rows[0]["GMEM%"]) == ("75", "70", "50")
 
 
-def test_dcgm_and_live_tables_share_their_identity_columns(gpu_record):
-    """One column set for a job whether it has finished or is still running."""
-    from jobscope.live import DEFAULT_LIVE_SPECS, Gpu
-    from jobscope.report import live_report
+def test_dcgm_ext_only_widens_the_profiling_block(gpu_record):
+    """--ext must not become a different view: identity and blob columns are fixed."""
+    from jobscope.dcgm import ALL_SPECS
+    options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
+
+    def headers(specs):
+        text = _render(dcgm_report, ["100"], {"100": gpu_record}, {"100": ({}, {})}, specs,
+                       CTX, options)
+        return plot.parse_csv(io.StringIO(text))[0]
+
+    default, extended = headers(DEFAULT_SPECS), headers(ALL_SPECS)
+    assert default[:9] == extended[:9]              # identity + blob unchanged
+    assert extended[-1] == default[-1] == "RUNTIME"
+    assert len(extended) > len(default)
+    # Blob-backed metrics never appear twice, even in the extended catalog.
+    assert extended.count("GPU%") == 1 and extended.count("GMEM%") == 1
+    assert "GMEM_TOTAL_GB" not in extended
+
+
+def test_every_per_job_view_shares_one_column_set(gpu_record):
+    """summary, dcgm and live must print identical columns, by construction."""
+    from jobscope.report import summary_columns
 
     options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
-    finished = _render(dcgm_report, ["100"], {"100": gpu_record},
-                       {"100": ({}, {("node01", "0"): {}})}, DEFAULT_SPECS, CTX, options)
 
-    out = io.StringIO()
-    live_report({1: {"jobid": "100", "user": "alice", "node": "node01", "name": "train",
-                     "elapsed_seconds": 100}},
-                {}, {"U": Gpu("U", 1, "node01", 0, "GPU 0")},
-                DEFAULT_LIVE_SPECS, CTX, options, out=out)
-    running = out.getvalue()
-
-    def header(text):
+    def header(render, *args):
+        text = _render(render, *args, CTX, options)
         return [r for r in text.splitlines() if r.startswith("JOBID,")][0]
 
-    assert header(finished) == header(running)
+    records, data = {"100": gpu_record}, {"100": ({}, {})}
+    assert header(summarize, ["100"], records, data) == \
+        header(dcgm_report, ["100"], records, data, DEFAULT_SPECS)
+    # live renders through the same SummaryRenderer, so it cannot diverge: the
+    # columns are a pure function of the spec list both are handed.
+    assert [c.header for c in summary_columns(DEFAULT_SPECS)] == \
+        [c.header for c in summary_columns(GPU_SUMMARY_SPECS)]
 
 
 class _TimeseriesClient:

@@ -153,22 +153,36 @@ jobstats on a bursty job -- one that alternates compute with gaps is genuinely
 bimodal, and a single scrape can read `GPU% 0` on a GPU averaging ~88%. Use
 `--avg` for a jobstats-comparable number, or `--ts` to see the phases themselves.
 
-Columns are identical to `jobscope dcgm` -- identity columns included -- so a job
-reads the same either side of its end:
+Columns are identical to `jobscope` and `jobscope dcgm`, so a job reads the same
+either side of its end (see [Columns](#columns)). `--all` adds the extended
+catalog. `CPU%`/`MEM%` are cumulative by nature -- CPU-seconds over elapsed x
+cores, and peak RSS -- so they read the same in both modes; only the GPU columns
+follow the instant-versus-`--avg` choice.
+
+For per-GPU numbers use `jobscope detail`, or `--ts` for the raw series. On a MIG
+node those show one row per instance; the DCGM columns read `-` there, because NVML
+identifies an instance by a `MIG-…` UUID where DCGM reports the physical `GPU-…`
+one and nothing in the metrics maps between them.
+
+## Columns
+
+`summary`, `dcgm` and `live` all print one row per job with the same columns, so a
+job reads identically whether it has finished or is still running:
 
 ```
-JOBID  USER  STATE  NODE  NAME  GPU   GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
+JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  RUNTIME
 ```
 
-`GMEM_GB`/`GMEM%` are NVML GPU memory, peaked rather than averaged, so under
-`--avg` they match jobstats' "maximum used/total". `--all` adds the extended
-catalog. On a MIG node the DCGM columns read `-`: NVML identifies an instance by a
-`MIG-…` UUID where DCGM reports the physical `GPU-…` one, and nothing in the
-metrics maps between them.
+`NODE` is the node count and `#GPU` the allocated GPU count. `CPU%`/`MEM%` sit
+beside `SM_ACT%` deliberately: a GPU job whose `GPU%` is low and `CPU%` is high is
+held up on the host, and previously no single view showed both. `--diagnose` adds a
+`DIAG` advisory before `RUNTIME`; `dcgm --ext` widens only the profiling block.
+
+Per-GPU numbers live in `jobscope detail` and in `--ts`.
 
 ## Views
 
-- `--gpu` (default) shows GPU blob columns plus time-averaged DCGM profiling
+- `--gpu` (default) shows every column above, with the DCGM profiling block
   (`SM_ACT%`/`OCC%`/`TENSOR%`/`DRAM%`/`POWER_W`) pulled from Prometheus.
 - `--cgpu` and `--cpu` read the stored blob only, so they need no Prometheus --
   except for running jobs, which have no blob yet (see Quick start).

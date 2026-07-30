@@ -18,12 +18,15 @@ from .live import (
     DEFAULT_MIN_ELAPSED,
     EXTENDED_LIVE_SPECS,
     LiveSelection,
+    aggregate_by_job,
     build_columns,
     collect_averaged,
     collect_instant,
     collect_timeseries,
     discover_gpus,
     fetch_jobs,
+    job_sort_key,
+    live_records,
     parse_duration,
     specs_for,
 )
@@ -39,7 +42,6 @@ from .report import (
     describe,
     describe_dcgm,
     describe_live,
-    live_report,
     live_timeseries,
 )
 from .sacct import (
@@ -511,8 +513,17 @@ def handle_live(args) -> None:
 
     metrics = (collect_averaged(client, jobs, gpus, specs, timeout, workers) if args.avg
                else collect_instant(client, gpus, specs, timeout))
-    live_report(jobs, metrics, gpus, specs, _live_context(selection, jobs, gpus),
-                options, average=args.avg)
+    # Rendered through the summary renderer so a running job prints exactly the
+    # columns a finished one does: the live path's job is to produce records, not a
+    # second table. Per-GPU numbers stay available via --ts.
+    records = live_records(jobs, gpus, metrics, specs, client, timeout, workers)
+    per_job = aggregate_by_job(metrics, specs)
+    dcgm_data = {job["jobid"]: (per_job.get(raw, {}), {}) for raw, job in jobs.items()}
+    jobids = sorted((job["jobid"] for job in jobs.values()),
+                    key=lambda jid: job_sort_key({"jobid": jid}))
+    renderer = SummaryRenderer(_live_context(selection, jobs, gpus), options, specs=specs)
+    renderer.add(jobids, records, dcgm_data)
+    renderer.finish()
 
 
 def handle_plot(args) -> None:

@@ -47,20 +47,27 @@ The rule is one source of truth per number, chosen by job state:
 | finished, blob absent or `JS1:Short` | blank | Prometheus |
 | running | **Prometheus, shaped as a blob** (§5) | Prometheus |
 
-### One column set, two job states
+### One column set, three views
 
-`jobscope dcgm` (finished) and `jobscope live` (running) share one catalog *and one
-renderer*, so a job reads the same either side of its end -- identity columns
-included:
+`summary`, `dcgm` and `live` all render through `SummaryRenderer`, one row per job,
+so a job reads the same either side of its end:
 
 ```
-JOBID  USER  STATE  NODE  NAME  GPU   GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
+JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  RUNTIME
 ```
 
-Both are flat, one row per GPU, so a selection spanning many jobs can be scanned
-down a single column. `STATE` is `RUNNING` for everything the live view selects;
-`--csv` adds `DUR_S` (elapsed seconds) after `GPU`. A job whose GPUs have no samples
-still gets a row, with a dashed GPU and dashed metrics, rather than disappearing.
+They differ only in how jobs are selected (`sacct` versus `squeue`) and how wide the
+profiling block is (`dcgm --ext`). Because the columns are a pure function of the
+spec list the renderer is handed, the three cannot drift apart.
+
+`NODE` is the node count and `#GPU` the allocated GPU count. For the live view
+`STATE` is always `RUNNING`, and `CPU%`/`MEM%` are cumulative in both modes --
+CPU-seconds over elapsed x cores, and peak RSS, neither of which has an
+instantaneous form -- while the GPU columns follow the instant-versus-`--avg`
+choice.
+
+**Per-GPU output** is `jobscope detail` and the `--ts` time series, which stay one
+row per GPU (and per MIG instance).
 
 `GMEM%` is derived (`GMEM_GB / GMEM_TOTAL_GB`) rather than queried, and
 `GMEM_TOTAL_GB` is fetched only to feed it, so it is not a column of its own. The

@@ -87,6 +87,54 @@ def _value(series: dict) -> Optional[float]:
         return None
 
 
+def host_stats(raw_jobid: str, duration: int, at, client: PrometheusClient,
+               timeout: Optional[float] = None) -> Dict[str, dict]:
+    """Per-node CPU and host-memory fields, keyed by node name.
+
+    Split out from :func:`synthesize_stats` because the live view needs exactly
+    this: its GPU numbers come from its own collectors (which honour the
+    instant-vs-``--avg`` choice), but CPU% and MEM% are cumulative either way --
+    CPU-seconds over elapsed x cores, and peak RSS -- so there is nothing to vary.
+    """
+    nodes: Dict[str, dict] = {}
+    for field, metric, reducer in _HOST_FIELDS:
+        for series in _query(client, _host_query(metric, reducer, raw_jobid, duration),
+                             at, timeout):
+            value = _value(series)
+            if value is not None:
+                nodes.setdefault(_host_of(series), {})[field] = _store_as(field, value)
+    return nodes
+
+
+def gpu_stats(raw_jobid: str, duration: int, at, client: PrometheusClient,
+              timeout: Optional[float] = None) -> Dict[str, dict]:
+    """Per-node, per-GPU utilization and memory maps, reduced over the runtime."""
+    nodes: Dict[str, dict] = {}
+    for field, metric, reducer in _GPU_FIELDS:
+        for series in _query(client, _gpu_query(metric, reducer, raw_jobid, duration),
+                             at, timeout):
+            value = _value(series)
+            if value is None:
+                continue
+            minor = str(series["metric"].get("minor_number", "?"))
+            nodes.setdefault(_host_of(series), {}).setdefault(
+                field, {})[minor] = _store_as(field, value)
+    return nodes
+
+
+def stats_dict(duration: int, *node_maps: Dict[str, dict]) -> dict:
+    """Merge per-node maps into the blob's own shape, or ``{}`` if all are empty.
+
+    Top-level ``total_time`` is elapsed wall time, against which the per-node
+    CPU-seconds are measured: blob_metrics divides by (total_time x cpus).
+    """
+    nodes: Dict[str, dict] = {}
+    for node_map in node_maps:
+        for node, fields in node_map.items():
+            nodes.setdefault(node, {}).update(fields)
+    return {"total_time": duration, "nodes": nodes} if nodes else {}
+
+
 def synthesize_stats(record: JobRecord, client: PrometheusClient,
                      timeout: Optional[float] = None) -> dict:
     """Build a jobstats-shaped stats dict for ``record`` from Prometheus.
@@ -101,32 +149,10 @@ def synthesize_stats(record: JobRecord, client: PrometheusClient,
     """
     if not (record.jobid_raw and record.duration and record.duration > 0):
         return {}
-
-    nodes: Dict[str, dict] = {}
-
-    for field, metric, reducer in _HOST_FIELDS:
-        for series in _query(client, _host_query(metric, reducer, record.jobid_raw,
-                                                 record.duration), record.end, timeout):
-            value = _value(series)
-            if value is not None:
-                nodes.setdefault(_host_of(series), {})[field] = _store_as(field, value)
-
+    maps = [host_stats(record.jobid_raw, record.duration, record.end, client, timeout)]
     if record.gpus:
-        for field, metric, reducer in _GPU_FIELDS:
-            for series in _query(client, _gpu_query(metric, reducer, record.jobid_raw,
-                                                    record.duration), record.end, timeout):
-                value = _value(series)
-                if value is None:
-                    continue
-                minor = str(series["metric"].get("minor_number", "?"))
-                nodes.setdefault(_host_of(series), {}).setdefault(
-                    field, {})[minor] = _store_as(field, value)
-
-    if not nodes:
-        return {}
-    # Top-level total_time is elapsed wall time, against which the per-node
-    # cpu-seconds are measured; blob_metrics divides by (total_time x cpus).
-    return {"total_time": record.duration, "nodes": nodes}
+        maps.append(gpu_stats(record.jobid_raw, record.duration, record.end, client, timeout))
+    return stats_dict(record.duration, *maps)
 
 
 def _query(client: PrometheusClient, query: str, at, timeout: Optional[float]):

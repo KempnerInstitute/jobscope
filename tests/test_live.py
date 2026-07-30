@@ -27,7 +27,7 @@ from jobscope.live import (
     timeseries_step,
 )
 from jobscope.live_blob import synthesize_stats
-from jobscope.report import RenderOptions, live_report, live_timeseries
+from jobscope.report import RenderOptions, live_timeseries
 from jobscope.sacct import JobRecord
 
 # squeue -o "%A|%i|%u|%N|%g|%j|%b|%C|%S": raw id, display id, user, nodelist,
@@ -362,47 +362,6 @@ def test_fill_running_fills_only_unblobbed_running_jobs():
 
 
 # --- rendering --------------------------------------------------------------
-
-def _one_gpu_render(specs=None, average=False, csv=False):
-    specs = specs or DEFAULT_LIVE_SPECS
-    jobs = {1: {"jobid": "100_6", "user": "alice", "node": "node01", "name": "train",
-                "start_epoch": 1000, "elapsed_seconds": 100}}
-    gpus = {"GPU-a": Gpu("GPU-a", 1, "node01", 3, "GPU 3")}
-    metrics = {1: {"GPU-a": {"duty": 93.0, "smact": 77.6, "mem": 18.4, "gmempct": 13.1}}}
-    out = io.StringIO()
-    live_report(jobs, metrics, gpus, specs, [("User", "alice")],
-                RenderOptions(csv=csv), average=average, out=out)
-    return out.getvalue()
-
-
-def test_live_report_renders_a_row_per_gpu_with_missing_cells_dashed():
-    text = _one_gpu_render()
-    assert "100_6" in text and "GPU 3" in text
-    assert "93" in text and "77.6" in text
-    assert "-" in text          # OCC%/TENSOR%/DRAM%/POWER_W were not collected
-
-
-def test_live_report_names_the_gpus_own_host():
-    # Not the job's nodelist: one row is one GPU, possibly on a different node.
-    assert "node01" in _one_gpu_render()
-
-
-def test_live_report_row_for_a_job_with_no_gpu_samples():
-    jobs = {1: {"jobid": "100", "user": "alice", "node": "node01,node02", "name": "cpujob"}}
-    out = io.StringIO()
-    live_report(jobs, {}, {}, DEFAULT_LIVE_SPECS, [], RenderOptions(), out=out)
-    text = out.getvalue()
-    # The job stays visible with a dashed GPU rather than vanishing.
-    assert "100" in text and "cpujob" in text
-    assert " - " in text
-    # Falls back to the nodelist when there is no GPU to name a host from.
-    assert "node01,node02" in text
-
-
-def test_live_report_csv_header_matches_the_table_columns():
-    rows = [r for r in _one_gpu_render(csv=True).splitlines() if r]
-    assert rows[1].startswith("JOBID,USER,STATE,NODE,NAME,GPU,DUR_S,GPU%")
-
 
 def test_live_timeseries_uses_the_schema_plot_reads():
     # jobscope plot keys on EPOCH/TIME and groups series by (NODE, GPU), so this
