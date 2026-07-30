@@ -8,6 +8,7 @@ import csv
 import sys
 import textwrap
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -17,13 +18,16 @@ from .dcgm import (
     DCGM_HEADERS,
     DEFAULT_SPECS,
     DESCRIPTIONS,
+    LIVE_DESCRIPTIONS,
     MetricSpec,
     discover_gpus,
     format_by_header,
+    format_number,
     format_value,
     gpu_minor_key,
 )
 from .diagnose import LEGEND, diagnose_dcgm
+from .live import DERIVED_COLUMNS, Gpu, LiveJob, LiveMetrics, build_columns, job_sort_key
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, Selection
 
@@ -478,9 +482,7 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         writer.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"] + [s.header for s in ts_specs])
 
     def cell(value: Optional[float], decimals: int) -> str:
-        if value is None:
-            return ""
-        return ("{:.%df}" % decimals).format(value) if decimals else str(int(round(value)))
+        return format_number(value, decimals, missing="")
 
     for jid in jobids:
         record = records.get(jid)
@@ -516,6 +518,216 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
             writer.writerow(row)
 
 
+# How each spec's window reducer reads in the --describe output.
+_REDUCER_NAME = {"avg": "mean", "max": "peak", "delta": "delta"}
+
+# Identity columns of the live table, with their widths. One row is one GPU, so
+# NODE names that GPU's own host rather than the job's whole nodelist.
+LIVE_ID_COLUMNS: List[Tuple[str, int]] = [
+    ("JOBID", 12), ("USER", 12), ("NODE", 15), ("NAME", 15)]
+
+LIVE_READINGS = {
+    False: "instantaneous snapshot (one scrape; not comparable to jobstats)",
+    True: "folded over each job's runtime -- utilization averaged, memory peak "
+          "(comparable to jobstats)",
+}
+
+
+def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
+    """Yield ``(job, gpu_or_None)`` in display order: by job, then by GPU.
+
+    A job with no GPU samples yields once with ``None``, so it still gets a row
+    saying so rather than vanishing from the table.
+    """
+    by_job: Dict[int, List[Gpu]] = defaultdict(list)
+    for gpu in gpus.values():
+        by_job[gpu.jobid].append(gpu)
+    for raw_jobid in sorted(jobs, key=lambda j: job_sort_key(jobs[j])):
+        job = jobs[raw_jobid]
+        found = sorted(by_job.get(raw_jobid, []), key=lambda g: (g.host, g.minor, g.uuid))
+        if not found:
+            yield job, None
+            continue
+        for gpu in found:
+            yield job, gpu
+
+
+def live_report(jobs: Dict[int, LiveJob], metrics: LiveMetrics, gpus: Dict[str, Gpu],
+                specs: List[MetricSpec], context: List[Tuple[str, str]],
+                options: RenderOptions, average: bool = False, out=None) -> None:
+    """The live table: one row per GPU, across all selected jobs.
+
+    Deliberately flat rather than the per-job blocks :func:`dcgm_report` uses --
+    the live view is usually scanned across many jobs at once looking for the idle
+    one, which a flat table sorted by job ID supports and stacked blocks do not.
+    """
+    out = out or sys.stdout
+    columns = build_columns(specs)
+    # Widen the GPU column only when a longer label ("MIG 0.1") is actually present.
+    gpu_width = max([5] + [len(g.label) for g in gpus.values()])
+    widths = [max(6, len(header)) for _key, header, _dec in columns]
+
+    def cells(values: Dict[str, Optional[float]]) -> List[str]:
+        return [format_number(values.get(key), dec) for key, _h, dec in columns]
+
+    if options.csv:
+        writer = csv.writer(out, lineterminator="\n")
+        if options.header:
+            for label, value in context:
+                writer.writerow([label, value])
+            writer.writerow([h for h, _w in LIVE_ID_COLUMNS] + ["GPU"]
+                            + [header for _k, header, _d in columns])
+        for job, gpu in _live_rows(jobs, gpus):
+            values = metrics.get(gpu.jobid, {}).get(gpu.uuid, {}) if gpu else {}
+            writer.writerow(
+                [job["jobid"], job["user"], (gpu.host if gpu else job["node"]), job["name"],
+                 (gpu.csv_id if gpu else "")]
+                + (cells(values) if gpu else ["" for _c in columns]))
+        return
+
+    if options.header:
+        for label, value in context:
+            print(fmt_context(label, value), file=out)
+
+    if not jobs:
+        print("  (no running jobs in this selection)", file=out)
+        return
+
+    header_line = ("%s %s  %s" % (
+        " ".join("%-*s" % (w, h) for h, w in LIVE_ID_COLUMNS),
+        "%*s" % (gpu_width, "GPU"),
+        "  ".join("%*s" % (w, h) for (_k, h, _d), w in zip(columns, widths))))
+    if options.header:
+        print(header_line, file=out)
+        print("-" * len(header_line), file=out)
+
+    for job, gpu in _live_rows(jobs, gpus):
+        identity = " ".join("%-*s" % (w, str(v)[:w]) for v, w in zip(
+            (job["jobid"], job["user"], gpu.host if gpu else job["node"], job["name"]),
+            (w for _h, w in LIVE_ID_COLUMNS)))
+        if gpu is None:
+            print("%s %s  %s" % (identity, "%*s" % (gpu_width, "-"), "[no GPU data]"), file=out)
+            continue
+        values = metrics.get(gpu.jobid, {}).get(gpu.uuid, {})
+        print("%s %s  %s" % (identity, "%*s" % (gpu_width, gpu.label),
+                             "  ".join("%*s" % (w, c) for c, w in zip(cells(values), widths))),
+              file=out)
+
+
+def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]],
+                    gpus: Dict[str, Gpu], specs: List[MetricSpec],
+                    options: RenderOptions, out=None) -> None:
+    """Emit one CSV row per GPU per sample over each job's runtime.
+
+    The schema is deliberately the one :func:`dcgm_timeseries` writes
+    (``JOBID,EPOCH,TIME,NODE,GPU,<metrics>``), because ``jobscope plot`` keys line
+    charts on ``EPOCH``/``TIME`` and groups series by ``(NODE, GPU)`` -- so this
+    pipes straight into it. ``GPU`` is the bare minor number for a whole card and
+    ``minor.instance`` for a MIG slice, or slices sharing a minor would merge.
+    """
+    out = out or sys.stdout
+    columns = build_columns(specs)
+    derived = [d for d in DERIVED_COLUMNS if {s.key for s in specs}.issuperset(d.deps)]
+    writer = csv.writer(out, lineterminator="\n")
+    if options.header:
+        writer.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"]
+                        + [header for _k, header, _d in columns])
+
+    for job, gpu in _live_rows(jobs, gpus):
+        if gpu is None:
+            continue
+        for epoch in sorted(samples.get(gpu.uuid, {})):
+            values = samples[gpu.uuid][epoch]
+            # Recompute per timestamp, so MEM% tracks memory growth over the run.
+            for column in derived:
+                values[column.key] = column.fn(values)
+            writer.writerow(
+                [job["jobid"], epoch,
+                 time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(epoch)),
+                 gpu.host, gpu.csv_id]
+                + [format_number(values.get(key), dec, missing="")
+                   for key, _h, dec in columns])
+
+
+# The non-metric columns of the live table. Described separately from the metrics
+# because they identify the row rather than measure it -- and because the GPU
+# column's MIG notation is easy to misread as a decimal.
+LIVE_ROW_DESCRIPTIONS: List[Tuple[str, str]] = [
+    ("JOBID", "squeue's display ID (%i), so array elements keep their 12345_6 notation. "
+              "Prometheus keys GPU data on the raw per-element ID (%A) instead, which the view "
+              "resolves for you."),
+    ("USER", "the job's owner."),
+    ("NODE", "the host of THIS row's GPU, since there is one row per GPU. It is the job's whole "
+             "nodelist only when no GPU data was found."),
+    ("NAME", "the job name."),
+    ("GPU", "\"GPU n\" is Slurm's GPU number (NVML's minor_number). \"MIG n\" / \"MIG n.i\" is a "
+            "MIG instance on card n: sibling slices share their parent's minor number, so they "
+            "are enumerated by UUID. DCGM columns are always \"-\" on a MIG row (see below)."),
+]
+
+LIVE_DESCRIBE_FOOTER = """\
+A "-" cell means Prometheus held no sample for that GPU and metric. Every
+DCGM_FI_* column reads "-" on a MIG row: NVML identifies an instance by a
+MIG-... UUID where DCGM reports the physical GPU-... UUID, and nothing in the
+metrics maps one to the other, so attributing the whole card's DCGM values to
+a single slice would be wrong.
+
+An instantaneous reading will not agree with jobstats on a bursty job: one that
+alternates compute with gaps is genuinely bimodal, and a single scrape can read
+DUTY% 0 on a GPU averaging ~88%. Use --avg for a jobstats-comparable number, or
+--ts to see the phases themselves."""
+
+
+def describe_live(specs: List[MetricSpec], average: bool = False, n_all: int = 0,
+                  out=None) -> None:
+    """Plain-English reference for the columns the live view would show.
+
+    Mirrors :func:`describe_dcgm` -- header, source metric, how the window is
+    collapsed, then wrapped prose -- but reflects the ``--gpu``/``--all`` selection
+    actually in force, so the reference always matches what was printed.
+    """
+    out = out or sys.stdout
+    columns = build_columns(specs)
+    source = {spec.header: (spec.metric, _REDUCER_NAME.get(spec.reducer, spec.reducer))
+              for spec in specs if spec.show}
+    for derived in DERIVED_COLUMNS:
+        # Recomputed from already-reduced inputs, so it has no reducer of its own.
+        source[derived.header] = (derived.source, "-")
+
+    print("jobscope live columns. One row per GPU. DUTY%%/MEM_GB/MEM%% come from the NVML\n"
+          "exporter (nvidia_gpu_*), every other metric from dcgm-exporter (DCGM_FI_*).\n"
+          "Showing %d of %d columns (%s)."
+          % (len(columns), n_all or len(columns),
+             "all" if not n_all or len(columns) >= n_all else "--all describes the rest"),
+          file=out)
+    print(file=out)
+    if average:
+        print("Values are folded over each job's own runtime by [fold] below --\n"
+              "utilization averaged, memory peaked, exactly as jobstats does.", file=out)
+    else:
+        print("Values are the newest single scrape. [fold] is how --avg would instead\n"
+              "collapse each metric over the job's own runtime -- utilization averaged,\n"
+              "memory peaked, exactly as jobstats does.", file=out)
+    print(file=out)
+
+    for header, text in LIVE_ROW_DESCRIPTIONS:
+        body = textwrap.wrap(text, width=74, initial_indent=" " * 15,
+                             subsequent_indent=" " * 15)
+        body[0] = "  %-12s %s" % (header, body[0].lstrip())
+        print("\n".join(body), file=out)
+    print(file=out)
+
+    for _key, header, _dec in columns:
+        metric, fold = source.get(header, ("(unknown)", "-"))
+        print("  %-12s %-38s [fold: %s]" % (header, metric, fold), file=out)
+        text = LIVE_DESCRIPTIONS.get(header) or DESCRIPTIONS.get(header, "(no description)")
+        for wrapped in textwrap.wrap(text, width=74):
+            print("      " + wrapped, file=out)
+        print(file=out)
+
+    print(LIVE_DESCRIBE_FOOTER, file=out)
+
+
 def describe(diagnose_on: bool = False, out=None) -> None:
     """Print a plain-English description of each summary column."""
     out = out or sys.stdout
@@ -535,7 +747,7 @@ def describe(diagnose_on: bool = False, out=None) -> None:
 def describe_dcgm(specs: List[MetricSpec], out=None) -> None:
     """Plain-English reference for the DCGM metric catalog."""
     out = out or sys.stdout
-    reducer_name = {"avg": "mean", "max": "peak", "delta": "delta"}
+    reducer_name = _REDUCER_NAME
     n_default = len(DEFAULT_SPECS)
     print("DCGM GPU metrics. Each value is time-averaged over the job's [start,end]", file=out)
     print("window. Showing %d of %d metrics (%s). [reduce] = how the window is collapsed.\n"

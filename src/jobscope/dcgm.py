@@ -21,11 +21,11 @@ class MetricSpec:
 
     ``scale`` is the display multiplier (fraction to percent, MiB to GiB, mJ to
     kWh); ``decimals`` of 0 renders an integer; ``group`` is ``default`` (always
-    shown) or ``all`` (only with the extended catalog). ``reducer`` collapses the
-    window (avg | max | delta); ``agg`` reduces across a job's GPUs for the overall
-    row (mean | sum | max); ``uuid_label`` is the Prometheus label holding the GPU
-    UUID. The last three default to the common case and are set only where a metric
-    differs.
+    shown), ``all`` (only with the extended catalog), or ``live`` (only the live
+    view -- see :data:`LIVE_SPECS`). ``reducer`` collapses the window (avg | max |
+    delta); ``agg`` reduces across a job's GPUs for the overall row (mean | sum |
+    max); ``uuid_label`` is the Prometheus label holding the GPU UUID. The last
+    three default to the common case and are set only where a metric differs.
     """
 
     key: str
@@ -37,6 +37,7 @@ class MetricSpec:
     reducer: str = "avg"
     agg: str = "mean"
     uuid_label: str = "UUID"
+    show: bool = True   # False = queried only to feed a derived column
 
 
 METRICS: List[MetricSpec] = [
@@ -69,11 +70,23 @@ METRICS: List[MetricSpec] = [
     MetricSpec("memtemp", "MEMTEMP_C", "DCGM_FI_DEV_MEMORY_TEMP", 1, 0, "all"),
     MetricSpec("enc", "ENC%", "DCGM_FI_DEV_ENC_UTIL", 1, 0, "all"),
     MetricSpec("dec", "DEC%", "DCGM_FI_DEV_DEC_UTIL", 1, 0, "all"),
+    # NVML GPU memory, the pair jobstats reports as "GPU memory usage per node -
+    # maximum used/total". Peaked, not averaged, so it is comparable to jobstats.
+    # group="live" keeps them out of DEFAULT_SPECS/ALL_SPECS: the historical views
+    # get this from the sacct blob (GMEM%), so adding them there would duplicate a
+    # column and change long-standing output.
+    MetricSpec("mem", "MEM_GB", "nvidia_gpu_memory_used_bytes", 1 / 1024 ** 3, 1, "live",
+               reducer="max", agg="max", uuid_label="uuid"),
+    MetricSpec("memtot", "MEM_TOTAL_GB", "nvidia_gpu_memory_total_bytes", 1 / 1024 ** 3, 1,
+               "live", reducer="max", agg="max", uuid_label="uuid", show=False),
 ]
 
 SPEC_BY_HEADER: Dict[str, MetricSpec] = {spec.header: spec for spec in METRICS}
 DEFAULT_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group == "default"]
-ALL_SPECS: List[MetricSpec] = list(METRICS)
+# The historical catalog: everything except the live-only specs, so `dcgm --ext`
+# and `describe --dcgm --ext` keep their existing metric set.
+ALL_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group != "live"]
+LIVE_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group == "live"]
 
 # GPU summary columns: the default group minus DUTY% (== the blob's GPU%, already shown).
 GPU_SUMMARY_SPECS: List[MetricSpec] = [spec for spec in DEFAULT_SPECS if spec.key != "duty"]
@@ -134,16 +147,51 @@ DESCRIPTIONS: Dict[str, str] = {
     "MEMTEMP_C": "Mean GPU memory (HBM) temperature, in degrees Celsius.",
     "ENC%": "Mean hardware video-encoder (NVENC) utilization. Usually 0 unless encoding video.",
     "DEC%": "Mean hardware video-decoder (NVDEC) utilization. Usually 0 unless decoding video.",
+    "MEM_GB": "GPU framebuffer memory in use, in GiB, from the NVML exporter. Peaked rather than "
+              "averaged, so it is jobstats' \"GPU memory usage per node - maximum used/total\" -- "
+              "the same quantity the blob reports as GMEM%.",
+    "MEM_TOTAL_GB": "Total framebuffer memory on the GPU, in GiB. Fetched only to derive MEM%; on a "
+                    "MIG instance this is the slice's share, not the physical card's.",
 }
+
+# Overlay applied on top of DESCRIPTIONS for the live view only. The live table is
+# an instantaneous per-GPU snapshot rather than a job-length average, so a few
+# metrics need extra warnings there; keeping them separate leaves the wording of
+# `describe --dcgm` unchanged.
+LIVE_DESCRIPTIONS: Dict[str, str] = {
+    "DUTY%": "jobstats' \"GPU utilization\". NVML's coarse duty cycle: the fraction of time at "
+             "least one kernel was executing on the GPU. Says the GPU was occupied in time, NOT "
+             "how intensely -- a 1-thread kernel and a full-GPU kernel both read ~100%. NVML "
+             "stops reporting it once MIG is enabled, so it is \"-\" on MIG nodes.",
+    "SM_ACT%": "Fraction of time at least one warp was resident on an SM, averaged across all "
+               "SMs. Distinguishes 'one SM busy' from 'all SMs busy' -- low while DUTY% is high "
+               "means the GPU was barely loaded (parked / underfed). Measured cluster-wide it "
+               "runs ~20 points BELOW DUTY% on 93% of active GPUs, so do not read it as "
+               "\"GPU utilization\"; the gap between the two is the diagnostic signal.",
+    "ENGINE%": "Fraction of time the graphics/compute engine had work in flight -- DCGM's "
+               "finer-grained analogue of DUTY%. Tracks it closely over a job-length window "
+               "(median |delta| 1.2, r=0.99 at 1h), so it is a usable stand-in for DUTY%; the "
+               "two disagree far more on a single scrape, as they are scraped independently.",
+    "FB_USED_GB": "dcgm-exporter's own framebuffer reading -- the same quantity as MEM_GB from "
+                  "the other exporter, so the two disagree by a few tenths of a GiB. MEM_GB is "
+                  "the jobstats-comparable one.",
+    "MEM%": "MEM_GB as a percent of that GPU's total memory. On a MIG row the total is the "
+            "slice's, not the physical card's, so the percentage is per slice.",
+}
+
+
+def format_number(value: Optional[float], decimals: int, missing: str = "-") -> str:
+    """Format one metric cell to ``decimals`` places; ``missing`` when value is None."""
+    if value is None:
+        return missing
+    if decimals:
+        return ("{:.%df}" % decimals).format(value)
+    return str(int(round(value)))
 
 
 def format_value(spec: MetricSpec, value: Optional[float]) -> str:
     """Format one metric cell ('-' when missing), using the metric's decimals."""
-    if value is None:
-        return "-"
-    if spec.decimals:
-        return ("{:.%df}" % spec.decimals).format(value)
-    return str(int(round(value)))
+    return format_number(value, spec.decimals)
 
 
 def format_by_header(header: str, value: Optional[float]) -> str:
@@ -156,10 +204,19 @@ def gpu_minor_key(minor):
     return int(minor) if str(minor).isdigit() else minor
 
 
-def window_query(spec: MetricSpec, uuids: List[str], duration: int) -> str:
-    """PromQL that reduces ``spec`` over a ``duration``-second window for ``uuids``."""
+def window_query(spec: MetricSpec, uuids: List[str], duration: int,
+                 clip: Optional[str] = None) -> str:
+    """PromQL that reduces ``spec`` over a ``duration``-second window for ``uuids``.
+
+    ``clip`` is an optional series to intersect the selector with, which restricts
+    the window to the samples where that series also existed. Only usable when the
+    two come from the same exporter, since PromQL's ``and`` requires identical
+    label sets -- see :func:`jobscope.live.clip_to_job`.
+    """
     regex = "^(" + "|".join(uuids) + ")$"  # UUIDs are hex+hyphen, RE2-safe as-is
     selector = '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex)
+    if clip:
+        selector = "%s and %s" % (selector, clip)
     if spec.reducer == "avg":
         return "avg_over_time((%s)[%ds:])" % (selector, duration)
     if spec.reducer == "max":

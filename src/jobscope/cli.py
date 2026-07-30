@@ -1,8 +1,10 @@
 """Command-line interface: a single ``jobscope`` command with subcommands.
 
-Subcommands: ``summary`` (default), ``detail``, ``dcgm``, ``plot``, ``describe``,
-and ``config``. The data views share a common set of job selectors; ``summary``
-is assumed when no subcommand is given, so ``jobscope -D 3`` still works.
+Subcommands: ``summary`` (default), ``detail``, ``dcgm``, ``live``, ``plot``,
+``describe``, and ``config``. The historical views share a common set of sacct job
+selectors; ``summary`` is assumed when no subcommand is given, so ``jobscope -D 3``
+still works. ``live`` selects from ``squeue`` instead and so takes its own, smaller
+set of selectors.
 """
 
 import argparse
@@ -12,6 +14,20 @@ import sys
 from . import __version__, config, plot
 from .dcgm import ALL_SPECS, DEFAULT_SPECS, GPU_SUMMARY_SPECS, compute_dcgm
 from .errors import JobscopeError
+from .live import (
+    DEFAULT_MIN_ELAPSED,
+    EXTENDED_LIVE_SPECS,
+    LiveSelection,
+    build_columns,
+    collect_averaged,
+    collect_instant,
+    collect_timeseries,
+    discover_gpus,
+    fetch_jobs,
+    parse_duration,
+    specs_for,
+)
+from .live_blob import fill_running, note_offline_gap
 from .prometheus import client_from_config
 from .report import (
     DetailRenderer,
@@ -22,6 +38,9 @@ from .report import (
     dcgm_timeseries,
     describe,
     describe_dcgm,
+    describe_live,
+    live_report,
+    live_timeseries,
 )
 from .sacct import (
     Selection,
@@ -33,7 +52,7 @@ from .sacct import (
     select_jobs,
 )
 
-SUBCOMMANDS = ("summary", "detail", "dcgm", "plot", "describe", "config")
+SUBCOMMANDS = ("summary", "detail", "dcgm", "live", "plot", "describe", "config")
 
 _SUMMARY_DESC = (
     "Compact per-job utilization summary. CPU/MEM/GPU/GMEM come from the sacct\n"
@@ -47,6 +66,30 @@ _SUMMARY_EPILOG = (
     "  jobscope -D 3                  your jobs from the last 3 days\n"
     "  jobscope -N 20 --cpu           last 20 jobs, CPU columns (offline)\n"
     "  jobscope -u alice -D 7 --csv | jobscope plot\n"
+    "\n"
+    "A JOBID works whether the job is running or finished. Running jobs have no\n"
+    "stored utilization blob yet, so the gpu view reconstructs CPU%/MEM%/GPU%/GMEM%\n"
+    "from Prometheus; the offline --cpu/--cgpu views leave them blank.\n"
+    "\n"
+    "Flags and JOBIDs may be given in any order.")
+
+_LIVE_DESC = (
+    "Per-GPU metrics for the jobs running right now: squeue for selection,\n"
+    "Prometheus for the numbers. One row per GPU (per MIG instance where used).\n"
+    "\n"
+    "By default every value is the newest single scrape, which will NOT agree with\n"
+    "jobstats on a bursty job -- jobstats folds over the whole runtime. Pass --avg to\n"
+    "do the same, averaging utilization and peaking memory as it does.")
+
+_LIVE_EPILOG = (
+    "examples:\n"
+    "  jobscope live                        your running jobs, over 1h\n"
+    "  jobscope live -j 30012345_6          one running job or array element\n"
+    "  jobscope live -p kempner -a          every user's jobs in a partition\n"
+    "  jobscope live --min-elapsed 5m       include jobs only 5 minutes in\n"
+    "  jobscope live --avg                  runtime-folded (= jobstats)\n"
+    "  jobscope live --describe             what each column means\n"
+    "  jobscope live -j 30012345 --ts | jobscope plot\n"
     "\n"
     "Flags and JOBIDs may be given in any order.")
 
@@ -126,6 +169,55 @@ def build_parser():
                         help="emit the raw per-scrape time series for one job as CSV "
                              "(pass exactly one JOBID)")
     p_dcgm.set_defaults(func=handle_dcgm)
+
+    p_live = subparsers.add_parser(
+        "live", parents=[base], description=_LIVE_DESC, epilog=_LIVE_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        help="per-GPU metrics for the jobs running right now")
+    live_scope = p_live.add_argument_group("job selection")
+    live_scope.add_argument("jobids", nargs="*", metavar="JOBID",
+                           help="specific running job IDs or array elements "
+                                "(bypass the filters and the runtime floor)")
+    live_scope.add_argument("-j", "--jobid", action="append", dest="jobids_opt", metavar="JOBID",
+                            help="a running job ID (repeatable; alternative to the positional)")
+    live_scope.add_argument("-p", "--partition", help="narrow to this partition")
+    live_scope.add_argument("-u", "--user", help="user (default: current user, $USER)")
+    live_scope.add_argument("-a", "--all-users", dest="all_users", action="store_true",
+                            help="every user's jobs, not just your own")
+    live_scope.add_argument("--min-elapsed", "--min-runtime", dest="min_elapsed",
+                            metavar="DURATION", default=DEFAULT_MIN_ELAPSED,
+                            help="only jobs running longer than this (default: %s; "
+                                 "e.g. '5m', '2h', '0s' for no floor)" % DEFAULT_MIN_ELAPSED)
+    live_cols = p_live.add_argument_group("columns")
+    live_group = live_cols.add_mutually_exclusive_group()
+    live_group.add_argument("--gpu", action="store_const", const="gpu", dest="view",
+                            help="drop DUTY%%, the coarsest column")
+    live_group.add_argument("--all", "--ext", action="store_const", const="all", dest="view",
+                            help="the extended DCGM catalog (clocks, temps, PCIe, NVLink, ...)")
+    live_cols.add_argument("--avg", action="store_true",
+                           help="fold each metric over each job's runtime, making the values "
+                                "comparable to jobstats (default: an instantaneous snapshot)")
+    live_cols.add_argument("--describe", action="store_true",
+                           help="explain the columns and their source metrics, then exit")
+    live_out = p_live.add_argument_group("output")
+    live_out.add_argument("--ts", "--timeseries", dest="ts", action="store_true",
+                          help="emit the per-scrape time series as CSV instead of a table; "
+                               "same schema as 'jobscope dcgm --ts', so it pipes to "
+                               "'jobscope plot'. Ignores --avg")
+    live_out.add_argument("--step", type=int, default=None, metavar="SECONDS",
+                          help="--ts sample interval (default: the scrape interval, widened on "
+                               "long jobs to stay under Prometheus' point cap)")
+    live_out.add_argument("-n", "--noheader", dest="header", action="store_false",
+                          help="suppress the header/context block")
+    live_out.add_argument("--csv", action="store_true",
+                          help="machine-readable output")
+    live_out.add_argument("--timeout", type=float, default=None,
+                          help="seconds per squeue/Prometheus call (default from config; "
+                               "0 disables)")
+    live_out.add_argument("--workers", type=int, default=None,
+                          help="max concurrent Prometheus queries for --avg/--ts "
+                               "(default from config)")
+    p_live.set_defaults(func=handle_live, view=None)
 
     p_plot = subparsers.add_parser(
         "plot", parents=[base],
@@ -279,8 +371,31 @@ def _view_common(args, renderer_cls) -> None:
                 client = client_from_config(cfg, timeout)
             dcgm_chunk = compute_dcgm(records, chunk_ids, GPU_SUMMARY_SPECS,
                                       client, timeout, workers)
+        client = _fill_running_blobs(records, chunk_ids, cfg, timeout, workers, client)
         renderer.add(chunk_ids, records, dcgm_chunk)
     renderer.finish()
+
+
+def _fill_running_blobs(records, jobids, cfg, timeout, workers, client):
+    """Rebuild the utilization blob for running jobs; return the client used.
+
+    A running job has no stored blob yet, so CPU%/MEM%/GPU%/GMEM% would all be
+    empty. Every input is in Prometheus, so fill them from there -- including for
+    the otherwise-offline --cpu/--cgpu views, since those own the CPU%/MEM% columns
+    and no other view would show them. An install with no endpoint configured stays
+    fully offline: the fill is skipped with a note rather than an error.
+    """
+    if not any(j in records and records[j].state == "RUNNING" and not records[j].stats
+               for j in jobids):
+        return client
+    if client is None:
+        try:
+            client = client_from_config(cfg, timeout)
+        except JobscopeError:
+            note_offline_gap(records, jobids)
+            return None
+    fill_running(records, jobids, client, timeout, workers)
+    return client
 
 
 def handle_summary(args) -> None:
@@ -318,8 +433,89 @@ def handle_dcgm(args) -> None:
     if gpu_jobs:
         client = client_from_config(cfg, timeout)
         dcgm_data = compute_dcgm(records, jobids, specs, client, timeout, workers)
+        # Fill the blob for running jobs, so the DUR_S/state context and any blob
+        # column in this view read the same as they do for a finished job.
+        fill_running(records, jobids, client, timeout, workers)
     context = context_pairs(selection, desc, records)
     dcgm_report(jobids, records, dcgm_data, specs, context, options)
+
+
+def _live_selection(args) -> LiveSelection:
+    """Build the squeue-side selection, validating the runtime floor."""
+    jobids = list(args.jobids) + list(getattr(args, "jobids_opt", None) or [])
+    if jobids and (args.partition or args.user or args.all_users):
+        print("jobscope: note: explicit JOBIDs given; ignoring the -p/-u/-a filters",
+              file=sys.stderr)
+    if args.all_users and args.user:
+        raise JobscopeError("-a/--all-users and -u/--user are mutually exclusive")
+    # Validated even when no jobs match, so a typo is never silently ignored.
+    min_elapsed = parse_duration(args.min_elapsed)
+    user = None
+    if not jobids and not args.all_users:
+        user = args.user or default_user()
+        if not user:
+            raise JobscopeError(
+                "could not determine the current user from $USER; pass -u/--user or -a/--all-users")
+    return LiveSelection(jobids=jobids, partition=args.partition, user=user,
+                         min_elapsed=min_elapsed)
+
+
+def _live_context(selection: LiveSelection, jobs, gpus) -> list:
+    """Context lines for the live header block.
+
+    With explicit JOBIDs the -u/-p filters are bypassed, so name the jobs' actual
+    owners rather than a filter that was not applied -- as context_pairs does for
+    the historical views.
+    """
+    if selection.jobids:
+        owners = sorted({job["user"] for job in jobs.values() if job.get("user")})
+        user = ", ".join(owners) if owners else "(explicit job IDs)"
+    else:
+        user = selection.user or "(all users)"
+    pairs = [("User", user)]
+    if selection.partition:
+        pairs.append(("Partition", selection.partition))
+    pairs.append(("Select", selection.describe()))
+    pairs.append(("GPUs", "%d across %d job(s)" % (len(gpus), len(jobs))))
+    return pairs
+
+
+def handle_live(args) -> None:
+    cfg = _apply_config(args)
+    specs = specs_for(args.view)
+
+    if args.describe:
+        describe_live(specs, average=args.avg, n_all=len(build_columns(EXTENDED_LIVE_SPECS)))
+        return
+
+    timeout = _timeout(args, cfg)
+    workers = _workers(args, cfg)
+    selection = _live_selection(args)
+    options = RenderOptions(view="gpu", show_dcgm=True, csv=args.csv, header=args.header)
+
+    jobs = fetch_jobs(selection, timeout)
+    if not jobs:
+        print("No running jobs match (%s)." % selection.describe(), file=sys.stderr)
+        return
+
+    client = client_from_config(cfg, timeout)
+    gpus = discover_gpus(client, jobs, timeout)
+    if not gpus:
+        # Not an error: a CPU-only selection legitimately has no GPUs.
+        print("No GPU data in Prometheus for these jobs (CPU-only, or not yet scraped).",
+              file=sys.stderr)
+
+    if args.ts:
+        if args.avg:
+            print("note: --avg ignored with --ts (the CSV carries every sample)", file=sys.stderr)
+        samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, args.step)
+        live_timeseries(jobs, samples, gpus, specs, options)
+        return
+
+    metrics = (collect_averaged(client, jobs, gpus, specs, timeout, workers) if args.avg
+               else collect_instant(client, gpus, specs, timeout))
+    live_report(jobs, metrics, gpus, specs, _live_context(selection, jobs, gpus),
+                options, average=args.avg)
 
 
 def handle_plot(args) -> None:
