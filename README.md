@@ -153,11 +153,11 @@ jobstats on a bursty job -- one that alternates compute with gaps is genuinely
 bimodal, and a single scrape can read `GPU% 0` on a GPU averaging ~88%. Use
 `--avg` for a jobstats-comparable number, or `--ts` to see the phases themselves.
 
-Columns are identical to `jobscope dcgm`, so a job reads the same either side of
-its end:
+Columns are identical to `jobscope dcgm` -- identity columns included -- so a job
+reads the same either side of its end:
 
 ```
-GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
+JOBID  USER  STATE  NODE  NAME  GPU   GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
 ```
 
 `GMEM_GB`/`GMEM%` are NVML GPU memory, peaked rather than averaged, so under

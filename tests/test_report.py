@@ -126,13 +126,38 @@ def test_dcgm_report_text_and_csv(gpu_record):
     dcgm_data = {"100": ({}, per_gpu)}
     options = RenderOptions(view="gpu", show_dcgm=True, csv=False, header=True)
     text = _render(dcgm_report, ["100"], {"100": gpu_record}, dcgm_data, DEFAULT_SPECS, CTX, options)
-    assert "Job 100" in text and "SM_ACT%" in text and "80.0" in text
+    # A flat table: the job identity is on every row, not in a block header.
+    assert "SM_ACT%" in text and "80.0" in text
+    assert text.count("100") >= 2                     # one row per GPU
+    assert "COMPLETED" in text and "alice" in text     # state and owner per row
     csv_options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
     csv_text = _render(dcgm_report, ["100"], {"100": gpu_record}, dcgm_data, DEFAULT_SPECS, CTX,
                        csv_options)
     columns, rows = plot.parse_csv(io.StringIO(csv_text))
-    assert columns[:6] == ["JOBID", "STATE", "NAME", "NODE", "GPU", "DUR_S"]
+    assert columns[:7] == ["JOBID", "USER", "STATE", "NODE", "NAME", "GPU", "DUR_S"]
     assert rows[0]["NODE"] == "node01" and rows[0]["SM_ACT%"] == "80.0"
+
+
+def test_dcgm_and_live_tables_share_their_identity_columns(gpu_record):
+    """One column set for a job whether it has finished or is still running."""
+    from jobscope.live import DEFAULT_LIVE_SPECS, Gpu
+    from jobscope.report import live_report
+
+    options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
+    finished = _render(dcgm_report, ["100"], {"100": gpu_record},
+                       {"100": ({}, {("node01", "0"): {}})}, DEFAULT_SPECS, CTX, options)
+
+    out = io.StringIO()
+    live_report({1: {"jobid": "100", "user": "alice", "node": "node01", "name": "train",
+                     "elapsed_seconds": 100}},
+                {}, {"U": Gpu("U", 1, "node01", 0, "GPU 0")},
+                DEFAULT_LIVE_SPECS, CTX, options, out=out)
+    running = out.getvalue()
+
+    def header(text):
+        return [r for r in text.splitlines() if r.startswith("JOBID,")][0]
+
+    assert header(finished) == header(running)
 
 
 class _TimeseriesClient:

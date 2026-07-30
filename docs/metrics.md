@@ -49,12 +49,18 @@ The rule is one source of truth per number, chosen by job state:
 
 ### One column set, two job states
 
-`jobscope dcgm` (finished) and `jobscope live` (running) share one metric catalog,
-so a job reads the same either side of its end:
+`jobscope dcgm` (finished) and `jobscope live` (running) share one catalog *and one
+renderer*, so a job reads the same either side of its end -- identity columns
+included:
 
 ```
-GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
+JOBID  USER  STATE  NODE  NAME  GPU   GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
 ```
+
+Both are flat, one row per GPU, so a selection spanning many jobs can be scanned
+down a single column. `STATE` is `RUNNING` for everything the live view selects;
+`--csv` adds `DUR_S` (elapsed seconds) after `GPU`. A job whose GPUs have no samples
+still gets a row, with a dashed GPU and dashed metrics, rather than disappearing.
 
 `GMEM%` is derived (`GMEM_GB / GMEM_TOTAL_GB`) rather than queried, and
 `GMEM_TOTAL_GB` is fetched only to feed it, so it is not a column of its own. The

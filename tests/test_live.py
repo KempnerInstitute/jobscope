@@ -392,14 +392,16 @@ def test_live_report_row_for_a_job_with_no_gpu_samples():
     out = io.StringIO()
     live_report(jobs, {}, {}, DEFAULT_LIVE_SPECS, [], RenderOptions(), out=out)
     text = out.getvalue()
-    assert "[no GPU data]" in text
+    # The job stays visible with a dashed GPU rather than vanishing.
+    assert "100" in text and "cpujob" in text
+    assert " - " in text
     # Falls back to the nodelist when there is no GPU to name a host from.
     assert "node01,node02" in text
 
 
 def test_live_report_csv_header_matches_the_table_columns():
     rows = [r for r in _one_gpu_render(csv=True).splitlines() if r]
-    assert rows[1].startswith("JOBID,USER,NODE,NAME,GPU,GPU%")
+    assert rows[1].startswith("JOBID,USER,STATE,NODE,NAME,GPU,DUR_S,GPU%")
 
 
 def test_live_timeseries_uses_the_schema_plot_reads():

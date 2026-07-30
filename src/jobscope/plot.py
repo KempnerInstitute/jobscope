@@ -15,7 +15,7 @@ import sys
 from . import config
 from .errors import JobscopeError
 
-ID_COLS = {"JOBID", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
+ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
            "DUR_S", "RUNTIME", "EPOCH", "TIME"}
 
 HEAT_MAX_ROWS = 40

@@ -254,7 +254,7 @@ def test_dcgm_table(monkeypatch, capsys, gpu_record):
     monkeypatch.setattr(cli, "compute_dcgm", lambda *a, **k: {"100": ({}, per_gpu)})
     main(["dcgm", "-u", "alice", "100"])
     out = capsys.readouterr().out
-    assert "Job 100" in out and "SM_ACT%" in out
+    assert "SM_ACT%" in out and "100" in out and "COMPLETED" in out
 
 
 def test_dcgm_timeseries(monkeypatch, capsys, gpu_record):

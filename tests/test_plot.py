@@ -135,6 +135,13 @@ JOBID,EPOCH,TIME,NODE,GPU,GPU%,SM_ACT%,OCC%
 """
 
 
+def test_identity_columns_are_not_plotted_as_data():
+    """USER/STATE/NAME identify a row; charting them as metrics is nonsense."""
+    from jobscope.plot import metric_cols
+    header = ["JOBID", "USER", "STATE", "NODE", "NAME", "GPU", "DUR_S", "GPU%", "SM_ACT%"]
+    assert metric_cols(header) == ["GPU%", "SM_ACT%"]
+
+
 def test_render_line_charts_gpu_utilization_by_default(tmp_path, capsys):
     out = _run_plot(tmp_path, "lg.csv", _GPU_LINE_CSV, capsys)
     assert "GPU%" in out and "SM_ACT%" in out
