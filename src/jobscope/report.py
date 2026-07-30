@@ -17,17 +17,20 @@ from .dcgm import (
     ALL_SPECS,
     DCGM_HEADERS,
     DEFAULT_SPECS,
+    DERIVED_COLUMNS,
     DESCRIPTIONS,
     LIVE_DESCRIPTIONS,
     MetricSpec,
+    applicable_derived,
+    columns_for,
     discover_gpus,
     format_by_header,
     format_number,
-    format_value,
     gpu_minor_key,
+    values_by_key,
 )
 from .diagnose import LEGEND, diagnose_dcgm
-from .live import DERIVED_COLUMNS, Gpu, LiveJob, LiveMetrics, build_columns, job_sort_key
+from .live import Gpu, LiveJob, LiveMetrics, build_columns, job_sort_key
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, Selection
 
@@ -398,7 +401,13 @@ def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
     """Per-GPU DCGM profiling table, one row per GPU (no averaged row, no DIAG)."""
     out = out or sys.stdout
     jobids = [j for j in jobids if j in records and records[j].gpus]
-    headers = [spec.header for spec in specs]
+    # columns_for drops hidden specs and inserts the derived columns, so this view
+    # shows the same set as `jobscope live`.
+    columns = columns_for(specs)
+    headers = [header for _key, header, _dec in columns]
+
+    def cells(values: dict) -> List[str]:
+        return [format_number(values.get(header), dec) for _k, header, dec in columns]
 
     def gpu_key(node_minor):
         return (node_minor[0], gpu_minor_key(node_minor[1]))
@@ -417,7 +426,7 @@ def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
                 writer.writerow(
                     [jid, record.state if record else "?", record.name if record else "?",
                      node_minor[0], node_minor[1], record.duration if record else ""]
-                    + [format_value(spec, values.get(spec.header)) for spec in specs])
+                    + cells(values))
         return
 
     if options.header:
@@ -455,9 +464,7 @@ def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
             print("  " + "-" * len(header_line), file=out)
         for node_minor in sorted(per_gpu, key=gpu_key):
             values = per_gpu[node_minor]
-            print("  " + line([node_minor[0], node_minor[1]]
-                              + [format_value(spec, values.get(spec.header)) for spec in specs]),
-                  file=out)
+            print("  " + line([node_minor[0], node_minor[1]] + cells(values)), file=out)
         print(file=out)
 
 
@@ -476,13 +483,15 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         if spec.metric not in seen:
             seen.add(spec.metric)
             ts_specs.append(spec)
+    # Query every spec (including hidden ones, which feed a derived column) but
+    # emit the displayed columns, so this header matches `jobscope live --ts`.
+    columns = columns_for(specs)
+    derived = applicable_derived(specs)
     sampling_period = client.sampling_period
     writer = csv.writer(out, lineterminator="\n")
     if options.header:
-        writer.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"] + [s.header for s in ts_specs])
-
-    def cell(value: Optional[float], decimals: int) -> str:
-        return format_number(value, decimals, missing="")
+        writer.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"]
+                        + [header for _key, header, _dec in columns])
 
     for jid in jobids:
         record = records.get(jid)
@@ -511,9 +520,15 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         for uuid, (node, minor) in uuid_to.items():
             for stamp in sorted(series[uuid]):
                 cells = series[uuid][stamp]
+                # Recomputed per timestamp, so a ratio like GMEM% tracks growth.
+                keyed = values_by_key(specs, cells)
+                for column in derived:
+                    cells[column.header] = column.fn(keyed)
                 rows.append((node, gpu_minor_key(minor), stamp,
                              [jid, stamp, time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
-                              node, minor] + [cell(cells.get(s.header), s.decimals) for s in ts_specs]))
+                              node, minor]
+                             + [format_number(cells.get(h), d, missing="")
+                                for _k, h, d in columns]))
         for _, _, _, row in sorted(rows, key=lambda x: (x[0], x[1], x[2])):
             writer.writerow(row)
 
@@ -734,7 +749,8 @@ def describe(diagnose_on: bool = False, out=None) -> None:
     print("jobscope columns. CPU/MEM/GPU/GMEM come from the sacct blob (no network);", file=out)
     print("the DCGM columns (gpu view) and DIAG (gpu view + --diagnose) come from", file=out)
     print("Prometheus. For the full per-GPU DCGM catalog, run", file=out)
-    print("'jobscope describe --dcgm' (add --ext for all 28 metrics).\n", file=out)
+    print("'jobscope describe --dcgm' (add --ext for all %d metrics).\n" % len(ALL_SPECS),
+          file=out)
     for header, source, text in SUMMARY_DESCRIPTIONS:
         print("  %-9s %s" % (header, source), file=out)
         for wrapped in textwrap.wrap(text, width=74):
@@ -749,13 +765,22 @@ def describe_dcgm(specs: List[MetricSpec], out=None) -> None:
     out = out or sys.stdout
     reducer_name = _REDUCER_NAME
     n_default = len(DEFAULT_SPECS)
+    # Hidden specs exist only to feed a derived column, so describe the column
+    # instead -- what a reader sees in the table.
+    shown = [s for s in specs if s.show]
+    derived = applicable_derived(specs)
     print("DCGM GPU metrics. Each value is time-averaged over the job's [start,end]", file=out)
     print("window. Showing %d of %d metrics (%s). [reduce] = how the window is collapsed.\n"
-          % (len(specs), len(ALL_SPECS),
+          % (len(shown) + len(derived), len(ALL_SPECS),
              "all" if len(specs) > n_default else "default; --ext for the rest"), file=out)
-    for spec in specs:
+    for spec in shown:
         print("  %-12s %-38s [reduce: %s]" % (spec.header, spec.metric,
               reducer_name.get(spec.reducer, spec.reducer)), file=out)
         for wrapped in textwrap.wrap(DESCRIPTIONS.get(spec.header, "(no description)"), width=74):
+            print("      " + wrapped, file=out)
+        print(file=out)
+    for column in derived:
+        print("  %-12s %-38s [reduce: -]" % (column.header, column.source), file=out)
+        for wrapped in textwrap.wrap(DESCRIPTIONS.get(column.header, "(no description)"), width=74):
             print("      " + wrapped, file=out)
         print(file=out)

@@ -164,7 +164,7 @@ def build_parser():
         "dcgm", parents=[base, selector],
         help="per-GPU DCGM profiling table (one row per GPU)")
     p_dcgm.add_argument("--ext", "--extended", dest="ext", action="store_true",
-                        help="show the full 28-metric catalog (clocks, temps, PCIe, NVLink, ...)")
+                        help="show the full metric catalog (clocks, temps, PCIe, NVLink, ...)")
     p_dcgm.add_argument("--ts", "--timeseries", dest="ts", action="store_true",
                         help="emit the raw per-scrape time series for one job as CSV "
                              "(pass exactly one JOBID)")
@@ -227,7 +227,7 @@ def build_parser():
     p_describe.add_argument("--dcgm", action="store_true",
                             help="describe the DCGM metric catalog instead of the summary columns")
     p_describe.add_argument("--ext", "--extended", dest="ext", action="store_true",
-                            help="with --dcgm, describe all 28 metrics")
+                            help="with --dcgm, describe the full metric catalog")
     p_describe.add_argument("--diagnose", action="store_true",
                             help="also print the DIAG legend")
     p_describe.set_defaults(func=handle_describe)

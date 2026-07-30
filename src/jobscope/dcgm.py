@@ -9,7 +9,7 @@ jobstats uses. Each value is the time-average (or max/delta) over the job's
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 
 from .prometheus import PrometheusClient
 from .sacct import JobRecord
@@ -21,11 +21,11 @@ class MetricSpec:
 
     ``scale`` is the display multiplier (fraction to percent, MiB to GiB, mJ to
     kWh); ``decimals`` of 0 renders an integer; ``group`` is ``default`` (always
-    shown), ``all`` (only with the extended catalog), or ``live`` (only the live
-    view -- see :data:`LIVE_SPECS`). ``reducer`` collapses the window (avg | max |
-    delta); ``agg`` reduces across a job's GPUs for the overall row (mean | sum |
-    max); ``uuid_label`` is the Prometheus label holding the GPU UUID. The last
-    three default to the common case and are set only where a metric differs.
+    shown) or ``all`` (only with the extended catalog). ``reducer`` collapses the
+    window (avg | max | delta); ``agg`` reduces across a job's GPUs for the overall
+    row (mean | sum | max); ``uuid_label`` is the Prometheus label holding the GPU
+    UUID. The last three default to the common case and are set only where a metric
+    differs.
     """
 
     key: str
@@ -72,26 +72,82 @@ METRICS: List[MetricSpec] = [
     MetricSpec("dec", "DEC%", "DCGM_FI_DEV_DEC_UTIL", 1, 0, "all"),
     # NVML GPU memory, the pair jobstats reports as "GPU memory usage per node -
     # maximum used/total". Peaked, not averaged, so it is comparable to jobstats.
-    # group="live" keeps them out of DEFAULT_SPECS/ALL_SPECS: the historical views
-    # get this from the sacct blob (GMEM%), so adding them there would duplicate a
-    # column and change long-standing output.
-    MetricSpec("mem", "MEM_GB", "nvidia_gpu_memory_used_bytes", 1 / 1024 ** 3, 1, "live",
+    # Named GMEM_* to match the blob-derived GMEM% of the summary and detail views:
+    # a bare MEM% means HOST memory there, and reusing it for GPU memory both reads
+    # as the wrong quantity and grades against the host threshold in plots.
+    MetricSpec("mem", "GMEM_GB", "nvidia_gpu_memory_used_bytes", 1 / 1024 ** 3, 1, "default",
                reducer="max", agg="max", uuid_label="uuid"),
-    MetricSpec("memtot", "MEM_TOTAL_GB", "nvidia_gpu_memory_total_bytes", 1 / 1024 ** 3, 1,
-               "live", reducer="max", agg="max", uuid_label="uuid", show=False),
+    MetricSpec("memtot", "GMEM_TOTAL_GB", "nvidia_gpu_memory_total_bytes", 1 / 1024 ** 3, 1,
+               "default", reducer="max", agg="max", uuid_label="uuid", show=False),
 ]
+
+
+class Derived(NamedTuple):
+    """A column computed from queried metrics rather than fetched from Prometheus."""
+
+    key: str
+    header: str
+    decimals: int
+    deps: Tuple[str, ...]   # metric keys it needs; absent -> the column is skipped
+    fn: Callable[[Dict[str, Optional[float]]], Optional[float]]
+    source: str             # what it is computed from, for --describe
+
+
+def _gmem_percent(values: Dict[str, Optional[float]]) -> Optional[float]:
+    """GPU memory used as a percentage of that GPU's own total."""
+    used, total = values.get("mem"), values.get("memtot")
+    if used is None or not total:
+        return None
+    return used / total * 100
+
+
+# Columns computed from other metrics. Shared by the dcgm and live views so both
+# render the same set; each declares the metric keys it needs, so it appears only
+# where those were actually collected. ``fn`` receives a dict keyed by metric key,
+# which callers storing values by header must build first -- see values_by_key.
+DERIVED_COLUMNS: List[Derived] = [
+    Derived("gmempct", "GMEM%", 1, ("mem", "memtot"), _gmem_percent,
+            "GMEM_GB / nvidia_gpu_memory_total"),
+]
+
+
+def applicable_derived(specs: List[MetricSpec]) -> List[Derived]:
+    """The derived columns whose input metrics are all present in ``specs``."""
+    fetched = {spec.key for spec in specs}
+    return [d for d in DERIVED_COLUMNS if fetched.issuperset(d.deps)]
+
+
+def columns_for(specs: List[MetricSpec]) -> List[Tuple[str, str, int]]:
+    """``(key, header, decimals)`` per displayed column, derived ones included.
+
+    Hidden specs (``show=False``) are dropped, and each derived column is inserted
+    next to the metric it is computed from rather than trailing at the far end.
+    """
+    cols = [(s.key, s.header, s.decimals) for s in specs if s.show]
+    for derived in applicable_derived(specs):
+        from_deps = [i for i, (key, _h, _d) in enumerate(cols) if key in derived.deps]
+        cols.insert(max(from_deps) + 1 if from_deps else len(cols),
+                    (derived.key, derived.header, derived.decimals))
+    return cols
+
+
+def values_by_key(specs: List[MetricSpec], by_header: Dict[str, float]
+                  ) -> Dict[str, Optional[float]]:
+    """Re-key one GPU's values from header to metric key, for a derived ``fn``."""
+    return {spec.key: by_header.get(spec.header) for spec in specs}
+
 
 SPEC_BY_HEADER: Dict[str, MetricSpec] = {spec.header: spec for spec in METRICS}
 DEFAULT_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group == "default"]
-# The historical catalog: everything except the live-only specs, so `dcgm --ext`
-# and `describe --dcgm --ext` keep their existing metric set.
-ALL_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group != "live"]
-LIVE_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group == "live"]
+ALL_SPECS: List[MetricSpec] = list(METRICS)
 
-# GPU summary columns: the default group minus GPU%, which the summary and detail
-# views already render from the blob (and which, for a finished job, is the very
-# same number -- see _prefer_stored_utilization).
-GPU_SUMMARY_SPECS: List[MetricSpec] = [spec for spec in DEFAULT_SPECS if spec.key != "duty"]
+# Quantities the sacct blob already supplies, which the summary and detail views
+# render from it directly (GPU%, GMEM%, and GPU-MEM). Excluded from those views'
+# DCGM columns so a job does not get two columns for one number -- and for a
+# finished job they would be the very same number, see _prefer_stored.
+BLOB_BACKED_KEYS = ("duty", "mem", "memtot")
+GPU_SUMMARY_SPECS: List[MetricSpec] = [spec for spec in DEFAULT_SPECS
+                                       if spec.key not in BLOB_BACKED_KEYS]
 DCGM_HEADERS: List[str] = [spec.header for spec in GPU_SUMMARY_SPECS]
 
 DESCRIPTIONS: Dict[str, str] = {
@@ -150,11 +206,14 @@ DESCRIPTIONS: Dict[str, str] = {
     "MEMTEMP_C": "Mean GPU memory (HBM) temperature, in degrees Celsius.",
     "ENC%": "Mean hardware video-encoder (NVENC) utilization. Usually 0 unless encoding video.",
     "DEC%": "Mean hardware video-decoder (NVDEC) utilization. Usually 0 unless decoding video.",
-    "MEM_GB": "GPU framebuffer memory in use, in GiB, from the NVML exporter. Peaked rather than "
-              "averaged, so it is jobstats' \"GPU memory usage per node - maximum used/total\" -- "
-              "the same quantity the blob reports as GMEM%.",
-    "MEM_TOTAL_GB": "Total framebuffer memory on the GPU, in GiB. Fetched only to derive MEM%; on a "
-                    "MIG instance this is the slice's share, not the physical card's.",
+    "GMEM_GB": "GPU framebuffer memory in use, in GiB, from the NVML exporter. Peaked rather than "
+               "averaged, so it is jobstats' \"GPU memory usage per node - maximum used/total\". "
+               "For a finished job this comes from the stored blob, so every view agrees.",
+    "GMEM_TOTAL_GB": "Total framebuffer memory on the GPU, in GiB. Fetched only to derive GMEM%; on "
+                     "a MIG instance this is the slice's share, not the physical card's.",
+    "GMEM%": "GMEM_GB as a percent of that GPU's total memory -- the per-GPU form of the summary "
+             "view's GMEM%. Named GMEM% rather than MEM% because a bare MEM% means HOST memory "
+             "elsewhere. On a MIG row the total is the slice's, so the percentage is per slice.",
 }
 
 # Overlay applied on top of DESCRIPTIONS for the live view only. The live table is
@@ -176,11 +235,10 @@ LIVE_DESCRIPTIONS: Dict[str, str] = {
                "finer-grained analogue of GPU%. Tracks it closely over a job-length window "
                "(median |delta| 1.2, r=0.99 at 1h), so it is a usable stand-in for GPU%; the "
                "two disagree far more on a single scrape, as they are scraped independently.",
-    "FB_USED_GB": "dcgm-exporter's own framebuffer reading -- the same quantity as MEM_GB from "
-                  "the other exporter, so the two disagree by a few tenths of a GiB. MEM_GB is "
+    "FB_USED_GB": "dcgm-exporter's own framebuffer reading -- the same quantity as GMEM_GB from "
+                  "the other exporter, so the two disagree by a few tenths of a GiB. GMEM_GB is "
                   "the jobstats-comparable one.",
-    "MEM%": "MEM_GB as a percent of that GPU's total memory. On a MIG row the total is the "
-            "slice's, not the physical card's, so the percentage is per slice.",
+
 }
 
 
@@ -312,19 +370,30 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
             overall[spec.header] = (sum(values) if spec.agg == "sum"
                                     else max(values) if spec.agg == "max"
                                     else sum(values) / len(values))
-    _prefer_stored_utilization(record, specs, per_gpu, overall)
+    _prefer_stored(record, specs, per_gpu, overall)
+    _add_derived(specs, per_gpu, overall)
     return overall, per_gpu
 
 
-def stored_utilization(record: JobRecord) -> Dict[Tuple[str, str], float]:
-    """Per-GPU utilization from the job's stored blob, keyed ``(node, minor)``.
+# Blob field -> the metric key it supersedes, and how a job-level figure is formed
+# from the per-GPU values. GMEM_GB sums because the blob's GMEM% is the ratio of
+# summed used to summed total across the job's GPUs.
+_STORED_FIELDS: Tuple[Tuple[str, str, str], ...] = (
+    ("gpu_utilization", "duty", "mean"),
+    ("gpu_used_memory", "mem", "sum"),
+    ("gpu_total_memory", "memtot", "sum"),
+)
 
-    Empty when the job has no blob (which is every running job -- Slurm writes it
-    at job end).
+
+def stored_per_gpu(record: JobRecord, field: str) -> Dict[Tuple[str, str], float]:
+    """One per-GPU map from the job's stored blob, keyed ``(node, minor)``.
+
+    Empty when the job has no blob, which is every running job -- Slurm writes it
+    at job end.
     """
     found: Dict[Tuple[str, str], float] = {}
     for node, info in (record.stats or {}).get("nodes", {}).items():
-        for minor, value in (info.get("gpu_utilization") or {}).items():
+        for minor, value in (info.get(field) or {}).items():
             try:
                 found[(node, str(minor))] = float(value)
             except (TypeError, ValueError):
@@ -332,12 +401,17 @@ def stored_utilization(record: JobRecord) -> Dict[Tuple[str, str], float]:
     return found
 
 
-def _prefer_stored_utilization(record: JobRecord, specs: List[MetricSpec],
-                               per_gpu: Dict[Tuple[str, str], dict],
-                               overall: Dict[str, float]) -> None:
-    """Overwrite the GPU% column with the blob's value where the blob has one.
+def stored_utilization(record: JobRecord) -> Dict[Tuple[str, str], float]:
+    """Per-GPU utilization from the job's stored blob, keyed ``(node, minor)``."""
+    return stored_per_gpu(record, "gpu_utilization")
 
-    Both come from ``nvidia_gpu_duty_cycle`` averaged over the job's runtime, so
+
+def _prefer_stored(record: JobRecord, specs: List[MetricSpec],
+                   per_gpu: Dict[Tuple[str, str], dict],
+                   overall: Dict[str, float]) -> None:
+    """Overwrite GPU% and GPU memory with the blob's values where it has them.
+
+    These come from the same ``nvidia_gpu_*`` series under the same reducers, so
     they measure the same thing -- but the blob is what jobstats computed at job
     end, while recomputing here has to reconstruct the window from sacct's Start
     and End. On a short job that boundary is worth several points (a 570s job at a
@@ -351,18 +425,33 @@ def _prefer_stored_utilization(record: JobRecord, specs: List[MetricSpec],
     reconstructed by :mod:`jobscope.live_blob` for the blob columns, so those agree
     with each other by construction.
     """
-    spec = next((s for s in specs if s.key == "duty"), None)
-    if spec is None:
+    by_key = {spec.key: spec for spec in specs}
+    for field, key, agg in _STORED_FIELDS:
+        spec = by_key.get(key)
+        if spec is None:
+            continue
+        stored = stored_per_gpu(record, field)
+        if not stored:
+            continue
+        for node_minor, value in stored.items():
+            if node_minor in per_gpu:
+                per_gpu[node_minor][spec.header] = value * spec.scale
+        total = sum(stored.values()) * spec.scale
+        overall[spec.header] = total / len(stored) if agg == "mean" else total
+
+
+def _add_derived(specs: List[MetricSpec], per_gpu: Dict[Tuple[str, str], dict],
+                 overall: Dict[str, float]) -> None:
+    """Fill in the derived columns, per GPU and for the job as a whole."""
+    derived = applicable_derived(specs)
+    if not derived:
         return
-    stored = stored_utilization(record)
-    if not stored:
-        return
-    for node_minor, value in stored.items():
-        if node_minor in per_gpu:
-            per_gpu[node_minor][spec.header] = value
-    # The job-level figure is the mean over the blob's own GPUs, which is exactly
-    # what blob_metrics reports as the summary view's GPU%.
-    overall[spec.header] = sum(stored.values()) / len(stored)
+    for values in list(per_gpu.values()) + [overall]:
+        keyed = values_by_key(specs, values)
+        for column in derived:
+            computed = column.fn(keyed)
+            if computed is not None:
+                values[column.header] = computed
 
 
 def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],

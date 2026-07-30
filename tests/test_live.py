@@ -5,7 +5,7 @@ import io
 import pytest
 
 from jobscope.blob import GIB, blob_metrics
-from jobscope.dcgm import ALL_SPECS, DEFAULT_SPECS, LIVE_SPECS, SPEC_BY_HEADER, window_query
+from jobscope.dcgm import ALL_SPECS, DEFAULT_SPECS, SPEC_BY_HEADER, window_query
 from jobscope.errors import JobscopeError
 from jobscope.live import (
     DEFAULT_LIVE_SPECS,
@@ -175,7 +175,7 @@ def test_timeseries_step_never_finer_than_the_scrape_interval():
 
 def test_live_catalog_column_order_and_membership():
     assert [h for _k, h, _d in build_columns(DEFAULT_LIVE_SPECS)] == [
-        "GPU%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "MEM_GB", "MEM%"]
+        "GPU%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
 
 
 def test_gpu_utilization_is_always_present_in_the_live_view():
@@ -187,8 +187,8 @@ def test_gpu_utilization_is_always_present_in_the_live_view():
 
 def test_total_memory_is_queried_but_not_shown():
     # It exists only to derive MEM%.
-    assert any(s.header == "MEM_TOTAL_GB" for s in DEFAULT_LIVE_SPECS)
-    assert "MEM_TOTAL_GB" not in [h for _k, h, _d in build_columns(DEFAULT_LIVE_SPECS)]
+    assert any(s.header == "GMEM_TOTAL_GB" for s in DEFAULT_LIVE_SPECS)
+    assert "GMEM_TOTAL_GB" not in [h for _k, h, _d in build_columns(DEFAULT_LIVE_SPECS)]
 
 
 def test_extended_catalog_excludes_delta_reduced_counters():
@@ -202,15 +202,18 @@ def test_specs_for_maps_the_view_names():
     assert specs_for(None) is DEFAULT_LIVE_SPECS
 
 
-def test_live_specs_stay_out_of_the_historical_catalogs():
-    # Otherwise `dcgm --ext` and `describe --dcgm` would silently gain columns.
-    live_headers = {s.header for s in LIVE_SPECS}
-    assert not live_headers & {s.header for s in ALL_SPECS}
-    assert not live_headers & {s.header for s in DEFAULT_SPECS}
+def test_live_and_dcgm_render_identical_columns():
+    """The whole point of sharing the catalog: one job, one column set.
+
+    A finished job and a running one must be described by the same columns, so the
+    same eye (and the same script) reads both.
+    """
+    from jobscope.dcgm import columns_for
+    assert build_columns(DEFAULT_LIVE_SPECS) == columns_for(DEFAULT_SPECS)
 
 
-def test_mem_percent_is_per_gpu_and_handles_a_missing_total():
-    from jobscope.live import DERIVED_COLUMNS
+def test_gmem_percent_is_per_gpu_and_handles_a_missing_total():
+    from jobscope.dcgm import DERIVED_COLUMNS
     mem_pct = DERIVED_COLUMNS[0].fn
     assert mem_pct({"mem": 20.0, "memtot": 80.0}) == 25.0
     assert mem_pct({"mem": 20.0, "memtot": 0}) is None
@@ -365,7 +368,7 @@ def _one_gpu_render(specs=None, average=False, csv=False):
     jobs = {1: {"jobid": "100_6", "user": "alice", "node": "node01", "name": "train",
                 "start_epoch": 1000, "elapsed_seconds": 100}}
     gpus = {"GPU-a": Gpu("GPU-a", 1, "node01", 3, "GPU 3")}
-    metrics = {1: {"GPU-a": {"duty": 93.0, "smact": 77.6, "mem": 18.4, "mempct": 13.1}}}
+    metrics = {1: {"GPU-a": {"duty": 93.0, "smact": 77.6, "mem": 18.4, "gmempct": 13.1}}}
     out = io.StringIO()
     live_report(jobs, metrics, gpus, specs, [("User", "alice")],
                 RenderOptions(csv=csv), average=average, out=out)
@@ -441,4 +444,4 @@ def test_collect_instant_stores_by_uuid_and_derives_mem_percent():
     metrics = collect_instant(Client(), gpus, DEFAULT_LIVE_SPECS, None)
     values = metrics[7]["GPU-a"]
     assert values["mem"] == 40.0 and values["memtot"] == 80.0
-    assert values["mempct"] == 50.0
+    assert values["gmempct"] == 50.0

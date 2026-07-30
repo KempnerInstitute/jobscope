@@ -41,11 +41,25 @@ GPU maps are keyed by `minor_number` **as a string**.
 
 The rule is one source of truth per number, chosen by job state:
 
-| job state | CPU% / MEM% / GPU% / GMEM% | DCGM columns |
+| job state | CPU% / MEM% / GPU% / GMEM% / GMEM_GB | other DCGM columns |
 |---|---|---|
 | finished, blob present | **the blob**, always | Prometheus |
 | finished, blob absent or `JS1:Short` | blank | Prometheus |
 | running | **Prometheus, shaped as a blob** (§5) | Prometheus |
+
+### One column set, two job states
+
+`jobscope dcgm` (finished) and `jobscope live` (running) share one metric catalog,
+so a job reads the same either side of its end:
+
+```
+GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
+```
+
+`GMEM%` is derived (`GMEM_GB / GMEM_TOTAL_GB`) rather than queried, and
+`GMEM_TOTAL_GB` is fetched only to feed it, so it is not a column of its own. The
+summary and detail views omit `GPU%` and the `GMEM` columns from their *DCGM* set
+because they already render those from the blob -- one number, one column.
 
 A finished job's utilization is never recomputed. That is deliberate: the blob is
 what Slurm recorded, so every view reports the same number, and re-deriving it
@@ -160,7 +174,7 @@ most common source of a surprising value.
 | reducer | PromQL | used for |
 |---|---|---|
 | `avg` | `avg_over_time(...)` | all utilization and power columns |
-| `max` | `max_over_time(...)` | memory (`MEM_GB`, `FB_USED_GB`, `PWRmax_W`) |
+| `max` | `max_over_time(...)` | memory (`GMEM_GB`, `FB_USED_GB`, `PWRmax_W`) |
 | `delta` | `max_over_time(...) - min_over_time(...)` | `ENERGY_kWh`, a monotonic counter |
 
 **Utilization is averaged; memory is peaked.** That mirrors jobstats, whose report
@@ -300,9 +314,13 @@ lower and **must not be read as "GPU utilization"**. A job reading
 only about two-thirds of the SMs and filled about a third of the warp slots — a
 single utilization number cannot show that.
 
-`MEM_GB` (NVML) and `FB_USED_GB` (DCGM) both report used framebuffer from
-different exporters and disagree by a few tenths of a GiB. `MEM_GB` is the
+`GMEM_GB` (NVML) and `FB_USED_GB` (DCGM) both report used framebuffer from
+different exporters and disagree by a few tenths of a GiB. `GMEM_GB` is the
 jobstats-comparable one.
+
+Note the `G`: a bare `MEM%` means **host** memory in the summary and detail views,
+so GPU memory is always `GMEM*`. Reusing `MEM%` for GPU memory not only read as the
+wrong quantity, it graded against the host threshold in `jobscope plot`.
 
 ---
 
@@ -319,7 +337,7 @@ What follows:
 
 - **`jobscope live` is MIG-correct**: keyed by UUID, one row per instance, labelled
   `MIG n.i`. A slice's `memory_total` is the *slice* (e.g. 19.6 GB of a 40 GB
-  card), so its `MEM%` is per-slice.
+  card), so its `GMEM%` is per-slice.
 - **DCGM columns read `-` on a MIG row.** A `MIG-…` UUID never equals a `GPU-…`
   one, and nothing in the metrics maps between them — the instance shares its
   parent's `minor_number`, but nothing says which `GPU_I_ID` it is. Attributing

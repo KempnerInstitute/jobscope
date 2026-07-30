@@ -5,11 +5,13 @@ import dataclasses
 from jobscope.blob import blob_metrics
 from jobscope.dcgm import (
     ALL_SPECS,
+    BLOB_BACKED_KEYS,
     DCGM_HEADERS,
     DEFAULT_SPECS,
     GPU_SUMMARY_SPECS,
     METRICS,
     SPEC_BY_HEADER,
+    columns_for,
     compute_dcgm,
     dcgm_for_job,
     discover_gpus,
@@ -48,15 +50,42 @@ class FakeClient:
 
 
 def test_catalog_shape():
-    assert len(ALL_SPECS) == 28
-    assert len(DEFAULT_SPECS) == 6
+    assert len(ALL_SPECS) == 30
+    assert len(DEFAULT_SPECS) == 8          # 6 profiling + the GPU memory pair
     assert len(GPU_SUMMARY_SPECS) == 5
+    # The summary/detail DCGM columns exclude what the blob already supplies, so
+    # neither GPU% nor the GMEM columns appear twice in those views.
     assert DCGM_HEADERS == ["SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W"]
     headers = [spec.header for spec in METRICS]
     assert len(headers) == len(set(headers))
     assert set(SPEC_BY_HEADER) == set(headers)
     assert any(spec.key == "duty" for spec in DEFAULT_SPECS)
-    assert all(spec.key != "duty" for spec in GPU_SUMMARY_SPECS)
+    assert all(spec.key not in BLOB_BACKED_KEYS for spec in GPU_SUMMARY_SPECS)
+
+
+def test_dcgm_and_live_columns_are_identical():
+    """A finished job and a running one must be described by the same columns."""
+    from jobscope.live import DEFAULT_LIVE_SPECS, build_columns
+    assert columns_for(DEFAULT_SPECS) == build_columns(DEFAULT_LIVE_SPECS)
+    assert [h for _k, h, _d in columns_for(DEFAULT_SPECS)] == [
+        "GPU%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
+
+
+def test_hidden_total_memory_is_queried_but_not_a_column():
+    assert any(s.header == "GMEM_TOTAL_GB" for s in DEFAULT_SPECS)
+    assert "GMEM_TOTAL_GB" not in [h for _k, h, _d in columns_for(DEFAULT_SPECS)]
+
+
+def test_gpu_memory_comes_from_the_blob_for_a_finished_job(gpu_record):
+    """As with GPU%, a stored value is never recomputed -- see _prefer_stored."""
+    overall, per_gpu = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
+    # The blob holds 48 GiB used of 80 total on GPU 0, 32 of 80 on GPU 1.
+    assert per_gpu[("node01", "0")]["GMEM_GB"] == 48.0
+    assert per_gpu[("node01", "0")]["GMEM%"] == 60.0
+    assert per_gpu[("node01", "1")]["GMEM%"] == 40.0
+    # Job-level GMEM% sums used over sums total, exactly as blob_metrics does.
+    assert overall["GMEM%"] == 50.0
+    assert overall["GMEM%"] == blob_metrics(gpu_record.stats)[3]
 
 
 def test_format_value():
@@ -186,9 +215,10 @@ def test_dcgm_for_job_metric_error_keeps_gpu(gpu_record):
     overall, per_gpu = dcgm_for_job(gpu_record, DEFAULT_SPECS, _DiscoveryOnlyClient(), None)
     # Every metric query fails, so nothing Prometheus-derived survives; the GPU row
     # itself is kept, carrying only what the stored blob already knew.
-    assert set(overall) == {"GPU%"}
+    # GPU% and the GMEM columns survive because the blob supplies them.
+    assert set(overall) == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "GMEM%"}
     assert set(per_gpu) == {("node01", "0")}
-    assert set(per_gpu[("node01", "0")]) == {"GPU%"}
+    assert set(per_gpu[("node01", "0")]) == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "GMEM%"}
 
 
 def test_dcgm_for_job_metric_error_on_a_running_job_yields_nothing(gpu_record):

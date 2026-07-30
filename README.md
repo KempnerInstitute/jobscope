@@ -120,7 +120,7 @@ to; with no Prometheus endpoint configured those columns stay blank and say so.
 |---|---|
 | `jobscope summary` | one row per job (the default) |
 | `jobscope detail` | per-node / per-GPU breakdown |
-| `jobscope dcgm` | per-GPU DCGM profiling table (`--ext` for all 28 metrics, `--ts` for raw time series) |
+| `jobscope dcgm` | per-GPU DCGM profiling table (`--ext` for the full catalog, `--ts` for raw time series) |
 | `jobscope live` | per-GPU metrics for the jobs running right now |
 | `jobscope plot` | render `--csv` output as a terminal chart |
 | `jobscope describe` | plain-English column and metric reference (`--dcgm` for the catalog) |
@@ -153,11 +153,18 @@ jobstats on a bursty job -- one that alternates compute with gaps is genuinely
 bimodal, and a single scrape can read `GPU% 0` on a GPU averaging ~88%. Use
 `--avg` for a jobstats-comparable number, or `--ts` to see the phases themselves.
 
-Columns are `GPU%`, the DCGM profiling set, and `MEM_GB`/`MEM%` (NVML GPU memory,
-peaked, so `--avg` matches jobstats' "maximum used/total"); `--all` adds the
-extended catalog. On a MIG node the DCGM columns read `-`: NVML identifies an
-instance by a `MIG-…` UUID where DCGM reports the physical `GPU-…` one, and nothing
-in the metrics maps between them.
+Columns are identical to `jobscope dcgm`, so a job reads the same either side of
+its end:
+
+```
+GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
+```
+
+`GMEM_GB`/`GMEM%` are NVML GPU memory, peaked rather than averaged, so under
+`--avg` they match jobstats' "maximum used/total". `--all` adds the extended
+catalog. On a MIG node the DCGM columns read `-`: NVML identifies an instance by a
+`MIG-…` UUID where DCGM reports the physical `GPU-…` one, and nothing in the
+metrics maps between them.
 
 ## Views
 

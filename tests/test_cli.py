@@ -124,7 +124,9 @@ def test_describe_dcgm_ext(capsys):
     main(["describe", "--dcgm", "--ext"])
     out = capsys.readouterr().out
     assert "DCGM GPU metrics" in out
-    assert "28 metrics" in out
+    # The count is derived from the catalog, so it cannot drift out of date.
+    from jobscope.dcgm import ALL_SPECS
+    assert "%d metrics" % len(ALL_SPECS) in out
 
 
 def test_config_example(capsys):

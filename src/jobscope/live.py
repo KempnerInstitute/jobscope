@@ -28,9 +28,16 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from .dcgm import ALL_SPECS, DEFAULT_SPECS, LIVE_SPECS, MetricSpec, window_query
+from .dcgm import (
+    ALL_SPECS,
+    DEFAULT_SPECS,
+    MetricSpec,
+    applicable_derived,
+    columns_for,
+    window_query,
+)
 from .errors import JobscopeError
 from .prometheus import PrometheusClient
 from .sacct import run_capture
@@ -72,17 +79,6 @@ class Gpu(NamedTuple):
         return self.label.split(" ", 1)[1]
 
 
-class Derived(NamedTuple):
-    """A column computed from queried metrics rather than fetched."""
-
-    key: str
-    header: str
-    decimals: int
-    deps: Tuple[str, ...]   # metric keys it needs; absent -> column is skipped
-    fn: Callable[[Dict[str, Optional[float]]], Optional[float]]
-    source: str             # what it is computed from, for --describe
-
-
 @dataclass
 class LiveSelection:
     """Which running jobs to report on."""
@@ -102,28 +98,15 @@ class LiveSelection:
         return ", ".join(parts)
 
 
-def _mem_percent(values: Dict[str, Optional[float]]) -> Optional[float]:
-    """GPU memory used as a percentage of that GPU's total."""
-    used, total = values.get("mem"), values.get("memtot")
-    if used is None or not total:
-        return None
-    return used / total * 100
-
-
-# Each derived column declares the metric keys it needs, so it appears only when
-# those were actually queried (``--gpu`` still carries both memory metrics).
-DERIVED_COLUMNS: List[Derived] = [
-    Derived("mempct", "MEM%", 1, ("mem", "memtot"), _mem_percent,
-            "MEM_GB / nvidia_gpu_memory_total_bytes"),
-]
-
-# The live catalogs. DEFAULT_SPECS + LIVE_SPECS already lands in the intended
-# column order (GPU%, smact, occ, tensor, dram, power, mem, memtot).
+# The live catalogs. Deliberately the same specs the dcgm view uses, so a running
+# job and a finished one are described by identical columns:
 #
-# There is no narrower catalog than this one. The historical views omit GPU% from
-# their DCGM columns because they render it from the blob instead, but a running
-# job has no blob, so here it is the only place GPU utilization appears.
-DEFAULT_LIVE_SPECS: List[MetricSpec] = DEFAULT_SPECS + LIVE_SPECS
+#   GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
+#
+# The summary and detail views omit GPU% and the GMEM columns from their DCGM set
+# because they render those from the blob instead; a running job has no blob, so
+# here Prometheus is the only source and nothing is dropped.
+DEFAULT_LIVE_SPECS: List[MetricSpec] = DEFAULT_SPECS
 # --all appends the extended catalog, minus delta-reduced counters (ENERGY_kWh):
 # a delta needs two points, so it is meaningless in an instant snapshot.
 EXTENDED_LIVE_SPECS: List[MetricSpec] = DEFAULT_LIVE_SPECS + [
@@ -424,14 +407,12 @@ def clip_to_job(spec: MetricSpec, raw_jobid: int) -> Optional[str]:
     return "nvidia_gpu_jobId == %d" % raw_jobid if spec.uuid_label == "uuid" else None
 
 
-def applicable_derived(specs: List[MetricSpec]) -> List[Derived]:
-    """The derived columns whose input metrics are all in ``specs``."""
-    fetched = {spec.key for spec in specs}
-    return [d for d in DERIVED_COLUMNS if fetched.issuperset(d.deps)]
-
-
 def add_derived(results: LiveMetrics, specs: List[MetricSpec]) -> None:
-    """Fill in derived columns whose input metrics were all queried."""
+    """Fill in derived columns whose input metrics were all queried.
+
+    Values here are keyed by metric key throughout, so the shared ``fn`` can read
+    them directly -- unlike the dcgm view, which stores by header.
+    """
     derived = applicable_derived(specs)
     if not derived:
         return
@@ -509,15 +490,5 @@ def collect_timeseries(client: PrometheusClient, jobs: Dict[int, LiveJob],
     return samples
 
 
-def build_columns(specs: List[MetricSpec]) -> List[Tuple[str, str, int]]:
-    """``(key, header, decimals)`` per displayed column, derived ones included."""
-    cols = [(s.key, s.header, s.decimals) for s in specs if s.show]
-    fetched = {s.key for s in specs}
-    for derived in DERIVED_COLUMNS:
-        if not fetched.issuperset(derived.deps):
-            continue
-        # Sit beside the column it is derived from rather than at the far end.
-        from_deps = [i for i, (key, _h, _d) in enumerate(cols) if key in derived.deps]
-        cols.insert(max(from_deps) + 1 if from_deps else len(cols),
-                    (derived.key, derived.header, derived.decimals))
-    return cols
+# The live and dcgm views lay out the same columns, so they share one builder.
+build_columns = columns_for
