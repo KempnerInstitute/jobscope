@@ -126,6 +126,36 @@ def test_render_line_by_metric(tmp_path, capsys):
     assert "mean" in out
 
 
+# GPU utilization is the headline column, so it is charted by default rather than
+# needing --metric. TS_DEFAULT lists both spellings; only one can be in a CSV.
+_GPU_LINE_CSV = """\
+JOBID,EPOCH,TIME,NODE,GPU,GPU%,SM_ACT%,OCC%
+100,1000,2020-01-01T00:00:00,node01,0,95,80.0,20.0
+100,1060,2020-01-01T00:01:00,node01,0,90,60.0,15.0
+"""
+
+
+def test_render_line_charts_gpu_utilization_by_default(tmp_path, capsys):
+    out = _run_plot(tmp_path, "lg.csv", _GPU_LINE_CSV, capsys)
+    assert "GPU%" in out and "SM_ACT%" in out
+
+
+def test_render_line_charts_pre_rename_csvs(tmp_path, capsys):
+    """A CSV written before DUTY% became GPU% must still chart its utilization."""
+    out = _run_plot(tmp_path, "ld.csv", _GPU_LINE_CSV.replace("GPU%", "DUTY%"), capsys)
+    assert "DUTY%" in out
+
+
+def test_ts_default_never_charts_both_spellings(tmp_path, capsys):
+    # Both columns present at once is not a real CSV, but if it happened the chart
+    # should not show one quantity twice under two names.
+    both = _GPU_LINE_CSV.replace("GPU%,SM_ACT%", "GPU%,DUTY%,SM_ACT%").replace(
+        ",0,95,80.0", ",0,95,95,80.0").replace(",0,90,60.0", ",0,90,90,60.0")
+    out = _run_plot(tmp_path, "lb.csv", both, capsys)
+    stats = [line for line in out.splitlines() if "mean" in line]
+    assert sum(1 for line in stats if "GPU%" in line or "DUTY%" in line) <= 1
+
+
 def test_render_heat_max_rows_note(tmp_path, capsys):
     path = tmp_path / "h.csv"
     path.write_text(HEAT_CSV)

@@ -25,7 +25,20 @@ PANEL_CAP = 12
 # plotext line and the rich-tinted per-metric stats render the exact same color.
 PALETTE = [196, 46, 33, 208, 201, 51, 226, 129, 244, 39]
 
-TS_DEFAULT = ["SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
+# Default time-series columns, in the order the tables use. DUTY% is listed only to
+# keep charting utilization for CSVs written before that column was renamed to
+# GPU%; the two are the same quantity, so ts_defaults() shows at most one.
+TS_DEFAULT = ["GPU%", "DUTY%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
+TS_ALIASES = [("GPU%", "DUTY%")]
+
+
+def ts_defaults(columns) -> list:
+    """The default series to chart for ``columns``, one per distinct quantity."""
+    chosen = [m for m in TS_DEFAULT if m in columns]
+    for preferred, superseded in TS_ALIASES:
+        if preferred in chosen and superseded in chosen:
+            chosen.remove(superseded)
+    return chosen
 
 # Braille dot bits for the 1-row --compact sparkline (cell = 2 cols x 4 rows).
 _BR_DOT = {(0, 0): 0x01, (0, 1): 0x02, (0, 2): 0x04, (0, 3): 0x40,
@@ -232,7 +245,7 @@ def render_line(columns, rows, args, plt, Console):
         if not metrics:
             raise JobscopeError("none of --metric in CSV")
     else:
-        metrics = [m for m in TS_DEFAULT if m in columns] or mcols[:4]
+        metrics = ts_defaults(columns) or mcols[:4]
 
     t0 = min((to_float(r.get("EPOCH")) for r in rows if to_float(r.get("EPOCH")) is not None),
              default=None)

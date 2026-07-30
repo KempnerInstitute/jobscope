@@ -180,6 +180,9 @@ how to verify a value by hand — see [`docs/metrics.md`](docs/metrics.md).
 histograms, heatmaps, and time-series line charts. The chart kind is
 auto-detected from the CSV columns; override with `--kind`.
 
+Time-series charts show `GPU%`, `SM_ACT%`, `OCC%`, `TENSOR%` and `DRAM%` by
+default; `--metric` picks specific columns and `--all` charts every numeric one.
+
 ```bash
 jobscope --gpu  --csv JOBID      | jobscope plot                 # bar gauges (one job)
 jobscope --gpu  --csv -D 7       | jobscope plot --kind hist      # distribution (many jobs)
