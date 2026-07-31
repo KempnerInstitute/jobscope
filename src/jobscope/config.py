@@ -31,9 +31,6 @@ DEFAULT_MIN_RUNTIME = 180
 # Runtime floor for the running view: jobs younger than this are hidden, since a
 # job still ramping up reads as idle. A duration string, as --min-elapsed takes.
 DEFAULT_MIN_ELAPSED = "10m"
-# Unix group whose members may report on other users' jobs. Empty disables the
-# check, letting anyone use -a/-u. Advisory only -- see sacct.in_group.
-DEFAULT_ADMIN_GROUP = "slurm-admin"
 DEFAULT_THRESHOLDS = {"gpu": 25.0, "gmem": 20.0, "cpu": 25.0, "mem": 25.0, "default": 15.0}
 
 
@@ -60,8 +57,7 @@ class Defaults:
     workers: int
     timeout: float
     min_runtime: int
-    # Defaulted so existing constructions keep working; "" disables the gate.
-    admin_group: str = DEFAULT_ADMIN_GROUP
+    # Defaulted so existing constructions keep working.
     min_elapsed: str = DEFAULT_MIN_ELAPSED
 
 
@@ -124,7 +120,6 @@ def load_config(path: Optional[str] = None,
         workers=int(dfl.get("workers", DEFAULT_WORKERS)),
         timeout=float(dfl.get("timeout", DEFAULT_TIMEOUT)),
         min_runtime=int(dfl.get("min_runtime", DEFAULT_MIN_RUNTIME)),
-        admin_group=str(dfl.get("admin_group", DEFAULT_ADMIN_GROUP)),
         min_elapsed=str(dfl.get("min_elapsed", DEFAULT_MIN_ELAPSED)),
     )
     return Config(

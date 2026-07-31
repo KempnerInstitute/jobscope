@@ -9,7 +9,6 @@ into each :class:`JobRecord`.
 """
 
 import getpass
-import grp
 import os
 import signal
 import subprocess
@@ -81,34 +80,6 @@ def default_user() -> Optional[str]:
         except Exception:
             user = None
     return user
-
-
-def in_group(name: str) -> bool:
-    """Whether the invoking user belongs to the Unix group ``name``.
-
-    Checks the process's supplementary groups first, then the group's member list --
-    the latter matters when the group was added after login, so it is not yet in the
-    process's group set.
-
-    This gates a *reporting* convenience, not a privilege: `sacct` and `squeue`
-    already show other users' jobs to anyone who asks them directly, so this keeps
-    jobscope's wider views out of the way of people who have no use for them. It is
-    not a security boundary and must not be relied on as one.
-    """
-    if not name:
-        return False
-    try:
-        group = grp.getgrnam(name)
-    except KeyError:              # the group does not exist on this host
-        return False
-    except Exception:
-        return False
-    try:
-        if group.gr_gid in os.getgroups() or group.gr_gid == os.getgid():
-            return True
-    except Exception:
-        pass
-    return (default_user() or "") in group.gr_mem
 
 
 def days_to_window(days: int) -> Tuple[str, str]:

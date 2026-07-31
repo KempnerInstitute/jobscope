@@ -32,7 +32,7 @@ from .report import (
     describe,
     describe_dcgm,
 )
-from .sacct import default_user, in_group
+from .sacct import default_user
 from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
 
 MODES = (RUNNING, FINISHED)
@@ -267,30 +267,6 @@ _FINISHED_ONLY = (("-D/--days", "-D", "days"), ("-N/--lastn", "-N", "lastn"),
                   ("-E/--endtime", "-E", "endtime"))
 
 
-def _check_other_users_allowed(args, cfg: config.Config, me: Optional[str]) -> None:
-    """Gate -a/--all-users and a -u naming someone else on group membership.
-
-    Advisory, not a privilege boundary: `sacct -a` and `squeue -u` show the same
-    jobs to anyone who runs them directly. The point is to keep the cluster-wide
-    views out of the way of people who have no use for them, and it is configurable
-    (``[defaults] admin_group``, empty to disable) because the group name is
-    site-specific.
-    """
-    group = cfg.defaults.admin_group
-    if not group:
-        return
-    asking_for_others = args.all_users or (args.user and args.user != me)
-    if not asking_for_others or in_group(group):
-        return
-    who = "every user's jobs" if args.all_users else "%s's jobs" % args.user
-    flag = "-a/--all-users" if args.all_users else "-u/--user"
-    raise JobscopeError(
-        "%s asks for %s, which is limited to members of the '%s' group.\n"
-        "Drop %s to report on your own%s."
-        % (flag, who, group, flag,
-           "" if args.all_users or not me else ", or pass -u %s" % me))
-
-
 def _min_elapsed(args, cfg: config.Config) -> int:
     """The runtime floor in seconds: the flag if given, else the configured default.
 
@@ -338,10 +314,6 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
         raise JobscopeError("-N/--lastn must be a positive integer")
     if args.all_users and args.user:
         raise JobscopeError("-a/--all-users and -u/--user are mutually exclusive")
-    # Explicit JOBIDs ignore the filters entirely (noted below), so there is
-    # nothing to gate there -- only a filter can widen the selection to others.
-    if not jobids:
-        _check_other_users_allowed(args, cfg, default_user())
 
     if jobids:
         ignored = [name for name, on in (

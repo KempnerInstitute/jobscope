@@ -128,13 +128,6 @@ so `jobscope -D 3` still means what it always did.
 default 10m -- a job still loading data reads as idle; `[defaults] min_elapsed`
 changes it, `0s` disables it).
 
-Reporting on **other users** — `-a`, or `-u` naming someone else — is limited to
-members of a Unix group, `slurm-admin` by default. Set `[defaults] admin_group` in
-the config file to change it, or to `""` to let anyone. Note this is a convenience
-guardrail, not a privilege boundary: `sacct -a` and `squeue -u` show the same jobs
-to whoever runs them directly. Looking up a specific `JOBID` is never gated, since
-a JOBID bypasses the filters anyway.
-
 **Level 3 — granularity** (pick one) and **columns**:
 
 | option | effect |

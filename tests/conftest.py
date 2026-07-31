@@ -53,10 +53,7 @@ DEFAULT_CONFIG = config_module.Config(
     sampling_period_explicit=False,
     site_jobstats_config_path=None,
     thresholds=config_module.Thresholds(gpu=25, gmem=20, cpu=25, mem=25, default=15),
-    # admin_group empty so tests exercise the views without needing a group;
-    # the gate itself is tested explicitly in test_cli.py.
-    defaults=config_module.Defaults(workers=8, timeout=60.0, min_runtime=180,
-                                    admin_group=""),
+    defaults=config_module.Defaults(workers=8, timeout=60.0, min_runtime=180),
 )
 
 
