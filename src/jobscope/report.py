@@ -34,7 +34,7 @@ from .dcgm import (
 )
 from .diagnose import LEGEND, diagnose_dcgm
 from .errors import JobscopeError
-from .live import Gpu, LiveJob, build_columns, job_sort_key, timeseries_step
+from .live import Gpu, LiveJob, build_columns, job_sort_key, timeseries_step, windowed
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, Selection, format_window
 
@@ -185,6 +185,9 @@ class RenderOptions:
     # Show the efficiency bars section. On by default: it is the fastest read in
     # the block, and behind a flag it was rarely seen. --no-plot switches it off.
     plot_avgeff: bool = True
+    # --ts only: emit just the last N seconds of each job's series, narrowing the
+    # range queries rather than filtering rows afterwards.
+    window: Optional[int] = None
     # Tint %-metric cells by their threshold band. Off unless the caller has
     # established that the destination is a terminal that wants colour.
     color: bool = False
@@ -1486,14 +1489,16 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
                 continue
             matched = True
         regex = "^(" + "|".join(uuid_to) + ")$"
+        start = windowed(record.start, record.end, options.window)
         # --step wins; otherwise never finer than the scrape interval, and coarse
         # enough to stay under Prometheus' points-per-series cap on a long job.
-        span = timeseries_step(record.duration, sampling_period, step)
+        # Measured over the span actually queried, so a window keeps its detail.
+        span = timeseries_step(record.end - start, sampling_period, step)
         series: Dict[str, dict] = {uuid: {} for uuid in uuid_to}
         for spec in ts_specs:
             for result in client.query_range(
                     '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex),
-                    record.start, record.end, span, timeout):
+                    start, record.end, span, timeout):
                 metric = result["metric"]
                 uuid = metric.get(spec.uuid_label) or metric.get("uuid") or metric.get("UUID")
                 if uuid not in series:

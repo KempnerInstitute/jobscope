@@ -19,13 +19,14 @@ aliases; see :data:`DEPRECATED`.
 import argparse
 import io
 import os
+import re
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from . import __version__, config, plot
 from .dcgm import ALL_SPECS, DEFAULT_SPECS
 from .errors import JobscopeError
-from .live import parse_duration
+from .live import format_duration, parse_duration
 from .report import (
     DetailRenderer,
     RenderOptions,
@@ -147,12 +148,16 @@ def build_parser():
     grain.add_argument("--per-gpu", "--hwdetail", dest="per_gpu", action="store_true",
                        help="one row per GPU, with node name and GPU number "
                             "(--hwdetail is the old name for it)")
-    grain.add_argument("--ts", "--timeseries", dest="ts", action="store_true",
-                       help="the per-scrape time series as CSV (pipes to 'jobscope plot')")
-    grain.add_argument("--plot-ts", "--plot_ts", dest="plot_ts", action="store_true",
+    grain.add_argument("--ts", "--timeseries", dest="ts", nargs="?", const=True,
+                       default=False, metavar="WINDOW",
+                       help="the per-scrape time series as CSV (pipes to 'jobscope plot'). "
+                            "Takes an optional window -- '--ts 1h' is the last hour of "
+                            "the run, not all of it")
+    grain.add_argument("--plot-ts", "--plot_ts", dest="plot_ts", nargs="?", const=True,
+                       default=False, metavar="WINDOW",
                        help="chart that time series instead of writing it: one panel per "
-                            "metric, one column per GPU. Needs --nodename on a "
-                            "multi-node job")
+                            "metric, one column per GPU. Takes the same optional window. "
+                            "Needs --nodename on a multi-node job")
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
                        help="--per-gpu / --ts: report only this node's GPUs")
@@ -503,6 +508,51 @@ def _want_color(args) -> bool:
     return bool(getattr(sys.stdout, "isatty", lambda: False)())
 
 
+# A job ID: digits, plus the _N of an array task and the .batch/.0 of a step.
+_JOBID_RE = re.compile(r"^\d+([_.]\w+)*$")
+
+
+def _ts_value(args) -> Tuple[str, object]:
+    """``(flag, value)`` for whichever of --ts / --plot_ts carries one."""
+    if args.plot_ts not in (None, False, True):
+        return "--plot_ts", args.plot_ts
+    return "--ts", args.ts
+
+
+def _reclaim_jobid_after_ts(args) -> None:
+    """A JOBID written after ``--ts`` is still a JOBID.
+
+    The optional window means argparse now consumes the next bare word, so
+    ``jobscope --ts 12345`` would take the job as its window. Handing it back is
+    unambiguous rather than a guess: the two grammars are disjoint, because a window
+    always carries a unit (30s/5m/2h/7d) and a job ID never does. Without this the
+    flag would have quietly broken every ``--ts JOBID`` already in someone's history.
+    """
+    flag, value = _ts_value(args)
+    if value in (None, False, True) or not _JOBID_RE.match(str(value)):
+        return
+    args.jobids = list(args.jobids) + [str(value)]
+    setattr(args, "plot_ts" if flag == "--plot_ts" else "ts", True)
+    # Say which reading was taken. A bare number cannot be both a job ID and a
+    # window, and someone who meant "60 minutes" should not have to work out from an
+    # empty report that it was read as job 60.
+    print("jobscope: note: read %r after %s as a job ID; a window needs a unit, "
+          "e.g. %s 60m" % (str(value), flag, flag), file=sys.stderr)
+
+
+def _ts_window(args) -> Optional[int]:
+    """``--ts WINDOW`` / ``--plot_ts WINDOW`` in seconds, or None for the whole run."""
+    flag, value = _ts_value(args)
+    if value in (None, False, True):
+        return None
+    try:
+        return parse_duration(value)
+    except JobscopeError:
+        raise JobscopeError(
+            "%s takes a duration with a unit, e.g. %s 1h or %s 90m (got %r)"
+            % (flag, flag, flag, value))
+
+
 def _plot_timeseries(text: str, args) -> None:
     """Chart the series ``--plot_ts`` just emitted, in place of writing its CSV.
 
@@ -526,6 +576,11 @@ def _plot_timeseries(text: str, args) -> None:
         raise JobscopeError(
             "--plot_ts charts one node; this job ran on %d: %s. Add --nodename=NODE."
             % (len(nodes), ", ".join(nodes)))
+    # Name what is being charted. Without it a windowed chart is indistinguishable
+    # from a whole-run one -- the x axis counts minutes from the window's own start.
+    window = _ts_window(args)
+    print("job %s  %s%s" % (jobids[0], nodes[0] if nodes else "?",
+                            "  last %s" % format_duration(window) if window else ""))
     plot.run(plot.default_args(kind="line", by="metric", columns=True,
                                no_color=args.no_color),
              fobj=io.StringIO(text))
@@ -533,6 +588,7 @@ def _plot_timeseries(text: str, args) -> None:
 
 def handle_report(args) -> None:
     """The one data path: select jobs, then render at the chosen granularity."""
+    _reclaim_jobid_after_ts(args)
     if args.plot_ts:
         # --plot_ts *is* --ts, with the CSV charted instead of written. Setting it here,
         # before anything reads it, means every --ts path applies unchanged: the schema,
@@ -573,7 +629,7 @@ def handle_report(args) -> None:
         min_runtime=(args.diag_short if args.diag_short is not None
                      else cfg.defaults.min_runtime),
         time_weighted=time_weighted, plot_avgeff=not args.no_plot,
-        nodename=args.nodename,
+        nodename=args.nodename, window=_ts_window(args),
         color=_want_color(args), thresholds=cfg.thresholds)
 
     if args.ts:

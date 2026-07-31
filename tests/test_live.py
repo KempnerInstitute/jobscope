@@ -25,6 +25,7 @@ from jobscope.live import (
     parse_start_time,
     specs_for,
     timeseries_step,
+    windowed,
 )
 from jobscope.live_blob import host_stats_many, synthesize_stats
 from jobscope.report import RenderOptions, live_timeseries
@@ -169,6 +170,24 @@ def test_timeseries_step_never_finer_than_the_scrape_interval():
     assert timeseries_step(600, 60, requested=5) == 5     # explicit wins
     # Long jobs widen to stay under Prometheus' points-per-series cap.
     assert timeseries_step(10_000_000, 60) > 60
+
+
+def test_a_window_is_the_end_of_the_run_not_the_start():
+    """--ts 1h means the last hour, and narrows the query rather than the rows."""
+    start, end = 1000, 1000 + 86400
+    assert windowed(start, end, 3600) == end - 3600
+    assert windowed(start, end, None) == start          # no window: the whole run
+    assert windowed(start, end, 0) == start
+    # A window longer than the run is simply the run, never a start before it.
+    assert windowed(start, end, 999_999) == start
+
+
+def test_a_windowed_query_keeps_its_resolution():
+    """The step is measured over the span queried, so an hour of a week-long job is
+    not coarsened by the length of the week."""
+    week = 7 * 86400
+    assert timeseries_step(week, 60) > 60               # the whole run is coarsened
+    assert timeseries_step(3600, 60) == 60              # one hour of it is not
 
 
 # --- catalogs ---------------------------------------------------------------

@@ -463,14 +463,28 @@ def timeseries_step(elapsed: int, sampling_period: int,
     return max(sampling_period, elapsed // 10000 + 1)
 
 
+def windowed(start: int, end: int, window: Optional[int]) -> int:
+    """Start of the last ``window`` seconds of ``[start, end]``, or ``start``.
+
+    Clamped to the job's own start, so a window longer than the run is simply the
+    run. Narrowing the *query* rather than filtering rows afterwards is the point:
+    an hour of a day-long job is a twenty-fourth of the samples to fetch, and the
+    chart then spends its columns on the hour asked for.
+    """
+    return max(start, end - window) if window else start
+
+
 def collect_timeseries(client: PrometheusClient, jobs: Dict[int, LiveJob],
                        gpus: Dict[str, Gpu], specs: List[MetricSpec],
                        timeout: Optional[float], workers: int,
-                       step: Optional[int] = None) -> Dict[str, Dict[int, dict]]:
+                       step: Optional[int] = None,
+                       window: Optional[int] = None) -> Dict[str, Dict[int, dict]]:
     """Every sample of every metric over each job's runtime.
 
     Returns ``{uuid: {epoch: {metric key: value}}}``. One range query per
     (job, metric), on the same pool as :func:`collect_averaged`.
+
+    ``window`` shortens that to the most recent N seconds of the run.
     """
     by_job = defaultdict(list)
     for gpu in gpus.values():
@@ -485,9 +499,13 @@ def collect_timeseries(client: PrometheusClient, jobs: Dict[int, LiveJob],
                   file=sys.stderr)
             continue
         regex = _uuid_regex(g.uuid for g in job_gpus)
-        span = timeseries_step(elapsed, client.sampling_period, step)
+        end = start + elapsed
+        start = windowed(start, end, window)
+        # Step from the span actually queried, not the whole run: a window is asked
+        # for to see detail, and the coarsening exists for long ranges.
+        span = timeseries_step(end - start, client.sampling_period, step)
         for spec in specs:
-            tasks.append((jobid, regex, start, start + elapsed, span, spec))
+            tasks.append((jobid, regex, start, end, span, spec))
 
     samples: Dict[str, Dict[int, dict]] = defaultdict(lambda: defaultdict(dict))
     if not tasks:

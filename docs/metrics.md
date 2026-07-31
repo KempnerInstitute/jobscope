@@ -7,7 +7,8 @@ before adding a metric.
 
 Companion documents: `jobscope describe` (column reference) and `jobscope describe
 --dcgm --ext` (the full metric catalog). `--per-gpu` and `--ts` give per-GPU rows, and `--plot_ts` charts that series in
-place of writing it.
+place of writing it. Both time-series flags take an optional window (`--ts 1h`),
+which narrows the range queries to the end of the run rather than filtering rows.
 
 ---
 

@@ -214,8 +214,8 @@ job that is running right now.
 |---|---|
 | *(default)* | one row per job |
 | `--per-gpu` | one row per GPU, with node name and GPU number (see below). `--hwdetail` is the old name and still works |
-| `--ts` | the per-scrape time series as CSV |
-| `--plot_ts` | that time series charted instead: one panel per metric, one column per GPU |
+| `--ts [WINDOW]` | the per-scrape time series as CSV; `--ts 1h` is the last hour of the run |
+| `--plot_ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--dcgm` | the full DCGM metric catalog |
 | `--avg` | `running` only: fold over the runtime instead of a snapshot |
@@ -703,8 +703,29 @@ jobscope -j 36441613 --nodename holygpu8a10501 --plot_ts
 jobscope -j 36606149 --plot_ts        # single-node job: no --nodename needed
 ```
 
-It *is* `--ts`, with the CSV charted rather than written, so the schema, `--step` and
-the `--nodename` filter all behave the same. It charts one job on one node, and says
+It *is* `--ts`, with the CSV charted rather than written, so the schema, `--step`,
+the window below and the `--nodename` filter all behave the same.
+
+#### A window: `--ts 1h`
+
+Both flags take an optional window, and give the **last** N of the run:
+
+```bash
+jobscope -j 36441613 --nodename holygpu8a10501 --ts 1h        # 244 rows, not 5632
+jobscope -j 36441613 --nodename holygpu8a10501 --plot_ts 30m
+```
+
+It narrows the range *queries*, not the rows afterwards, so an hour of a day-long job
+costs a twenty-fourth of the samples to fetch -- and the step is measured over the span
+actually queried, so a window keeps the native scrape resolution where the whole run
+would have been coarsened. The chart names the window it drew, since the x axis counts
+minutes from the window's own start either way.
+
+**A window needs its unit** -- `1h`, `90m`, `30s`, `2d`, the same vocabulary
+`--min-elapsed` uses. That is what keeps `jobscope --ts 36441613` working: a job ID
+never carries a unit, so a bare number after the flag is handed back as the job it
+looks like, with a note saying so. `--ts 60` is therefore *job 60*; write `--ts 60m`
+for an hour. It charts one job on one node, and says
 so rather than guessing: several nodes without `--nodename` names them and asks for
 one, and several jobs points at `-j`. That second guard matters because the chart
 would otherwise be quietly wrong -- series key on `(node, GPU)`, so two jobs that

@@ -319,7 +319,8 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
             if not kept:
                 raise no_such_node(options.nodename, {g.host for g in gpus.values()})
             gpus = kept
-        samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, step)
+        samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, step,
+                                     window=options.window)
         live_timeseries(jobs, samples, gpus, specs, options, out=out)
         return
 

@@ -955,3 +955,80 @@ def test_plot_ts_help_hides_what_it_rules_out(capsys):
     _, hidden = _help_for(["-j", "1", "--plot-ts"], capsys)
     assert {"--csv", "--ts", "--per-gpu"} <= set(hidden)
     assert "--nodename" not in hidden      # the flag it points you at
+
+
+# --- --ts / --plot_ts take an optional window --------------------------------
+
+@pytest.mark.parametrize("spec,seconds", [
+    ("30s", 30), ("90m", 5400), ("1h", 3600), ("2d", 172800),
+])
+def test_the_ts_window_is_a_duration(spec, seconds):
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(["--ts", spec])
+    assert cli._ts_window(args) == seconds
+
+
+def test_no_window_means_the_whole_run():
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(["--ts"])
+    assert args.ts is True and cli._ts_window(args) is None
+
+
+def test_a_jobid_written_after_ts_is_still_a_jobid(capsys):
+    """--ts grew an optional value, and must not eat the job that follows it.
+
+    The grammars are disjoint -- a window carries a unit, a job ID never does -- so
+    the value is handed back rather than guessed at.
+    """
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(["--ts", "36441613"])
+    cli._reclaim_jobid_after_ts(args)
+    assert args.jobids == ["36441613"] and args.ts is True
+    assert cli._ts_window(args) is None
+    assert "as a job ID" in capsys.readouterr().err     # and it says which reading
+
+
+@pytest.mark.parametrize("jobid", ["36441613", "36609689_1", "100.batch"])
+def test_array_tasks_and_steps_are_reclaimed_too(jobid, capsys):
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(["--ts", jobid])
+    cli._reclaim_jobid_after_ts(args)
+    assert args.jobids == [jobid]
+
+
+def test_a_window_is_not_mistaken_for_a_jobid(capsys):
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(["--ts", "1h"])
+    cli._reclaim_jobid_after_ts(args)
+    assert args.jobids == [] and cli._ts_window(args) == 3600
+    assert capsys.readouterr().err == ""
+
+
+def test_an_unparseable_window_says_what_a_window_looks_like():
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(["--ts", "abc"])
+    with pytest.raises(JobscopeError) as exc:
+        cli._ts_window(args)
+    assert "duration with a unit" in str(exc.value) and "1h" in str(exc.value)
+
+
+def test_plot_ts_takes_the_same_window():
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(["--plot_ts", "1h"])
+    assert cli._ts_window(args) == 3600
+
+
+def test_the_window_reaches_the_emitter(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(cli, "emit_timeseries",
+                        lambda *a, **kw: captured.setdefault("options", a[-1]))
+    main(["-j", "1", "--ts", "1h"])
+    assert captured["options"].window == 3600
+
+
+def test_the_chart_says_which_window_it_is_showing(monkeypatch, capsys):
+    """Otherwise a windowed chart is indistinguishable from a whole-run one: the x
+    axis counts minutes from the window's own start either way."""
+    _fake_ts(monkeypatch, _ts_rows())
+    main(["-j", "1", "--plot_ts", "1h"])
+    assert "last 1h" in capsys.readouterr().out
