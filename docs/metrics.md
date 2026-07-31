@@ -317,7 +317,38 @@ the three numbers contradict the percentage beside them.
 
 `RED<` is the metric's own red cutoff, which has to be per row: 25 for `GPU%`, 10
 for `CPU%`, and `[thresholds] default` (15) for every column without an explicit
-setting. Red is below it, yellow below twice it, green above.
+setting. Red is below it, yellow below twice it, green above. A two-line legend
+above the table says this, because neither the threshold nor the implicit yellow
+edge is self-evident from the column name.
+
+### What green does not mean
+
+Green is `>= 2x` the red cutoff, which is a low bar: with `cpu = 10` a job at 21%
+is green while leaving four fifths of its cores unused. A selection can therefore
+be half idle with almost every job green, which reads as a contradiction until the
+two columns are separated:
+
+```
+METRIC   RED<  ALLOC  USED   IDLE        RED        YELLOW     GREEN
+CPU%     10    173    88.7   84.3 (49%)  0 (0%)/0%  1 (7%)/5%  13 (93%)/95%
+```
+
+Eleven jobs, each using about half its cores (12, 21, 47, 52, 55, 55, 55, 55, 56,
+56, 56). None is below 10, so the red band is empty; pooled, 49% of the cores are
+idle anyway.
+
+`IDLE` is the efficiency measure. The bands say *where* the waste sits:
+
+| pattern | reading |
+|---|---|
+| red band holds a large share of the **resource-time** | concentrated: a few jobs waste a lot, and `Worst` names them |
+| red band empty but `IDLE` high | systemic: every job wastes a little, which is a habit rather than an incident |
+
+Measured on one partition, `GPU%` showed the first (4% of jobs, 53% of the
+GPU-hours, red) and `CPU%` the second. The bands are deliberately calibrated to
+catch pathological jobs rather than to score efficiency, since the thresholds that
+would score efficiency differ per workload -- inference, data prep and sparse HPC
+all run legitimately low.
 
 The three band cells give each band's share of the **jobs** and of the
 **resource-time**: `13 (4%)/54%` is 13 jobs, 4% of those measured, holding 54% of

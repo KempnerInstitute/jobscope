@@ -32,6 +32,8 @@ JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_
                                             ... 12 more rows ...
 ------------------------------------------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              12     9            80     3       64.9     14.7    0.3      9.5     455
+  RED< is the red cutoff, yellow ends at twice it; band cells are jobs (% of jobs)/% of resource-time
+  bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
 METRIC   RED<  ALLOC     USED     IDLE            RED             YELLOW          GREEN
 CPU%     10    56.2h     6.9h     49.3h (88%)     0 (0%)/0%       17 (100%)/100%  0 (0%)/0%
 MEM%     25    586.5GBh  52.1GBh  534.4GBh (91%)  16 (94%)/91%    1 (6%)/9%       0 (0%)/0%
@@ -205,6 +207,8 @@ With more than one job the table ends in footers:
 
 ```
 Used/GPU-hr:                              5      4            44   28     38.4  11.8  10.3  8.4  278
+  RED< is the red cutoff, yellow ends at twice it; band cells are jobs (% of jobs)/% of resource-time
+  bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
 METRIC   RED<  ALLOC     USED    IDLE            RED            YELLOW         GREEN
 CPU%     10    10135.2h  522.6h  9612.5h (95%)   159 (50%)/62%  158 (50%)/35%  2 (1%)/4%
 MEM%     25    126.6TBh  5.3TBh  121.4TBh (96%)  315 (99%)/99%  1 (0%)/0%      3 (1%)/1%
@@ -245,9 +249,31 @@ So the denominators differ by row on purpose, and reading down the `IDLE` column
 is the fastest way to see which resource a selection actually wasted: above, the
 GPUs were 56% idle while the *cores* were 95% idle and the *tensor cores* 90%.
 
-`RED<` is that metric's own red cutoff, since it varies: 25 for `GPU%`, 10 for
-`CPU%`, 15 for anything without an explicit setting. Red is below the cutoff,
-yellow below twice it, green above.
+`RED<` is that metric's own red cutoff -- red below it, yellow below twice it,
+green above -- and it varies by row: 25 for `GPU%`, 10 for `CPU%`, 20 for `GMEM%`,
+15 for anything without an explicit setting. The table prints a two-line legend
+saying so, since neither the threshold nor the implicit yellow edge is obvious.
+
+**`green` means "not pathological", not "efficient".** With a red cutoff of 10 a
+job at 21% is green while wasting four fifths of its cores, so a selection can be
+half idle with nearly every job green:
+
+```
+METRIC   RED<  ALLOC  USED   IDLE        RED        YELLOW     GREEN
+CPU%     10    173    88.7   84.3 (49%)  0 (0%)/0%  1 (7%)/5%  13 (93%)/95%
+```
+
+That is not a contradiction: every job there used about half its cores, so none is
+below 10, yet half the allocation went unused. Read `IDLE` for efficiency and the
+bands for *where* the waste is:
+
+| pattern | meaning | what to do |
+|---|---|---|
+| red band holds a large **resource** share | a few jobs waste a lot | go find those jobs -- they are in `Worst` |
+| no red band but a high `IDLE` | every job wastes a little | nothing to escalate; over-requesting is the habit |
+
+On the partition above, `GPU%` is the first pattern (4% of jobs holding 53% of the
+GPU-hours in red) and `CPU%` the second.
 
 The three band cells give each band's share of the **jobs** and of the
 **resource-time** (`13 (4%)/54%` is 13 jobs, 4% of the jobs, holding 54% of the

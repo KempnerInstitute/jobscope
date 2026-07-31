@@ -845,6 +845,20 @@ class SummaryRenderer:
 
     STAT_HEADERS = ("METRIC", "RED<", "ALLOC", "USED", "IDLE", "RED", "YELLOW", "GREEN")
 
+    # Two lines of legend, because two things in this table read wrongly without
+    # them. RED< is a threshold, not a count, and the yellow edge is implicit at
+    # twice it. And "green" means only "not pathological": with a red cutoff of 10 a
+    # job at 21% is green while wasting four fifths of its cores, so a selection can
+    # be half idle with almost every job green. IDLE is the efficiency number; the
+    # bands say whether the waste is concentrated in a few jobs or spread over all
+    # of them, which is the difference between someone to talk to and a habit.
+    STAT_LEGEND = (
+        "RED< is the red cutoff, yellow ends at twice it;"
+        " band cells are jobs (% of jobs)/% of resource-time",
+        "bands catch pathological jobs, IDLE measures efficiency:"
+        " no red with a high IDLE means every job wastes a little",
+    )
+
     def _stat_table(self, stats: List["EfficiencyTally"]) -> List[str]:
         """The per-metric table: one row per graded metric, tinted by band.
 
@@ -862,6 +876,8 @@ class SummaryRenderer:
         out = []
         last = len(widths) - 1
         if self.options.header:
+            for line in self.STAT_LEGEND:
+                out.append("  " + line)
             out.append("  ".join(h if i == last else h.ljust(widths[i])
                                  for i, h in enumerate(self.STAT_HEADERS)))
         for row in rows:

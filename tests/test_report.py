@@ -531,6 +531,57 @@ def _stat_rows(records, **kw):
     return rows
 
 
+def test_the_stat_table_carries_a_legend():
+    """Two things in the table read wrongly without it.
+
+    RED< is a threshold, not a count, and the yellow edge is implicit at twice it.
+    And "green" means only "not pathological": with a cutoff of 10 a job at 21% is
+    green while wasting four fifths of its cores, so a selection can be half idle
+    with nearly every job green -- which looks like a contradiction until the legend
+    says IDLE is the efficiency number and the bands only locate the waste.
+    """
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    text = out.getvalue()
+    assert "RED< is the red cutoff, yellow ends at twice it" in text
+    assert "IDLE measures efficiency" in text
+    # Directly above the header it explains, and inside the table width.
+    lines = text.splitlines()
+    assert lines[lines.index(next(ln for ln in lines if ln.startswith("METRIC"))) - 1] \
+        .lstrip().startswith("bands catch")
+    assert all(len(ln) <= 132 for ln in report.SummaryRenderer.STAT_LEGEND)
+
+
+def test_the_legend_is_suppressed_with_noheader_and_in_csv():
+    """It is prose: it has no place in a CSV, and --noheader asked for no furniture."""
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    for options in (RenderOptions(view="all", header=False),
+                    RenderOptions(view="all", header=True, csv=True)):
+        out = io.StringIO()
+        renderer = report.SummaryRenderer(CTX, options, out)
+        renderer.add(list(records), records, {})
+        renderer.finish()
+        assert "RED<" not in out.getvalue()
+
+
+def test_a_selection_can_be_half_idle_with_no_red_job():
+    """The case that looks like a contradiction, pinned as intended behaviour.
+
+    Every job uses about half its cores: none is below the cutoff of 10, so the red
+    band is empty, yet half the allocation is unused. Concentrated waste shows up in
+    the red band's resource share; systemic waste shows up only in IDLE.
+    """
+    records = {str(i): _timed_job(str(i), 3600, cores=4, cpu_seconds=0.5 * 4 * 3600)
+               for i in range(6)}
+    row = _stat_rows(records, view="cpu", time_weighted=True)["CPU%"]
+    assert row[4] == "0 (0%)/0%"                 # nothing red
+    assert row[3] == "12h (50%)"                 # yet half of 24 core-hours is idle
+    assert row[6].startswith("6 (100%)")         # every job green
+
+
 def test_the_default_view_reports_both_resources():
     """A GPU job holding cores it never uses blocks other work from the node.
 
