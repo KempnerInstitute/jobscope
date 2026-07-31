@@ -8,6 +8,7 @@ from jobscope import plot
 from jobscope.cli import build_parser
 from jobscope.config import Thresholds
 from jobscope.errors import JobscopeError
+from jobscope.report import _ESC_RE
 
 THRESHOLDS = Thresholds(red=10, power_w=100)
 
@@ -178,3 +179,101 @@ def test_plot_no_input_errors(tmp_path):
     args = build_parser()[0].parse_args(["plot", "-f", str(tmp_path / "missing.csv")])
     with pytest.raises(JobscopeError):
         args.func(args)
+
+
+# --- GMEM% in the default set, and GPUs as columns --------------------------
+
+def _visible(text):
+    """Line lengths with the SGR escapes stripped, the way in_columns measures.
+
+    plotext emits resets even under --no-color, so a raw len() reads 4 wide per line
+    and every width assertion below would be measuring the escapes.
+    """
+    return [len(_ESC_RE.sub("", ln)) for ln in text.splitlines()] or [0]
+
+
+# Four GPUs on one node, so --gpu can pick columns between them.
+_GRID_CSV = "JOBID,EPOCH,TIME,NODE,GPU,GPU%,GMEM%,SM_ACT%\n" + "".join(
+    "100,%d,2020-01-01T00:%02d:00,node01,%s,%d,%d,%d\n" % (1000 + 60 * t, t, g, 90 + t, 50 + t, 70 + t)
+    for g in "0123" for t in range(4))
+
+
+def test_gpu_memory_is_charted_by_default():
+    """GMEM% is a resource, next to GPU%; it used to need --all."""
+    assert plot.ts_defaults(["GPU%", "GMEM%", "SM_ACT%", "OCC%"]) == \
+        ["GPU%", "GMEM%", "SM_ACT%", "OCC%"]
+
+
+def test_ts_defaults_still_drops_what_is_absent_and_resolves_the_alias():
+    assert plot.ts_defaults(["SM_ACT%"]) == ["SM_ACT%"]
+    assert plot.ts_defaults(["GPU%", "DUTY%", "GMEM%"]) == ["GPU%", "GMEM%"]
+
+
+@pytest.mark.parametrize("spec,expected", [
+    ("0", ["0"]),
+    ("0,1,2,3", ["0", "1", "2", "3"]),
+    (" 0 , 2 ", ["0", "2"]),
+    ("0,,1", ["0", "1"]),
+    ("0.1,0.2", ["0.1", "0.2"]),      # MIG slices are not integers
+])
+def test_gpu_list_parses_a_comma_list(spec, expected):
+    assert plot.gpu_list(spec) == expected
+
+
+def test_a_listed_gpu_becomes_a_column(tmp_path, capsys):
+    """Each named GPU gets its own panel on the metric's row, side by side."""
+    out = _run_plot(tmp_path, "g.csv", _GRID_CSV, capsys,
+                    extra=["--by", "metric", "--gpu", "0,1,2,3", "--metric", "GMEM%",
+                           "--width", "200"])
+    grid = [ln for ln in out.splitlines() if "gpu0" in ln]
+    assert grid, out
+    # All four titles on one line means they are abreast, not stacked.
+    assert all(("gpu%d" % g) in grid[0] for g in range(4))
+
+
+def test_the_grid_rows_stay_aligned(tmp_path, capsys):
+    """The invariant in_columns exists to hold: every line one rectangle wide."""
+    out = _run_plot(tmp_path, "ga.csv", _GRID_CSV, capsys,
+                    extra=["--by", "metric", "--gpu", "0,1,2,3", "--metric", "GMEM%",
+                           "--width", "200"])
+    body = "\n".join(ln for ln in out.splitlines() if "┤" in ln or "│" in ln)
+    assert body
+    assert max(_visible(body)) <= 200
+
+
+def test_a_narrow_terminal_drops_columns_rather_than_overflowing(tmp_path, capsys):
+    """Two readable panels beat four unreadable ones; in_columns wraps the rest."""
+    out = _run_plot(tmp_path, "gn.csv", _GRID_CSV, capsys,
+                    extra=["--by", "metric", "--gpu", "0,1,2,3", "--metric", "GMEM%",
+                           "--width", "70"])
+    # The chart area only: the stats footer below it is drawn by rich, whose Console
+    # has its own width and overflows independently of anything measured here.
+    charts = out.split("min / mean / max")[0]
+    assert max(_visible(charts)) <= 70
+    titles = [ln for ln in charts.splitlines() if "gpu0" in ln]
+    assert "gpu3" not in titles[0]      # four did not fit on one row
+
+
+def test_without_gpu_the_metric_view_still_overlays(tmp_path, capsys):
+    """The overlay answers "did one card diverge"; naming GPUs is what asks for columns."""
+    out = _run_plot(tmp_path, "go.csv", _GRID_CSV, capsys,
+                    extra=["--by", "metric", "--metric", "GMEM%", "--width", "120"])
+    titles = [ln for ln in out.splitlines() if "gpu0" in ln and "gpu1" in ln]
+    assert not titles          # no row of per-GPU panel titles
+    assert "GMEM%" in out
+
+
+def test_one_listed_gpu_is_not_a_grid(tmp_path, capsys):
+    out = _run_plot(tmp_path, "g1.csv", _GRID_CSV, capsys,
+                    extra=["--by", "metric", "--gpu", "0", "--metric", "GMEM%",
+                           "--width", "120"])
+    assert "gpu1" not in out
+
+
+def test_a_missing_gpu_in_the_list_names_every_one_that_is_absent(tmp_path, capsys):
+    """With a list it is the typo in the middle that is hard to spot."""
+    with pytest.raises(JobscopeError) as exc:
+        _run_plot(tmp_path, "gm.csv", _GRID_CSV, capsys,
+                  extra=["--gpu", "0,7,9"])
+    assert "'7'" in str(exc.value) and "'9'" in str(exc.value)
+    assert "0, 1, 2, 3" in str(exc.value)

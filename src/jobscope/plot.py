@@ -14,7 +14,7 @@ import sys
 
 from . import config
 from .errors import JobscopeError
-from .report import cell_value
+from .report import cell_value, in_columns, terminal_width
 
 ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
            "#GPU", "DUR_S", "RUNTIME", "EPOCH", "TIME"}
@@ -30,6 +30,10 @@ FOOTER_ROWS = {"Mean", "MeanPerGPU", "MeanPerGPUHour", "Jobs",
 
 HEAT_MAX_ROWS = 40
 PANEL_CAP = 12
+# Side-by-side panels for --by metric --gpu a,b,c. A panel narrower than this has no
+# room for an axis and its labels, so the column count drops before the width does.
+MIN_PANEL = 28
+GRID_GAP = 2
 
 # Distinct 256-color codes for the time-series chart, one per metric, so the
 # plotext line and the rich-tinted per-metric stats render the exact same color.
@@ -38,8 +42,24 @@ PALETTE = [196, 46, 33, 208, 201, 51, 226, 129, 244, 39]
 # Default time-series columns, in the order the tables use. DUTY% is listed only to
 # keep charting utilization for CSVs written before that column was renamed to
 # GPU%; the two are the same quantity, so ts_defaults() shows at most one.
-TS_DEFAULT = ["GPU%", "DUTY%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
+#
+# GMEM% sits next to GPU% because the two are *resources* -- how full the card is and
+# how busy it is -- where OCC%/TENSOR%/DRAM% describe how the SMs were used, which only
+# means something once the GPU is known to be busy. Memory also catches a failure none
+# of them do: GPU% 96 with GMEM% 3 is under-batched, and no profiling column says so.
+# GMEM_GB stays out as the same quantity without a denominator.
+TS_DEFAULT = ["GPU%", "DUTY%", "GMEM%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
 TS_ALIASES = [("GPU%", "DUTY%")]
+
+
+def gpu_list(spec) -> list:
+    """``--gpu`` as a list of GPU ids, in the order given.
+
+    Comma-separated like ``--metric`` already is, so ``--gpu 0,1,2,3`` names four and a
+    bare ``--gpu 0`` still names one. Ids stay strings: a MIG slice is "0.1", not a
+    number, and the CSV's own values are compared as text.
+    """
+    return [part.strip() for part in str(spec).split(",") if part.strip()]
 
 
 def ts_defaults(columns) -> list:
@@ -305,20 +325,57 @@ def render_line(columns, rows, args, plt, Console):
 
     width = args.width or shutil.get_terminal_size((100, 30)).columns
 
-    def figure(specs, title, ylabel, height):
-        """Render one chart as its own plotext figure (independent height)."""
+    def build(specs, title, ylabel, height, size=None):
+        """One chart as a list of lines, at ``size`` columns wide (default full width).
+
+        plt.build() returns what plt.show() would print, which is what lets several
+        charts be packed side by side. The size asked for is the size delivered:
+        measured with the escapes stripped, plotsize(w) is exactly w visible columns.
+        """
         plt.clear_figure()
         plt.theme("clear")
-        plt.plotsize(width, height)
+        plt.plotsize(size or width, height)
         for label, color, samples, metric in specs:
             xs, ys = series(samples, metric)
             if ys:
-                plt.plot(xs, ys, label=label, **pkw(color))
+                # A single-series panel gets no legend: it would name what the title
+                # already says, and plotext draws it over the top of the trace.
+                kw = pkw(color) if label is None else dict(pkw(color), label=label)
+                plt.plot(xs, ys, **kw)
         plt.title(title)
         plt.xlabel("minutes since start")
         plt.ylabel(ylabel)
-        plt.show()
+        return plt.build().splitlines()
+
+    def figure(specs, title, ylabel, height):
+        """Render one chart full width, as its own plotext figure."""
+        print("\n".join(build(specs, title, ylabel, height)))
         print()
+
+    def grid(metric, gpu_keys, height):
+        """One row of panels for `metric`, one panel per GPU, packed side by side.
+
+        Through report.in_columns, the same packer the --per-gpu charts use: it measures
+        with the escapes stripped and wraps to further rows when the terminal cannot fit
+        the requested count.
+        """
+        available = terminal_width(sys.stdout, default=width) if args.width is None else width
+        want = len(gpu_keys)
+        # Never draw a panel too narrow to carry an axis; fewer columns beats unreadable
+        # ones, and in_columns wraps the remainder onto the next row.
+        fit = max(1, (available + GRID_GAP) // (MIN_PANEL + GRID_GAP))
+        ncols = min(want, fit)
+        panel = (available - GRID_GAP * (ncols - 1)) // ncols
+        # No y-label either: the row heading above already names the metric, and the
+        # panel is narrow enough that every column of it counts.
+        blocks = [build([(None, gcolor[g], gpus[(n, g)], metric)],
+                        "gpu%s" % g, "", height, size=panel)
+                  for n, g in gpu_keys]
+        print(metric)
+        for line in in_columns(blocks, columns=ncols, gap=GRID_GAP, available=available):
+            print(line)
+        print()
+        return ncols
 
     if args.compact:
         multi = len(keys) > 1
@@ -344,6 +401,12 @@ def render_line(columns, rows, args, plt, Console):
     n_keys, n_metrics = len(keys), len(metrics)
     lines_are_gpus = False
     stat_metrics = metrics
+    # Naming several GPUs means "show me each of these", so they become columns instead
+    # of lines overlaid in one panel. Without --gpu the overlay stays: it is the view
+    # that answers "did one card diverge", and 7 metrics x 4 GPUs is 28 panels, which
+    # should be asked for rather than arrived at.
+    as_columns = (not multinode and n_keys > 1
+                  and bool(args.gpu) and len(gpu_list(args.gpu)) > 1)
 
     if multinode:
         metric = metrics[0]
@@ -360,7 +423,9 @@ def render_line(columns, rows, args, plt, Console):
         metric = metrics[0]
         stat_metrics = [metric]
         lines_are_gpus = n_keys > 1
-        if n_keys > 1:
+        if as_columns:
+            grid(metric, cap(keys, "GPUs"), args.height or 12)
+        elif n_keys > 1:
             figure([("gpu%s" % g, gcolor[g], gpus[(n, g)], metric) for n, g in keys],
                    "%s - %s" % (metric, base), metric, args.height or 15)
         else:
@@ -369,6 +434,11 @@ def render_line(columns, rows, args, plt, Console):
         for key in cap(keys, "GPUs"):
             figure([(m, mcolor[m], gpus[key], m) for m in metrics],
                    "%s gpu%s" % key, "value", args.height or 10)
+    elif as_columns:
+        lines_are_gpus = True
+        panels = cap(keys, "GPUs")
+        for metric in cap(metrics, "metrics"):
+            grid(metric, panels, args.height or 10)
     else:
         lines_are_gpus = n_keys > 1
         for metric in cap(metrics, "metrics"):
@@ -401,7 +471,10 @@ def add_arguments(parser):
                         help="chart type (default: auto-detect from the CSV columns)")
     parser.add_argument("--metric", help="metric column for hist (one) or line (comma-separated)")
     parser.add_argument("--node", help="plot only this node (where the CSV has a NODE column)")
-    parser.add_argument("--gpu", help="plot only this GPU index (where the CSV has a GPU column)")
+    parser.add_argument("--gpu", metavar="GPU",
+                        help="plot only these GPU indices, comma-separated (where the CSV "
+                             "has a GPU column). With --by metric, each one named here "
+                             "becomes a column: --gpu 0,1,2,3 gives four side by side")
     parser.add_argument("--all", action="store_true",
                         help="line: draw every metric, not just the default set")
     parser.add_argument("--marker", choices=["braille", "dot", "hd", "fhd"], default="braille",
@@ -456,10 +529,14 @@ def run(args) -> None:
             print("note: --gpu ignored (no GPU column in this CSV)", file=sys.stderr)
         else:
             available = sorted({str(r.get("GPU")) for r in rows if r.get("GPU") not in (None, "")})
-            rows = [r for r in rows if str(r.get("GPU")) == str(args.gpu)]
-            if not rows:
-                raise JobscopeError("no rows for GPU %r. Available: %s"
-                                    % (args.gpu, ", ".join(available)))
+            wanted = gpu_list(args.gpu)
+            missing = [g for g in wanted if g not in available]
+            if missing:
+                # Name every one that is absent, not just the first: with a list it is
+                # the typo in the middle that is hard to spot.
+                raise JobscopeError("no rows for GPU %s. Available: %s"
+                                    % (", ".join(repr(g) for g in missing), ", ".join(available)))
+            rows = [r for r in rows if str(r.get("GPU")) in set(wanted)]
 
     kind = args.kind
     if kind == "auto":

@@ -663,8 +663,12 @@ how to verify a value by hand — see [`docs/metrics.md`](docs/metrics.md).
 histograms, heatmaps, and time-series line charts. The chart kind is
 auto-detected from the CSV columns; override with `--kind`.
 
-Time-series charts show `GPU%`, `SM_ACT%`, `OCC%`, `TENSOR%` and `DRAM%` by
+Time-series charts show `GPU%`, `GMEM%`, `SM_ACT%`, `OCC%`, `TENSOR%` and `DRAM%` by
 default; `--metric` picks specific columns and `--all` charts every numeric one.
+`GPU%` and `GMEM%` lead because they are the *resources* -- how busy the card is and
+how full -- where `OCC%`/`TENSOR%`/`DRAM%` describe how the SMs were used, which only
+means something once the GPU is known to be busy. `GMEM%` also catches a failure none
+of the others do: `GPU%` 96 with `GMEM%` 3 is under-batched.
 
 ```bash
 jobscope --gpu  --csv JOBID      | jobscope plot                 # bar gauges (one job)
@@ -672,6 +676,35 @@ jobscope --gpu  --csv -D 7       | jobscope plot --kind hist      # distribution
 jobscope dcgm   --csv -D 7       | jobscope plot                 # heatmap (jobs/GPUs x metrics)
 jobscope dcgm --ts --csv JOBID   | jobscope plot --compact        # time series
 ```
+
+### Which time-series layout
+
+`--by metric` gives one panel per variable, each with its own y-axis, which is what a
+mixed set needs: on a typical job `GPU%` spans 0-100 where `OCC%` spans 0-21 and
+`DRAM%` 0-17, so a shared axis crushes three of them into the bottom sixth. `--by gpu`
+(the default) puts every metric on one shared axis per GPU, and `--compact` gives one
+sparkline row per series.
+
+**`--gpu` takes a comma list, and each GPU named becomes a column.** So four cards on a
+node read side by side, one row per metric:
+
+```bash
+jobscope -j 36441613 --nodename holygpu8a10501 --ts \
+  | jobscope plot --by metric --gpu 0,1,2,3
+```
+
+```
+GMEM%
+              gpu0                        gpu1                        gpu2
+    ┌───────────────────────┐    ┌───────────────────────┐    ┌───────────────────────┐
+88.8┤▛▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│88.8┤▛▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│88.8┤▛▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│
+```
+
+Only when they are named. Without `--gpu` the cards stay overlaid as lines in one
+panel, which is the view that answers "did one of them diverge" -- and a grid of six
+metrics by four GPUs is 24 panels, better asked for than arrived at. As many columns
+are drawn as the terminal fits; below that the rest wrap onto a further row, the same
+way the `--per-gpu` charts pack.
 
 `jobscope plot` reads `summary`, `dcgm`, and `dcgm --ts` CSV; the `detail` CSV is
 for machine consumption, not charts. Do not pass `-n` when piping to `jobscope
