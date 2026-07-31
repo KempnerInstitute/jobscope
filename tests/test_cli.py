@@ -723,3 +723,129 @@ def test_nodename_without_per_gpu_is_rejected(capsys):
     with pytest.raises(SystemExit):
         main(["-j", "1", "--nodename=n1"])
     assert "needs --per-gpu" in capsys.readouterr().err
+
+
+# --- the help narrows to what the invocation can use ------------------------
+
+def _help_for(argv, capsys):
+    """``(options_shown, hidden_flags)`` for ``jobscope <argv> --help``.
+
+    The body is cut at the footer, which names the hidden flags and would otherwise
+    make every "not offered" assertion pass by accident.
+    """
+    with pytest.raises(SystemExit):
+        main(list(argv) + ["--help"])
+    out = capsys.readouterr().out
+    marker = "hiding "
+    if marker not in out:
+        return out, []
+    body, footer = out[:out.index(marker)], out[out.index(marker):]
+    hidden = [f.strip() for f in footer.split(".\n")[0].split(":", 1)[1].split(",")]
+    return body, hidden
+
+
+def test_the_help_hides_the_flags_an_explicit_jobid_makes_inert(capsys):
+    """The example that prompted this: 30 options for a command that can use 17."""
+    body, hidden = _help_for(["-j", "36441613", "--per-gpu"], capsys)
+    # The job ID *is* the selection, so no window and no filter can narrow it.
+    for flag in ("--days", "--lastn", "--starttime", "--endtime",
+                 "--partition", "--user", "--all-users", "--account", "--state"):
+        assert flag in hidden
+        assert flag not in body
+    assert "--ts" in hidden           # mutually exclusive with --per-gpu
+    assert "--step" in hidden         # only emit_timeseries reads it
+    assert "--avg" in hidden          # running only
+    # What remains is what this command actually honours.
+    for flag in ("--nodename", "--dcgm", "--csv", "--no-plot", "--per-gpu"):
+        assert flag in body
+
+
+def test_the_hidden_set_is_exactly_what_the_run_would_reject_or_ignore(capsys):
+    """No taste involved: every hidden flag maps to an error or an ignore.
+
+    --state is in the list because select.py returns explicit IDs as-is, so the -s
+    filter never runs -- the same reason build_request now names it in its note.
+    """
+    assert {name for name, _ in cli._JOBID_IGNORES} == {
+        "-D/--days", "-N/--lastn", "-S/--starttime", "-E/--endtime",
+        "-p/--partition", "-u/--user", "-a/--all-users", "-A/--account",
+        "-t/--state"}
+
+
+def test_running_hides_the_past_window_flags(capsys):
+    _, hidden = _help_for(["running"], capsys)
+    assert {"--days", "--lastn", "--starttime", "--endtime", "--state"} <= set(hidden)
+    assert "--min-elapsed" not in hidden   # the running view is the one that uses it
+
+
+def test_finished_hides_the_running_only_flags(capsys):
+    _, hidden = _help_for(["finished"], capsys)
+    assert {"--avg", "--min-elapsed"} <= set(hidden)
+    assert "--days" not in hidden
+
+
+def test_ts_hides_what_the_series_drops(capsys):
+    """emit_timeseries notes these as dropped; the help should not offer them."""
+    body, hidden = _help_for(["--ts"], capsys)
+    assert {"--cpu", "--gpu", "--diagnose", "--per-gpu", "--nodename",
+            "--no-plot"} <= set(hidden)
+    assert "--step" in body    # --ts is the only thing that reads it
+
+
+def test_cpu_hides_the_gpu_only_columns(capsys):
+    _, hidden = _help_for(["--cpu"], capsys)
+    assert {"--dcgm", "--diagnose", "--diag-short"} <= set(hidden)
+
+
+def test_csv_hides_what_a_csv_cannot_carry(capsys):
+    _, hidden = _help_for(["--csv"], capsys)
+    assert {"--no-color", "--no-plot"} <= set(hidden)
+
+
+def test_the_per_job_view_hides_nodename(capsys):
+    """It raises without --per-gpu, so offering it is a dead end."""
+    _, hidden = _help_for(["running"], capsys)
+    assert "--nodename" in hidden
+
+
+def test_help_all_hides_nothing(capsys):
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--per-gpu", "--help-all"])
+    body = capsys.readouterr().out
+    assert "hiding" not in body
+    for flag in ("--days", "--partition", "--avg", "--step", "--ts"):
+        assert flag in body
+
+
+def test_the_narrowed_help_names_the_way_back(capsys):
+    """Nothing is invisible: the footer counts what went and how to get it back."""
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--help"])
+    out = capsys.readouterr().out
+    assert "hiding " in out and "--help-all for the full list" in out
+
+
+def test_the_top_level_help_is_untouched(capsys):
+    """`jobscope --help` has no flags to narrow against; it lists the subcommands."""
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    body = capsys.readouterr().out
+    assert "{running,finished,plot,describe,config}" in body
+    assert "hiding" not in body
+
+
+def test_a_tail_argparse_cannot_parse_narrows_nothing():
+    _, subparsers = build_parser()
+    assert cli.narrow_help(subparsers.choices[FINISHED], ["-D", "notanumber"], False) == []
+
+
+def test_narrowing_leaves_a_formattable_usage_line(capsys):
+    """A suppressed member of a mutually exclusive group used to crash the formatter.
+
+    argparse renders "[--per-gpu | --ts]" from the group while building the option
+    list from the visible actions; hide one and the two disagree, which trips an
+    assert (and an emptied group raises outright).
+    """
+    for argv in (["--ts"], ["--per-gpu"], ["--cpu", "--ts"], ["-j", "1", "--per-gpu"]):
+        body, _ = _help_for(argv, capsys)
+        assert body.startswith("usage: jobscope")

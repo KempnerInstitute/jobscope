@@ -19,7 +19,7 @@ aliases; see :data:`DEPRECATED`.
 import argparse
 import os
 import sys
-from typing import Optional
+from typing import List, Optional
 
 from . import __version__, config, plot
 from .dcgm import ALL_SPECS, DEFAULT_SPECS
@@ -37,6 +37,20 @@ from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
 
 MODES = (RUNNING, FINISHED)
 UTILITIES = ("plot", "describe", "config")
+
+# Flags an explicit JOBID makes inert -- the IDs are the selection, so there is
+# nothing left for a window or a filter to narrow. build_request names these in its
+# "ignoring ..." note and narrow_help() hides them, from this one list, so the note
+# and the help cannot drift apart.
+_JOBID_IGNORES = (
+    ("-D/--days", "days"), ("-N/--lastn", "lastn"),
+    ("-S/--starttime", "starttime"), ("-E/--endtime", "endtime"),
+    ("-p/--partition", "partition"), ("-u/--user", "user"),
+    ("-a/--all-users", "all_users"), ("-A/--account", "account"),
+    # Explicit IDs skip _select_cmd entirely (select.py returns them as-is), so the
+    # -s state filter never runs. Silently ignored before this note existed.
+    ("-t/--state", "state"),
+)
 
 # Flags that select a past window; their presence means sacct rather than squeue.
 _WINDOW_FLAGS = ("-D", "--days", "-N", "--lastn", "-S", "--starttime",
@@ -72,11 +86,25 @@ _EPILOG = (
     "Flags and JOBIDs may be given in any order.")
 
 
+class _HelpAll(argparse.Action):
+    """``--help-all``: the unfiltered help.
+
+    ``-h`` narrows itself to the flags the current invocation can actually use (see
+    :func:`narrow_help`), so there has to be a way back to the full list.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.print_help()
+        parser.exit()
+
+
 def build_parser():
     """Construct the argument parser; return ``(parser, subparsers_action)``."""
     base = argparse.ArgumentParser(add_help=False)
     base.add_argument("-c", "--config", dest="config_path", metavar="PATH",
                       help="path to a jobscope config file (overrides $JOBSCOPE_CONFIG)")
+    base.add_argument("--help-all", action=_HelpAll, nargs=0,
+                      help="every option, including those the current flags rule out")
 
     report = argparse.ArgumentParser(add_help=False)
     scope = report.add_argument_group("job selection")
@@ -234,6 +262,99 @@ def mode_was_explicit(argv) -> bool:
     return bool(argv) and (argv[0] in MODES or argv[0] == "live")
 
 
+def _was_given(args, dest: str) -> bool:
+    """Whether *dest* carries a value the user supplied, rather than its default."""
+    value = getattr(args, dest, None)
+    return value is not None and value is not False and value != ""
+
+
+def _inert_dests(args) -> set:
+    """The options this invocation would reject or silently ignore.
+
+    Every entry mirrors something the run itself already does -- an error raised by
+    :func:`build_request` or :func:`handle_report`, a "note: ... ignoring" line, or a
+    value no renderer on this path ever reads. That is the whole rule, and it is why
+    the narrowed help can be trusted: it hides what would not have worked, not what
+    someone judged uninteresting.
+    """
+    jobids = bool(args.jobids or getattr(args, "jobids_opt", None))
+    running = args.mode == RUNNING and (getattr(args, "explicit_mode", False) or not jobids)
+    hide = set()
+    if jobids:  # build_request: "explicit JOBIDs given; ignoring ..."
+        hide.update(dest for _, dest in _JOBID_IGNORES)
+    if running:
+        hide.update(dest for _, _, dest in _FINISHED_ONLY)  # raises: no past window
+        hide.add("state")                                   # raises: all are RUNNING
+    else:
+        hide.add("avg")          # raises: a finished job is always folded over its runtime
+        hide.add("min_elapsed")  # only ever reaches LiveSelection
+    if args.ts:
+        # emit_timeseries drops these with a note; the series has no host, advisory or
+        # aggregate columns to put them in, and nothing is plotted.
+        hide.update({"view", "diagnose", "diag_short", "per_gpu", "nodename", "no_plot"})
+    else:
+        hide.add("step")  # only emit_timeseries reads it
+        hide.add("ts" if args.per_gpu else "nodename")
+    if args.view == "cpu":
+        # show_dcgm goes false, so the spec list is never built and DIAG has no GPU
+        # metric to advise on.
+        hide.update({"dcgm", "diagnose", "diag_short"})
+    if args.csv:
+        hide.update({"no_color", "no_plot"})  # both already inert for a CSV
+    return hide
+
+
+def _flag_name(action) -> str:
+    """The long spelling of an option, for naming it in prose."""
+    longs = [s for s in action.option_strings if s.startswith("--")]
+    return longs[0] if longs else action.option_strings[0]
+
+
+def narrow_help(sub, argv, explicit: bool) -> List[str]:
+    """Hide the options *argv* rules out, and say so in the epilog.
+
+    ``jobscope -j 36441613 --per-gpu -h`` printed all thirty options, twenty of which
+    that command cannot use: every window flag (the job ID is the selection), every
+    filter, ``--ts`` (mutually exclusive), ``--step`` (``--ts`` only), ``--avg``
+    (running only). Reading the help for a command you have already half-written
+    should not mean re-reading the ones you have ruled out.
+
+    Returns the names hidden, in declaration order. A tail argparse cannot make sense
+    of hides nothing: a full help is a worse answer than a narrow one, but a better
+    one than a wrong one.
+    """
+    probe = [a for a in argv if a not in ("-h", "--help")]
+    try:
+        args, _ = sub.parse_known_intermixed_args(probe)
+    except (SystemExit, argparse.ArgumentError):
+        return []
+    args.explicit_mode = explicit
+    inert = _inert_dests(args)
+    hidden = []
+    for action in sub._actions:
+        if action.dest in inert and action.help is not argparse.SUPPRESS:
+            hidden.append(_flag_name(action))
+            action.help = argparse.SUPPRESS
+    # A mutually exclusive group with a suppressed member makes argparse's usage
+    # formatter assert -- it renders "[--a | --b]" from the group while building the
+    # option list from the visible actions, and the two then disagree. Drop the hidden
+    # members from the group: the constraint is real but it no longer binds anything
+    # the reader can see.
+    # An emptied group raises instead, so it goes altogether.
+    groups = []
+    for group in getattr(sub, "_mutually_exclusive_groups", []):
+        group._group_actions = [a for a in group._group_actions
+                                if a.help is not argparse.SUPPRESS]
+        if group._group_actions:
+            groups.append(group)
+    sub._mutually_exclusive_groups = groups
+    if hidden:
+        sub.epilog += (
+            "\n\nhiding %d option(s) these flags rule out: %s.\n"
+            "Pass --help-all for the full list." % (len(hidden), ", ".join(hidden)))
+    return hidden
+
+
 def resolve_argv(argv):
     """Normalize ``argv`` to ``[mode, ...]``, expanding the deprecated aliases.
 
@@ -333,12 +454,7 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
         raise JobscopeError("-a/--all-users and -u/--user are mutually exclusive")
 
     if jobids:
-        ignored = [name for name, on in (
-            ("-D/--days", args.days is not None), ("-N/--lastn", args.lastn is not None),
-            ("-S/--starttime", bool(args.starttime)), ("-E/--endtime", bool(args.endtime)),
-            ("-p/--partition", bool(args.partition)), ("-u/--user", bool(args.user)),
-            ("-a/--all-users", args.all_users), ("-A/--account", bool(args.account)),
-        ) if on]
+        ignored = [name for name, dest in _JOBID_IGNORES if _was_given(args, dest)]
         if ignored:
             print("jobscope: note: explicit JOBIDs given; ignoring %s" % ", ".join(ignored),
                   file=sys.stderr)
@@ -469,7 +585,12 @@ def main(argv=None) -> None:
         # Parse on the chosen subparser so JOBIDs and flags may appear in any
         # order. parse_intermixed_args cannot run on the top parser, where the
         # mode is itself a positional.
-        args = subparsers.choices[argv[0]].parse_intermixed_args(argv[1:])
+        sub = subparsers.choices[argv[0]]
+        if argv[0] in MODES and any(a in ("-h", "--help") for a in argv[1:]):
+            # Narrow before parsing, because argparse prints the help and exits the
+            # moment it reaches -h.
+            narrow_help(sub, argv[1:], explicit)
+        args = sub.parse_intermixed_args(argv[1:])
         args.explicit_mode = explicit
     else:  # -h / --help / --version
         args = parser.parse_args(argv)

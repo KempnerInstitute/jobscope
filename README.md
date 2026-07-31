@@ -220,6 +220,8 @@ job that is running right now.
 **Level 4** — `--diagnose`, which adds the advisory `DIAG` column at the end.
 
 **Output** — `--csv`, `-n`, `--step` (with `--ts`), `--timeout`, `--workers`, `-c`.
+`--help-all` prints every option; plain `-h` narrows to the ones the current flags
+leave usable (see below).
 
 Flags and JOBIDs may be given in any order. A `JOBID` works whether the job is
 running or finished: Slurm only stores the utilization blob when a job *ends*, so
@@ -230,6 +232,29 @@ those columns stay blank and say so.
 `jobscope running -j ID` differs from `jobscope ID`: the first reads the live view
 of that job (an instant snapshot, with `--avg` available), the second looks it up
 through `sacct` over its window.
+
+### `-h` narrows to the command you are writing
+
+Thirty options is a lot to re-read when most of them cannot apply. So `-h` answers
+for *this* invocation, hiding what it has already ruled out:
+
+```console
+$ jobscope -j 36441613 --per-gpu -h
+... 17 options ...
+hiding 13 option(s) these flags rule out: --days, --lastn, --starttime, --endtime,
+--min-elapsed, --partition, --user, --all-users, --account, --state, --ts, --avg, --step.
+Pass --help-all for the full list.
+```
+
+The rule is mechanical, not editorial: **a flag is hidden exactly when this command
+would reject it or ignore it.** The job ID *is* the selection, so no window or filter
+can narrow it further (jobscope says so at runtime too); `--ts` is mutually exclusive
+with `--per-gpu`; `--step` is read only by the time series; `--avg` applies to running
+jobs alone. Nothing is hidden for being merely uninteresting, and the footer names
+every one that went.
+
+`jobscope --help` is unaffected -- with no flags to narrow against it lists the
+subcommands, as before. `--help-all` is the way back to all thirty from anywhere.
 
 ## Columns
 
