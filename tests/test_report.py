@@ -502,15 +502,58 @@ def test_the_bands_report_job_share_and_resource_share():
     assert "green 4 jobs (80%)/4 (20%)" in line
 
 
-def _band_line(records, **kw):
-    """The Bands: line from a text-rendered table."""
+def _band_line(records, column="GPU%", **kw):
+    """The `Bands <column>:` line from a text-rendered table."""
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view=kw.get("view", "all"), csv=False, header=True,
                            time_weighted=kw.get("time_weighted", False)), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    return [ln for ln in out.getvalue().splitlines() if ln.startswith("Bands:")][0]
+    return [ln for ln in out.getvalue().splitlines()
+            if ln.startswith("Bands " + column)][0]
+
+
+def test_the_default_view_reports_both_resources():
+    """A GPU job holding cores it never uses blocks other work from the node.
+
+    The GPU lines cannot show that, so the default view prints both. `--gpu` and
+    `--cpu` narrow it to the one they are about.
+    """
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+
+    def lines(view):
+        out = io.StringIO()
+        renderer = report.SummaryRenderer(
+            CTX, RenderOptions(view=view, header=True), out)
+        renderer.add(list(records), records, {})
+        renderer.finish()
+        return out.getvalue()
+
+    both = lines("all")
+    assert "GPUs:" in both and "Cores:" in both
+    assert "Bands GPU%:" in both and "Bands CPU%:" in both
+    # The leading resource names the pooled row, and GPUs lead in the wide view.
+    assert "Used/GPU:" in both
+    assert both.index("GPUs:") < both.index("Cores:")
+
+    assert "Cores:" not in lines("gpu")
+    assert "GPUs:" not in lines("cpu")
+
+
+def test_the_totals_line_reconciles_with_its_own_percentage():
+    """used is fractional even in the count form -- it is GPU-equivalents busy.
+
+    Rounding it to an integer made the three numbers contradict the percentage:
+    20 allocated and 17.4 used printed as "17 used  3 idle (13%)", and 3/20 is 15%.
+    """
+    records = {"a": _gpu_job("a", {"0": 90.0}), "b": _gpu_job("b", {"0": 80.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(CTX, RenderOptions(view="gpu", header=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    line = [ln for ln in out.getvalue().splitlines() if ln.startswith("GPUs:")][0]
+    assert "2 alloc  1.7 used  0.3 idle (15%)" in line     # 0.3/2 = 15%
 
 
 def test_the_totals_line_splits_allocation_into_used_and_idle():
@@ -555,7 +598,7 @@ def test_the_block_follows_the_cpu_view_to_cores():
     renderer.finish()
     text = out.getvalue()
     assert "Cores:" in text and "GPUs:" not in text
-    assert "CPU%" in [ln for ln in text.splitlines() if ln.startswith("Bands:")][0]
+    assert "Bands CPU%:" in text and "Bands GPU%:" not in text
     assert "Used/cpu:" in text
     # GPU totals are noise in a view that hid the GPU columns.
     jobs = [ln for ln in text.splitlines() if ln.startswith("Jobs:")][0]

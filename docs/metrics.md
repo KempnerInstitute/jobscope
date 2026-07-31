@@ -280,14 +280,25 @@ at all, so it is dropped from the row and counted as `no-runtime=N` in the
 
 ### The efficiency block
 
-`GPU-hours:` splits the allocation into used and idle. `Bands:` then tallies each
-threshold band's share of the **jobs** and of the **resource-time**:
+`GPU-hours:` and `Core-hours:` split each allocation into used and idle. Both are
+reported in the default view, because a GPU job that holds cores it never uses
+blocks other work from the node and the GPU lines cannot show that: on one day
+kempner_eng was 57% idle by GPU-hour and 95% idle by core-hour. `--gpu` and
+`--cpu` narrow the block to one resource.
+
+`used` is fractional even in the count form -- it is GPU-equivalents busy, not
+whole GPUs -- so all three numbers carry one decimal and reconcile with the
+percentage beside them.
+
+`Bands <column>:` then tallies each threshold band's share of the **jobs** and of
+the **resource-time**, one row per reported resource:
 
 ```
-Bands:  GPU%  red<25 20 jobs (5%)/377.7h (64%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 361 jobs (94%)/208.7h (36%)
+Bands GPU%:  red<25 13 jobs (4%)/388.0h (55%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 302 jobs (95%)/313.1h (45%)
+Bands CPU%:  red<10 159 jobs (50%)/6240.6h (63%)  yellow<20 158 jobs (50%)/3303.3h (33%)  green 2 jobs (1%)/331.7h (3%)
 ```
 
-The gap between those two shares is the finding -- 5% of the jobs held 64% of the
+The gap between those two shares is the finding -- 4% of the jobs held 55% of the
 GPU-hours below 25% -- and either share alone conceals it. The bands come from
 `config.grade_band` and the site's `[thresholds]`, the same cutoffs that tint the
 cells and colour `jobscope plot`, so the block is a tally of what is already on
@@ -297,8 +308,8 @@ screen rather than a second opinion.
 not by resource-time held: a 100-hour job at 24% is a larger finding than a
 10-hour job at 0%. It is omitted when no job falls in the red band.
 
-The block follows the view: `--cpu` bands `CPU%` over core-hours, and the
-instantaneous running view reports GPU counts rather than GPU-hours.
+`Worst:` comes from the leading resource -- GPUs where the view shows them --
+since the same jobs usually top both lists and one line is enough.
 
 Which jobs contribute is the part worth being exact about:
 

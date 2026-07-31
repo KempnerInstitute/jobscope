@@ -291,12 +291,18 @@ class EfficiencyTally:
             else "%d" % round(weight / self.scale)
 
     def totals_line(self) -> str:
-        """Allocated / used / idle. The unit is left to the row label."""
+        """Allocated / used / idle. The unit is left to the row label.
+
+        One decimal, trailing ``.0`` trimmed. ``used`` is genuinely fractional even
+        in the count form -- it is GPU-equivalents busy, not whole GPUs -- so
+        rounding it to an integer made the three numbers stop adding up: 20
+        allocated and 17.4 used printed as "17 used  3 idle (13%)", and 3/20 is 15%.
+        """
         idle = self.total - self.used
-        bare = self._amount if not self.unit else (
-            lambda w: "%.1f" % (w / self.scale))
+        def num(weight):
+            return ("%.1f" % (weight / self.scale)).removesuffix(".0")
         return "%s alloc  %s used  %s idle (%d%%)" % (
-            bare(self.total), bare(self.used), bare(idle),
+            num(self.total), num(self.used), num(idle),
             round(100 * idle / self.total) if self.total else 0)
 
     def bands_line(self) -> str:
@@ -315,7 +321,8 @@ class EfficiencyTally:
                 round(100 * jobs / jobs_total) if jobs_total else 0,
                 self._amount(weight),
                 round(100 * weight / self.total) if self.total else 0))
-        return "%s  %s" % (self.header, "  ".join(parts))
+        # The column name lives in the row label, so it is not repeated here.
+        return "  ".join(parts)
 
     def worst_line(self) -> str:
         return "  ".join("%s %s@%d%% %s" % (jid, self._amount(weight), round(value), user)
@@ -562,12 +569,14 @@ class SummaryRenderer:
                     total, n = self.sums_dcgm[header]
                 used_row[header] = format_by_header(header, total / n) if n else "-"
 
-        # Where that resource-time actually went. The GPU tally leads when the
-        # selection has GPU work and the view shows it; otherwise the CPU one, so a
-        # --cpu run is not silently blank.
-        tally = self.tallies["gpu"]
-        if options.view == "cpu" or not tally.total:
-            tally = self.tallies["cpu"]
+        # Where that resource-time actually went, per resource the view shows. Both
+        # are reported in the default view: a GPU job holding cores it never uses
+        # blocks other work from the node, which the GPU lines cannot show. The
+        # first with data leads -- it names the pooled row and supplies Worst -- so
+        # a --cpu run is not silently blank and a GPU run still leads with GPUs.
+        wanted = {"cpu": ("cpu",), "gpu": ("gpu",)}.get(options.view, ("gpu", "cpu"))
+        shown = [self.tallies[key] for key in wanted if self.tallies[key].total]
+        tally = shown[0] if shown else self.tallies["gpu"]
 
         # The job counts differ whenever the selection mixes CPU-only and GPU work:
         # a CPU-only job has no GPU% to average, so it is absent from the GPU
@@ -591,13 +600,12 @@ class SummaryRenderer:
         if options.csv:
             used_row["JOBID"] = tally.csv_row
             self.writer.writerow([used_row[h] for h in self.headers])
-            if tally.total:
-                self.writer.writerow(padded(tally.label.replace("-", ""),
-                                            tally.csv_cells()))
-                if tally.worst:
-                    self.writer.writerow(padded("Worst", [
-                        "%s=%s@%d" % (jid, tally._amount(weight), round(value))
-                        for _idle, jid, _user, weight, value in tally.worst]))
+            for one in shown:
+                self.writer.writerow(padded(one.label.replace("-", ""), one.csv_cells()))
+            if tally.worst:
+                self.writer.writerow(padded("Worst", [
+                    "%s=%s@%d" % (jid, tally._amount(weight), round(value))
+                    for _idle, jid, _user, weight, value in tally.worst]))
             self.writer.writerow(padded("Jobs", counts))
         else:
             used_row["JOBID"] = tally.row
@@ -605,11 +613,14 @@ class SummaryRenderer:
                 print("-" * len(self._line({c.header: c.header for c in self.columns},
                                            color=False)), file=self.out)
             print(self._line(used_row), file=self.out)
-            if tally.total:
-                print("%-12s %s" % (tally.label + ":", tally.totals_line()), file=self.out)
-                print("%-12s %s" % ("Bands:", tally.bands_line()), file=self.out)
-                if tally.worst:
-                    print("%-12s %s" % ("Worst:", tally.worst_line()), file=self.out)
+            for one in shown:
+                print("%-12s %s" % (one.label + ":", one.totals_line()), file=self.out)
+            for one in shown:
+                # Each band row names its own column, so two of them do not collide.
+                print("%-12s %s" % ("Bands " + one.header + ":", one.bands_line()),
+                      file=self.out)
+            if tally.worst:
+                print("%-12s %s" % ("Worst:", tally.worst_line()), file=self.out)
             print("%-12s %s" % ("Jobs:", "  ".join(counts)), file=self.out)
 
 

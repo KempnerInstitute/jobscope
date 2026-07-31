@@ -27,11 +27,17 @@ JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_
 35244230     bdesinghu    COMPLETED 1     11     3      1     78     2       64.3     14.4    2.9      8.9     406      00:09:30
 35246690     bdesinghu    COMPLETED 1     11     2      1     63     3       44.3     8.8     0.2      4.3     338      00:12:07
 35246691     bdesinghu    COMPLETED 1     11     3      1     67     2       43.8     8.7     0.2      4.4     341      00:13:05
+35260825     bdesinghu    COMPLETED 1     18     2      1     20     1       3.3      0.5     0.0      0.4     106      00:04:18
+35289592     bdesinghu    COMPLETED 1     13     12     1     95     3       83.9     20.6    0.2      15.4    580      02:08:33
+                                            ... 12 more rows ...
 ------------------------------------------------------------------------------------------------------------------------------------
-Used/GPU-hr:                              11     2            69     2       50.8     10.5    1.1      5.9     361
-GPU-hours:   0.6 alloc  0.4 used  0.2 idle (31%)
-Bands:       GPU%  red<25 0 jobs (0%)/0.0h (0%)  yellow<50 0 jobs (0%)/0.0h (0%)  green 3 jobs (100%)/0.6h (100%)
-Jobs:        cpu-jobs=3  gpu-jobs=3  gpus=3
+Used/GPU-hr:                              12     9            80     3       64.9     14.7    0.3      9.5     455
+GPU-hours:   7.1 alloc  5.7 used  1.4 idle (20%)
+Core-hours:  56.2 alloc  6.9 used  49.3 idle (88%)
+Bands GPU%:  red<25 1 job (6%)/0.1h (1%)  yellow<50 1 job (6%)/0.1h (2%)  green 15 jobs (88%)/6.9h (97%)
+Bands CPU%:  red<10 0 jobs (0%)/0.0h (0%)  yellow<20 17 jobs (100%)/56.2h (100%)  green 0 jobs (0%)/0.0h (0%)
+Worst:       35260825 0.1h@20% bdesinghu
+Jobs:        cpu-jobs=17  gpu-jobs=17  gpus=17
 ```
 
 ## Requirements
@@ -193,10 +199,12 @@ With more than one job the table ends in footers:
 
 ```
 Used/GPU-hr:                     3   5      34  14   29.8  ...
-GPU-hours:   586.8 alloc  197.0 used  389.8 idle (66%)
-Bands:       GPU%  red<25 20 jobs (5%)/377.7h (64%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 361 jobs (94%)/208.7h (36%)
-Worst:       36470012 142.9h@0% rrahman  36470013 142.0h@0% rrahman  36471887 27.3h@0% jsmith
-Jobs:        cpu-jobs=384  gpu-jobs=385  gpus=468  no-runtime=2
+GPU-hours:   701.5 alloc  299.0 used  402.5 idle (57%)
+Core-hours:  9875.7 alloc  492.3 used  9383.4 idle (95%)
+Bands GPU%:  red<25 13 jobs (4%)/388.0h (55%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 302 jobs (95%)/313.1h (45%)
+Bands CPU%:  red<10 159 jobs (50%)/6240.6h (63%)  yellow<20 158 jobs (50%)/3303.3h (33%)  green 2 jobs (1%)/331.7h (3%)
+Worst:       35475803 142.9h@0% amazloumi  35476814 142.0h@0% amazloumi  36337781 43.1h@0% amazloumi
+Jobs:        cpu-jobs=319  gpu-jobs=319  gpus=381  no-runtime=4
 ```
 
 **There is no per-job mean**, on purpose. Utilization is bimodal -- jobs cluster
@@ -208,9 +216,14 @@ resource-time. Each column is pooled over the resource *it* measures -- GPU-hour
 for `GPU%`, core-hours for `CPU%`, GB-hours for `MEM%` -- so the row is the real
 utilization of the pool and stays true whatever the distribution looks like.
 
-`Bands:` is the part worth reading. It gives each threshold band's share of the
+Both resources are reported. A GPU job that holds 32 cores and uses two is
+blocking other work from that node, and the GPU lines cannot show it -- above,
+the GPUs were 57% idle while the *cores* were 95% idle. `--gpu` and `--cpu` narrow
+the block to one.
+
+The `Bands` rows are the part worth reading. Each gives a threshold band's share of the
 **jobs** and of the **resource-time**, and the gap between those two numbers is
-the finding: above, 5% of the jobs held 64% of the GPU-hours below 25%. Either
+the finding: above, 4% of the jobs held 55% of the GPU-hours below 25%. Either
 number alone conceals it. `Worst:` then names the biggest offenders, ranked by
 resource-time *wasted* rather than held, so a long job at a mediocre rate
 outranks a short one at zero.
@@ -219,8 +232,9 @@ The cutoffs come from `[thresholds]` in your config -- the same ones that tint
 the cells and colour `jobscope plot`, so the footer is a tally of what you can
 already see.
 
-The **running** view reports the same block over GPU *counts* rather than
-GPU-hours (`Used/GPU:`, `GPUs: 18 alloc ...`). Its numbers are one scrape at a
+The **running** view reports the same block over resource *counts* rather than
+resource-hours (`Used/GPU:`, `GPUs: 20 alloc  17.3 used  2.7 idle (13%)`). `used`
+is fractional there because it is GPU-equivalents busy, not whole GPUs. Its numbers are one scrape at a
 single moment, so weighting them by elapsed time would claim that instant
 represents the whole run; `--avg` folds each job over its runtime and does get
 the hour-based form. A `--cpu` run switches the block to `CPU%` over core-hours.
@@ -244,7 +258,7 @@ other a peak -- so they fall back to the plain per-job figure.
 On a terminal, every `%` cell is tinted by how efficient it is -- **red** below the
 threshold, **yellow** below twice it, **green** above -- so an idle job is a red row
 and a healthy one is green. The pooled footer row is tinted too, and the same
-cutoffs define the `Bands:` tally, so a wasteful selection is obvious at a glance
+cutoffs define the band tallies, so a wasteful selection is obvious at a glance
 and quantified one line below.
 
 The cutoffs are per column and site-tunable in `[thresholds]`, and they are the
