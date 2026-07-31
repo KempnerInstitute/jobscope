@@ -214,9 +214,12 @@ SM_ACT%  15    721.7h    277.5h  444.2h (62%)    48 (11%)/54%   17 (4%)/0%     3
 OCC%     15    721.7h    85.3h   636.5h (88%)    341 (80%)/58%  67 (16%)/34%   17 (4%)/8%
 TENSOR%  15    721.7h    74.1h   647.6h (90%)    421 (99%)/71%  3 (1%)/3%      1 (0%)/26%
 DRAM%    15    721.7h    60.9h   660.8h (92%)    400 (94%)/61%  18 (4%)/36%    7 (2%)/3%
-Worst GPU:   35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 44.7h@0% amazloumi
-Worst CPU:   35475803 2286.6h@0% amazloumi  35476814 2271.9h@0% amazloumi  36337781 715.1h@0% amazloumi
-Worst both:  35475803 35%gpu+24%cpu amazloumi  35476814 35%gpu+24%cpu amazloumi  36337781 11%gpu+7%cpu amazloumi
+Worst GPU:   35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 45.7h@0% amazloumi
+Worst SM:    35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 45.7h@0% amazloumi
+Worst POWER: 35475803 142.9h@73W amazloumi  35476814 142h@73W amazloumi  36337781 45.7h@73W amazloumi
+Worst CPU:   35475803 2286.6h@0% amazloumi  35476814 2271.9h@0% amazloumi  36337781 731.5h@0% amazloumi
+Worst both:  35475803 35%gpu+23%cpu amazloumi  35476814 35%gpu+23%cpu amazloumi  36441613 2%gpu+27%cpu tngotiaoco
+Worst all:   35475803 35%gpu+32%sm+40%pw+23%cpu amazloumi  35476814 35%gpu+32%sm+40%pw+23%cpu amazloumi
 Jobs:        cpu-jobs=319  gpu-jobs=319  gpus=381  no-runtime=5
 ```
 
@@ -255,14 +258,27 @@ line in the block.
 
 The `Worst` rows name the offenders, ranked by resource-time *wasted* rather than
 held, so a long job at a mediocre rate outranks a short one at zero. There is one
-per resource, plus a combined row. GPU-hours and core-hours cannot simply be added
--- any exchange rate between them would be invented, and a wrong one decides the
-answer by itself -- so `Worst both:` expresses each job's waste as a share of the
-selection's total waste in that resource and sums the two shares. Both components
-are printed (`35%gpu+24%cpu`), so you can see which resource put a job on the
-list. Only jobs red in at least one resource are candidates: a 95%-efficient job
-can idle 50 GPU-hours just by being enormous, and there is nothing to act on
-there.
+row per measure -- duty cycle, SM residency, board watts, and the host -- and any
+row with no red job is omitted.
+
+`POWER_W` is graded in **watts**, not percent: below `[thresholds] power_w`
+(default 100) a GPU counts as idle, so its waste is the GPU-hours held while below
+that floor. Watts are the one idle signal a duty cycle cannot fake -- a job holding
+a trivial kernel resident reads busy on `GPU%` while drawing idle watts. On the day
+above the two agreed: the four lowest-power jobs sat at 73-74 W with `GPU% 0` and
+`SM_ACT% 0.0`.
+
+Two combined rows follow. `Worst both:` covers the two distinct *resources*, GPU
+and CPU; `Worst all:` covers all four measures, so a job that looks bad by every
+measure rises -- at the cost that three of its four terms describe the same GPUs,
+which weights GPU idleness 3:1 against CPU idleness. The measures are in different
+units and cannot simply be added -- any exchange rate would be invented, and a
+wrong one decides the ranking by itself -- so each job's waste is expressed as a
+share of the selection's total waste in that measure and the shares are summed.
+Every component is printed (`35%gpu+32%sm+40%pw+23%cpu`), so you can see which
+measure put a job on the list. Only jobs red in at least one measure are
+candidates: a 95%-efficient job can idle 50 GPU-hours just by being enormous, and
+there is nothing to act on there.
 
 The cutoffs come from `[thresholds]` in your config -- the same ones that tint
 the cells and colour `jobscope plot`, so the block is a tally of what you can
@@ -308,6 +324,7 @@ gmem = 20     GMEM%
 cpu = 10      CPU%  (low on purpose -- see below)
 mem = 25      MEM%
 default = 15  every other %-metric (SM_ACT%, OCC%, TENSOR%, DRAM%, ...)
+power_w = 100 POWER_W, in WATTS -- below this a GPU counts as idle
 ```
 
 `cpu` sits below the others because `CPU%` is the share of *allocated* cores a job

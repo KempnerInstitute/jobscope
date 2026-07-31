@@ -24,7 +24,8 @@ ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
 FOOTER_ROWS = {"Mean", "MeanPerGPU", "MeanPerGPUHour", "Jobs",
                "UsedPerGPU", "UsedPerGPUHour", "UsedPerCPU", "UsedPerCPUHour",
                "GPUhours", "GPUs", "Corehours", "Cores",
-               "Worst", "WorstGPU", "WorstCPU", "WorstBoth"}
+               "Worst", "WorstGPU", "WorstCPU", "WorstSM", "WorstPOWER",
+               "WorstBoth", "WorstAll"}
 
 HEAT_MAX_ROWS = 40
 PANEL_CAP = 12

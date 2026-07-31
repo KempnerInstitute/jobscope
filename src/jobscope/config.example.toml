@@ -39,6 +39,13 @@ cpu = 10
 mem = 25
 # Cutoff applied to any other %-metric (e.g. the DCGM utilization columns).
 default = 15
+# POWER_W is graded in WATTS, not percent: a GPU drawing less than this is treated
+# as idle. That is the one idle signal a duty cycle cannot fake -- a job spinning on
+# a trivial kernel reads busy on GPU% while drawing idle watts. Measured on one
+# GPU partition, idle jobs drew 73-74 W (with GPU% 0 and SM_ACT% 0.0), the next
+# values were 99-101 W, and the median was 289 W against a 573 W maximum. Raise it
+# for hardware with a higher idle draw.
+power_w = 100
 
 [defaults]
 # Default number of concurrent Prometheus query-sets for the GPU view.

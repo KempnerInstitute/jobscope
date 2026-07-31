@@ -8,6 +8,7 @@ from jobscope.config import (
     Defaults,
     Thresholds,
     example_config_text,
+    grade_band,
     load_config,
     resolve_prometheus,
 )
@@ -172,7 +173,34 @@ def test_import_site_prometheus_missing_prom_server(tmp_path):
 
 def test_thresholds_red_map():
     red = Thresholds(25, 20, 25, 25, 15).red_map()
-    assert red == {"GPU%": 25, "DUTY%": 25, "GMEM%": 20, "CPU%": 25, "MEM%": 25}
+    assert red == {"GPU%": 25, "DUTY%": 25, "GMEM%": 20, "CPU%": 25, "MEM%": 25,
+                   "POWER_W": 100}          # watts, and defaulted
+
+
+def test_power_is_graded_in_watts_not_percent():
+    """The one graded column that is not a percentage.
+
+    A GPU below the floor is idle, which is the signal a duty cycle cannot fake: a
+    job spinning on a trivial kernel reads busy on GPU% and draws idle watts.
+    """
+    t = Thresholds(25, 20, 10, 25, 15, power_w=100)
+    assert t.grade("POWER_W", 73) == "red"        # measured idle floor
+    assert t.grade("POWER_W", 135) == "yellow"    # below twice the floor
+    assert t.grade("POWER_W", 289) == "green"     # the measured median
+    # Without its own cutoff it would fall to `default`, i.e. 15 *watts*, and
+    # nothing is ever below that -- every job would read green.
+    assert grade_band(73, 15) == "green"
+
+
+def test_power_floor_comes_from_the_config_file(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("[thresholds]\npower_w = 150\n")
+    assert load_config(str(path)).thresholds.power_w == 150.0
+
+
+def test_a_column_with_no_cutoff_and_no_percent_is_ungraded():
+    t = Thresholds(25, 20, 10, 25, 15)
+    assert t.grade("RUNTIME", 5) == "" and t.grade("ENERGY_kWh", 0.3) == ""
 
 
 def test_example_config_text():

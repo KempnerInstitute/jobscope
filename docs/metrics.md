@@ -342,22 +342,58 @@ has no `GPU%` but still has Prometheus data.
 
 The `Worst` rows name the top few jobs by resource-time **wasted**,
 `(1 - u) x weight`, not by resource-time held: a 100-hour job at 24% is a larger
-finding than a 10-hour job at 0%. A row is omitted when no job falls in that
-resource's red band.
+finding than a 10-hour job at 0%. There is one row per measure -- `GPU%`,
+`SM_ACT%`, `POWER_W`, `CPU%` -- and a row is omitted when no job falls in that
+measure's red band. Four rather than every graded column: these say distinct
+things, while the DCGM catalog would add a dozen near-duplicates.
 
-There is one row per reported resource plus `Worst both:`. A combined ranking
-cannot add GPU-hours to core-hours -- any exchange rate is invented, and on a GPU
-cluster a wrong one decides the ranking by itself -- so each job's waste is
-normalised by the selection's own total waste in that resource and the two shares
-are summed:
+### Power, the one metric that is not a percentage
+
+`POWER_W` is graded in watts against `[thresholds] power_w` (default 100). Before
+that existed it fell through to the `%` default of 15 -- 15 *watts* -- so every
+power cell graded green, in the table and in `jobscope plot`.
+
+Its waste is the GPU-hours held while **below** the floor, all of it or none:
 
 ```
-score = idle_gpu / total_idle_gpu  +  idle_cpu / total_idle_cpu
+waste = weight if watts < power_w else 0
 ```
 
-Both components are printed, so the reader sees which resource drove the ranking.
-It is omitted when only one resource wasted anything, since the single-resource
-row already says it.
+A floor asserts idle-or-not, and nothing finer is available. Scaling by how far
+below would imply 50 W wastes twice what 100 W does, and watts are not utilization.
+
+Why include it at all, when it largely agrees with `GPU%`? Because it is the one
+idle signal a duty cycle cannot fake: a job holding a trivial kernel resident reads
+busy on `GPU%` and draws idle watts. Measured over one day on kempner_eng the two
+did agree -- the four lowest-power jobs sat at 73-74 W with `GPU% 0` and
+`SM_ACT% 0.0`, and the top three of every ranking were the same jobs -- but power
+is not a restatement of them: r(POWER, GPU%) = 0.69 and r(POWER, SM_ACT%) = 0.64,
+against r(GPU%, SM_ACT%) = 0.76. It also covers 35 jobs the blob metrics miss (no
+stored blob), though those held only 0.6 of 349.2 GPU-hours.
+
+`POWER_W` gets no stats-table row: `ALLOC` / `USED` / `IDLE` are resource-time and
+"used watts" has no meaning.
+
+### The two combined rows
+
+`Worst both:` ranks over the two distinct resources (`GPU%`, `CPU%`);
+`Worst all:` over all four measures. The measures are in different units --
+GPU-hours, core-hours, GPU-hours below a watt floor -- and cannot be added: any
+exchange rate is invented, and on a GPU cluster a wrong one decides the ranking by
+itself. Each job's waste is therefore normalised by the selection's own total waste
+in that measure and the shares summed:
+
+```
+score = sum over measures of  waste(job, measure) / total_waste(measure)
+```
+
+Every component is printed (`35%gpu+32%sm+40%pw+23%cpu`), so the reader sees which
+measure drove the ranking. A row is omitted when any of its measures wasted
+nothing, since a share of a zero total is undefined.
+
+Note what `Worst all:` costs: three of its four terms describe the same GPUs, so it
+weights GPU idleness roughly 3:1 against CPU idleness. `Worst both:` is the fair
+comparison between resources; `Worst all:` answers "worst by any measure".
 
 Candidates are the jobs red in **at least one** resource, and for those the waste
 in the *other* resource counts too even where they are green there -- it is real

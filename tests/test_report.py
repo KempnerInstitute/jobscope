@@ -751,6 +751,94 @@ def test_narrow_views_show_only_their_own_worst_row():
     assert set(_worst_lines(records)) == {"Worst GPU", "Worst CPU", "Worst both"}
 
 
+def _power_job(jid, seconds, watts, gpu_util=50.0, gpus=1, cores=2, cpu_seconds=None):
+    """A GPU job; `watts` is supplied separately via the DCGM dict."""
+    return _timed_job(jid, seconds, gpu_util=gpu_util, gpus=gpus, cores=cores,
+                      cpu_seconds=cpu_seconds)
+
+
+def _worst_with_power(records, watts, **kw):
+    """Worst rows for `records`, with per-job POWER_W taken from `watts`."""
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view=kw.get("view", "all"), header=True, show_dcgm=True,
+                           time_weighted=kw.get("time_weighted", True)),
+        out, specs=DEFAULT_SPECS)
+    dcgm = {j: ({"POWER_W": watts[j], "SM_ACT%": kw.get("sm", {}).get(j, 50.0)}, {})
+            for j in records}
+    renderer.add(list(records), records, dcgm)
+    renderer.finish()
+    return {ln.split(":")[0]: ln.split(":", 1)[1]
+            for ln in out.getvalue().splitlines() if ln.startswith("Worst")}
+
+
+def test_power_waste_is_gpu_hours_below_the_floor():
+    """A floor asserts idle-or-not, so a job below it wastes all of its GPU-time.
+
+    Scaling by how far below would imply 50 W wastes twice what 100 W does, and
+    watts are not utilization. Ranking is therefore by GPU-hours held while idle.
+    """
+    records = {"long_idle": _power_job("long_idle", 10 * 3600, None),
+               "short_idle": _power_job("short_idle", 3600, None),
+               "busy": _power_job("busy", 50 * 3600, None)}
+    rows = _worst_with_power(records, {"long_idle": 73.0, "short_idle": 73.0,
+                                      "busy": 300.0})
+    power = rows["Worst POWER"]
+    assert power.index("long_idle") < power.index("short_idle")
+    # The 300 W job is green, so it is absent however large it is.
+    assert "busy" not in power
+    # Watts, not percent.
+    assert "@73W" in power and "@73%" not in power
+
+
+def test_a_worst_row_per_named_metric_in_a_fixed_order():
+    # Red in all four, so every row has something to print.
+    records = {"a": _power_job("a", 3600, None, gpu_util=2.0, cpu_seconds=0),
+               "b": _power_job("b", 7200, None, gpu_util=1.0, cpu_seconds=0)}
+    rows = _worst_with_power(records, {"a": 73.0, "b": 74.0}, sm={"a": 1.0, "b": 2.0})
+    assert list(rows) == ["Worst GPU", "Worst SM", "Worst POWER", "Worst CPU",
+                          "Worst both", "Worst all"]
+
+
+def test_the_four_metric_row_prints_every_component_share():
+    records = {"a": _power_job("a", 3600, None, gpu_util=0.0),
+               "b": _power_job("b", 7200, None, gpu_util=0.0)}
+    rows = _worst_with_power(records, {"a": 73.0, "b": 73.0}, sm={"a": 0.0, "b": 0.0})
+    # Four terms, tagged so the reader sees which measure drove the ranking.
+    assert "%gpu+" in rows["Worst all"] and "%sm+" in rows["Worst all"]
+    assert "%pw+" in rows["Worst all"] and "%cpu" in rows["Worst all"]
+    # The two-metric row keeps its two.
+    assert "%sm" not in rows["Worst both"] and "%pw" not in rows["Worst both"]
+
+
+def test_power_gets_no_stats_table_row():
+    """ALLOC / USED / IDLE are resource-time; "used watts" has no meaning."""
+    records = {"a": _power_job("a", 3600, None), "b": _power_job("b", 7200, None)}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=True, show_dcgm=True, time_weighted=True),
+        out, specs=DEFAULT_SPECS)
+    renderer.add(list(records), records,
+                 {j: ({"POWER_W": 73.0, "SM_ACT%": 40.0}, {}) for j in records})
+    renderer.finish()
+    lines = out.getvalue().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("METRIC"))
+    metrics = [ln.split()[0] for ln in lines[start + 1:]
+               if ln and not ln.startswith(("Worst", "Jobs"))]
+    assert "SM_ACT%" in metrics                 # a graded % metric does get a row
+    assert "POWER_W" not in metrics             # an absolute one does not
+
+
+def test_a_metric_with_no_red_job_prints_no_worst_row():
+    records = {"a": _power_job("a", 3600, None, gpu_util=90.0),
+               "b": _power_job("b", 7200, None, gpu_util=80.0)}
+    rows = _worst_with_power(records, {"a": 400.0, "b": 500.0}, sm={"a": 60.0, "b": 70.0})
+    assert "Worst GPU" not in rows and "Worst POWER" not in rows
+    # CPU% is 50 against a cutoff of 10, so that row is absent too, and with no
+    # metric wasting anything the combined rows cannot be computed either.
+    assert rows == {}
+
+
 def test_no_worst_line_when_nothing_is_red():
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 80.0})}
     out = io.StringIO()
@@ -961,12 +1049,20 @@ def test_the_footers_are_tinted_too():
     assert "\033[31m" in pooled
 
 
-def test_non_percent_columns_are_never_tinted(gpu_record):
-    """There is no good or bad wattage, runtime or job id."""
+def test_power_is_tinted_but_runtime_and_ids_are_not(gpu_record):
+    """Wattage does have a good and a bad, unlike a runtime or a job id.
+
+    Power used to fall through to the %-metric default of 15 -- 15 *watts* -- so
+    every job graded green. With a watt floor it grades like any other metric, and
+    a near-idle GPU shows red.
+    """
     records = {"1": _gpu_job("1", {"0": 5.0}), "2": _gpu_job("2", {"0": 95.0})}
     dcgm = {"1": ({"POWER_W": 90.0}, {}), "2": ({"POWER_W": 600.0}, {})}
     text = _render_colored(records, dcgm_data=dcgm, show_dcgm=True)
-    assert "\033[31m90" not in text and "\033[32m600" not in text
+    assert "\033[31m90" in text and "\033[32m600" in text
+    # The identity columns stay plain: there is no good or bad job id or runtime.
+    for plain in ("00:10:00", "alice", "COMPLETED"):
+        assert "\033[31m" + plain not in text and "\033[32m" + plain not in text
 
 
 def test_csv_is_never_tinted():

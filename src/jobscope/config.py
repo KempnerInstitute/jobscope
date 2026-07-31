@@ -37,34 +37,53 @@ DEFAULT_MIN_ELAPSED = "10m"
 # keeps very few: measured over a day on one GPU partition, CPU% had a median of 10
 # and a maximum of 18 across 396 jobs, so a cutoff of 25 put every single job in
 # red and distinguished nothing. 10 places roughly the bottom quartile there.
-DEFAULT_THRESHOLDS = {"gpu": 25.0, "gmem": 20.0, "cpu": 10.0, "mem": 25.0, "default": 15.0}
+#
+# ``power_w`` is the odd one out: watts, not percent. A GPU below it is treated as
+# idle, which is the one signal a duty cycle cannot fake -- a job spinning on a
+# trivial kernel reads busy on GPU% and draws idle watts. 100 sits in the measured
+# gap: on kempner_eng the idle jobs drew 73-74 W with GPU% 0 and SM_ACT% 0.0, the
+# next values were 99-101 W, and the median was 289 W against a 573 W maximum.
+DEFAULT_THRESHOLDS = {"gpu": 25.0, "gmem": 20.0, "cpu": 10.0, "mem": 25.0,
+                      "default": 15.0, "power_w": 100.0}
 
 
 @dataclass(frozen=True)
 class Thresholds:
-    """Red cutoffs (percent) for grading a utilization value."""
+    """Red cutoffs for grading a utilization value: percent, except ``power_w``."""
 
     gpu: float
     gmem: float
     cpu: float
     mem: float
     default: float
+    # Last, and defaulted, so the positional construction elsewhere keeps working.
+    power_w: float = DEFAULT_THRESHOLDS["power_w"]
 
     def red_map(self) -> dict:
-        """Per-header red cutoffs for the graded percent columns."""
+        """Per-header red cutoffs for the graded columns."""
         return {"GPU%": self.gpu, "DUTY%": self.gpu, "GMEM%": self.gmem,
-                "CPU%": self.cpu, "MEM%": self.mem}
+                "CPU%": self.cpu, "MEM%": self.mem, "POWER_W": self.power_w}
 
     def grade(self, header: str, value: Optional[float]) -> str:
-        """``red`` / ``yellow`` / ``green`` for a %-metric, or ``""`` if ungraded.
+        """``red`` / ``yellow`` / ``green`` for a graded metric, or ``""`` if not one.
 
         Lives here so the tables and the charts cannot drift apart: a job shown red
         in `jobscope plot` is red in the report too, and a site that retunes
         ``[thresholds]`` moves both at once.
+
+        Graded when the header has its own cutoff, or is any other %-metric (the
+        DCGM columns, which share ``default``). The named-cutoff case has to come
+        first because POWER_W is in watts and so fails the %-suffix test, yet it is
+        the metric whose grading matters most: low watts is an idle GPU.
         """
-        if value is None or not str(header).endswith("%"):
+        if value is None:
             return ""
-        return grade_band(value, self.red_map().get(header, self.default))
+        red = self.red_map().get(header)
+        if red is None:
+            if not str(header).endswith("%"):
+                return ""
+            red = self.default
+        return grade_band(value, red)
 
 
 def grade_band(value: float, red: float) -> str:
@@ -141,6 +160,7 @@ def load_config(path: Optional[str] = None,
         cpu=float(thr.get("cpu", DEFAULT_THRESHOLDS["cpu"])),
         mem=float(thr.get("mem", DEFAULT_THRESHOLDS["mem"])),
         default=float(thr.get("default", DEFAULT_THRESHOLDS["default"])),
+        power_w=float(thr.get("power_w", DEFAULT_THRESHOLDS["power_w"])),
     )
     defaults = Defaults(
         workers=int(dfl.get("workers", DEFAULT_WORKERS)),
