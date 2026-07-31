@@ -36,7 +36,7 @@ DEFAULT_THRESHOLDS = {"gpu": 25.0, "gmem": 20.0, "cpu": 25.0, "mem": 25.0, "defa
 
 @dataclass(frozen=True)
 class Thresholds:
-    """Red cutoffs (percent) for plot color grading."""
+    """Red cutoffs (percent) for grading a utilization value."""
 
     gpu: float
     gmem: float
@@ -48,6 +48,26 @@ class Thresholds:
         """Per-header red cutoffs for the graded percent columns."""
         return {"GPU%": self.gpu, "DUTY%": self.gpu, "GMEM%": self.gmem,
                 "CPU%": self.cpu, "MEM%": self.mem}
+
+    def grade(self, header: str, value: Optional[float]) -> str:
+        """``red`` / ``yellow`` / ``green`` for a %-metric, or ``""`` if ungraded.
+
+        Lives here so the tables and the charts cannot drift apart: a job shown red
+        in `jobscope plot` is red in the report too, and a site that retunes
+        ``[thresholds]`` moves both at once.
+        """
+        if value is None or not str(header).endswith("%"):
+            return ""
+        return grade_band(value, self.red_map().get(header, self.default))
+
+
+def grade_band(value: float, red: float) -> str:
+    """The band ``value`` falls in: red below ``red``, yellow below twice it."""
+    if value < red:
+        return "red"
+    if value < 2 * red:
+        return "yellow"
+    return "green"
 
 
 @dataclass(frozen=True)

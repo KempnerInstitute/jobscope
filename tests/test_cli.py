@@ -550,3 +550,35 @@ def test_a_bad_configured_floor_blames_the_config():
         build_request(_args(min_elapsed=None), cfg)
     # Not phrased as a bad command line, since the command line was fine.
     assert "config file" in str(exc.value) and "min_elapsed" in str(exc.value)
+
+
+# --- when to tint -----------------------------------------------------------
+
+def _color_args(**kw):
+    base = dict(csv=False, no_color=False)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_color_needs_a_terminal(monkeypatch):
+    """Escape codes in a redirected file are corruption, not decoration."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(cli.sys, "stdout", type("S", (), {"isatty": lambda self: True})())
+    assert cli._want_color(_color_args()) is True
+    monkeypatch.setattr(cli.sys, "stdout", type("S", (), {"isatty": lambda self: False})())
+    assert cli._want_color(_color_args()) is False
+
+
+def test_csv_and_no_color_and_the_env_var_all_disable_it(monkeypatch):
+    monkeypatch.setattr(cli.sys, "stdout", type("S", (), {"isatty": lambda self: True})())
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    assert cli._want_color(_color_args(csv=True)) is False
+    assert cli._want_color(_color_args(no_color=True)) is False
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert cli._want_color(_color_args()) is False
+
+
+def test_a_stdout_without_isatty_is_treated_as_not_a_terminal(monkeypatch):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(cli.sys, "stdout", object())
+    assert cli._want_color(_color_args()) is False

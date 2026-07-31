@@ -135,6 +135,8 @@ def build_parser():
                      help="suppress the header/context block")
     out.add_argument("--csv", action="store_true",
                      help="machine-readable output (pipe to 'jobscope plot')")
+    out.add_argument("--no-color", dest="no_color", action="store_true",
+                     help="never tint utilization cells (also respects $NO_COLOR)")
     out.add_argument("--step", type=int, default=None, metavar="SECONDS",
                      help="--ts sample interval (default: the scrape interval, widened on "
                           "long jobs to stay under Prometheus' point cap)")
@@ -347,6 +349,17 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
     )
 
 
+def _want_color(args) -> bool:
+    """Whether to tint the table.
+
+    Only for a table on a terminal: escape codes in a CSV or a redirected file are
+    corruption, not decoration, and $NO_COLOR is the cross-tool way to say no.
+    """
+    if args.csv or args.no_color or os.environ.get("NO_COLOR"):
+        return False
+    return bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+
 def handle_report(args) -> None:
     """The one data path: select jobs, then render at the chosen granularity."""
     cfg = _apply_config(args)
@@ -366,7 +379,8 @@ def handle_report(args) -> None:
         view=view, show_dcgm=show_dcgm, diagnose=diagnose, csv=args.csv,
         header=args.header,
         min_runtime=(args.diag_short if args.diag_short is not None
-                     else cfg.defaults.min_runtime))
+                     else cfg.defaults.min_runtime),
+        color=_want_color(args), thresholds=cfg.thresholds)
 
     if args.ts:
         # The series is per-GPU per-scrape and carries no host or advisory columns,

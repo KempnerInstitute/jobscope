@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from .blob import blob_detail, blob_metrics
+from .config import Thresholds
 from .dcgm import (
     ALL_SPECS,
     DCGM_BLOB_HEADERS,
@@ -145,6 +146,13 @@ SUMMARY_DESCRIPTIONS: List[Tuple[str, str, str]] = [
 ]
 
 
+# SGR codes for the utilization grades. Raw escapes rather than rich, because the
+# report path is the common one and should not import a rendering library to print
+# a table; plot pays for rich because it needs it.
+_SGR = {"red": "\033[31m", "yellow": "\033[33m", "green": "\033[32m"}
+_RESET = "\033[0m"
+
+
 @dataclass
 class RenderOptions:
     """Flags shared by the rendering functions."""
@@ -155,6 +163,10 @@ class RenderOptions:
     csv: bool = False
     header: bool = True
     min_runtime: int = 180
+    # Tint %-metric cells by their threshold band. Off unless the caller has
+    # established that the destination is a terminal that wants colour.
+    color: bool = False
+    thresholds: Optional["Thresholds"] = None
 
 
 def fmt_context(label: str, value: str) -> str:
@@ -253,8 +265,30 @@ class SummaryRenderer:
         self.gpu_counts = set()     # distinct GPU counts, to know if weighting matters
         self._started = False
 
-    def _line(self, row: dict) -> str:
-        return " ".join(c.fmt.format(str(row.get(c.header, ""))) for c in self.columns)
+    def _line(self, row: dict, color: bool = True) -> str:
+        """One rendered row, tinted by grade when the options ask for it.
+
+        The escape codes wrap the *padded* cell, never the value: inserting them
+        first would make str.format count them toward the column width and skew
+        every column to the right of the first coloured one.
+        """
+        cells = []
+        for col in self.columns:
+            text = col.fmt.format(str(row.get(col.header, "")))
+            band = self._band(col.header, row.get(col.header)) if color else ""
+            cells.append(_SGR[band] + text + _RESET if band else text)
+        return " ".join(cells)
+
+    def _band(self, header: str, cell) -> str:
+        """The grade for a rendered cell, or "" when it is not a graded metric."""
+        options = self.options
+        if not options.color or options.thresholds is None:
+            return ""
+        try:
+            value = float(cell)
+        except (TypeError, ValueError):      # "-", "", a job name, a runtime
+            return ""
+        return options.thresholds.grade(header, value)
 
     def _start(self) -> None:
         if self._started:
@@ -269,7 +303,8 @@ class SummaryRenderer:
         else:
             for label, value in self.context:
                 print(fmt_context(label, value), file=self.out)
-            header_line = self._line({c.header: c.header for c in self.columns})
+            header_line = self._line({c.header: c.header for c in self.columns},
+                                     color=False)
             print(header_line, file=self.out)
             print("-" * len(header_line), file=self.out)
 
@@ -386,8 +421,8 @@ class SummaryRenderer:
         else:
             mean_row["JOBID"] = "Mean:"
             if options.header:
-                print("-" * len(self._line({c.header: c.header for c in self.columns})),
-                      file=self.out)
+                print("-" * len(self._line({c.header: c.header for c in self.columns},
+                                           color=False)), file=self.out)
             print(self._line(mean_row), file=self.out)
             if weighted_row is not None:
                 weighted_row["JOBID"] = "Mean/GPU:"

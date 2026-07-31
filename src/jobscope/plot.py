@@ -138,15 +138,15 @@ def is_pct(header):
 
 
 def grade(header, value, red_map, default_red):
-    """Color name for a %-metric value (rich/plotext share these names)."""
+    """Color name for a %-metric value (rich/plotext share these names).
+
+    The bands come from config.grade_band, shared with the report tables so a job
+    is graded the same whether it is charted or printed. "white" here rather than
+    "" because rich and plotext both want an explicit style.
+    """
     if value is None or not is_pct(header):
         return "white"
-    red = red_map.get(header, default_red)
-    if value < red:
-        return "red"
-    if value < 2 * red:
-        return "yellow"
-    return "green"
+    return config.grade_band(value, red_map.get(header, default_red))
 
 
 def detect_kind(columns):

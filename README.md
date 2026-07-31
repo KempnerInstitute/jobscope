@@ -200,6 +200,30 @@ them as jobs.
 - `--dcgm` widens the profiling block to the full catalog.
 - `--diagnose` appends the advisory `DIAG` column.
 
+### Highlighting
+
+On a terminal, every `%` cell is tinted by how efficient it is -- **red** below the
+threshold, **yellow** below twice it, **green** above -- so an idle job is a red row
+and a healthy one is green. The `Mean:` footers are tinted too, which makes a
+wasteful selection obvious at a glance.
+
+The cutoffs are per column and site-tunable in `[thresholds]`, and they are the
+same ones `jobscope plot` grades with, so a job red in a chart is red in the table:
+
+```
+gpu = 25      GPU% red below this, yellow below 50
+gmem = 20     GMEM%
+cpu = 25      CPU%
+mem = 25      MEM%
+default = 15  every other %-metric (SM_ACT%, OCC%, TENSOR%, DRAM%, ...)
+```
+
+Colour is dropped automatically when the output is not a terminal, with `--csv`,
+under `$NO_COLOR`, or with `--no-color` -- escape codes in a redirected file are
+corruption, not decoration. For *why* a job is inefficient rather than just that it
+is, add `--diagnose`, which tags each job `idle` / `underfed` / `low-occ` /
+`mem-bound` / `no-tensor` / `ok`.
+
 ## Utilities
 
 | Command | Purpose |

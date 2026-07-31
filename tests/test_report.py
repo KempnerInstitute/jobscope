@@ -490,3 +490,95 @@ def test_plot_skips_the_weighted_footer_too():
                    RenderOptions(view="all", show_dcgm=False, csv=True, header=True))
     _, rows = plot.parse_csv(io.StringIO(text))
     assert {r["JOBID"] for r in rows} == {"1", "2"}
+
+
+# --- highlighting efficient and inefficient jobs ----------------------------
+
+import re as _re  # noqa: E402
+
+_ESC = _re.compile(r"\033\[[0-9;]*m")
+
+
+def _thresholds():
+    from jobscope.config import Thresholds
+    return Thresholds(gpu=25, gmem=20, cpu=25, mem=25, default=15)
+
+
+def _render_colored(records, color=True, csv=False, dcgm_data=None, show_dcgm=False):
+    options = RenderOptions(view="all", show_dcgm=show_dcgm, csv=csv, header=True,
+                            color=color, thresholds=_thresholds())
+    return _render(summarize, list(records), records, dcgm_data or {}, CTX, options)
+
+
+def test_no_color_by_default(gpu_record):
+    """RenderOptions must not tint unless a caller has decided the sink wants it."""
+    text = _render(summarize, ["100"], {"100": gpu_record}, {}, CTX,
+                   RenderOptions(view="all", show_dcgm=False, header=True))
+    assert "\033[" not in text
+
+
+def test_low_utilization_is_red_and_high_is_green():
+    records = {"1": _gpu_job("1", {"0": 5.0}), "2": _gpu_job("2", {"0": 95.0})}
+    lines = {r.split()[0]: r for r in _render_colored(records).splitlines()
+             if r and r.split()[0] in ("1", "2")}
+    assert "\033[31m5" in lines["1"]        # GPU% 5 is below the red cutoff of 25
+    assert "\033[32m95" in lines["2"]       # 95 is at least twice it, so green
+
+
+def test_the_middle_band_is_yellow():
+    records = {"1": _gpu_job("1", {"0": 30.0}), "2": _gpu_job("2", {"0": 95.0})}
+    row = [r for r in _render_colored(records).splitlines() if r.startswith("1 ")][0]
+    assert "\033[33m30" in row             # >= 25 but < 50
+
+
+def test_color_does_not_shift_the_columns():
+    """The escapes wrap the padded cell, so stripping them restores the plain row.
+
+    Tinting the value instead would make str.format count the escape bytes toward
+    the column width and skew everything to its right.
+    """
+    records = {"1": _gpu_job("1", {"0": 5.0}), "2": _gpu_job("2", {"0": 95.0})}
+    assert _ESC.sub("", _render_colored(records)) == _render_colored(records, color=False)
+
+
+def test_the_header_and_rules_stay_plain():
+    records = {"1": _gpu_job("1", {"0": 5.0}), "2": _gpu_job("2", {"0": 95.0})}
+    for line in _render_colored(records).splitlines():
+        if line.startswith("JOBID") or set(line.strip()) == {"-"}:
+            assert "\033[" not in line
+
+
+def test_the_footers_are_tinted_too():
+    """A red Mean row is the fastest read on whether a selection is wasteful."""
+    records = {"1": _gpu_job("1", {"0": 2.0}), "2": _gpu_job("2", {"0": 4.0})}
+    mean = [r for r in _render_colored(records).splitlines() if r.startswith("Mean:")][0]
+    assert "\033[31m" in mean
+
+
+def test_non_percent_columns_are_never_tinted(gpu_record):
+    """There is no good or bad wattage, runtime or job id."""
+    records = {"1": _gpu_job("1", {"0": 5.0}), "2": _gpu_job("2", {"0": 95.0})}
+    dcgm = {"1": ({"POWER_W": 90.0}, {}), "2": ({"POWER_W": 600.0}, {})}
+    text = _render_colored(records, dcgm_data=dcgm, show_dcgm=True)
+    assert "\033[31m90" not in text and "\033[32m600" not in text
+
+
+def test_csv_is_never_tinted():
+    records = {"1": _gpu_job("1", {"0": 5.0}), "2": _gpu_job("2", {"0": 95.0})}
+    assert "\033[" not in _render_colored(records, csv=True)
+
+
+def test_missing_values_are_not_tinted():
+    records = {"1": _gpu_job("1", None), "2": _gpu_job("2", {"0": 95.0})}
+    row = [r for r in _render_colored(records).splitlines() if r.startswith("1 ")][0]
+    assert "\033[" not in row.split("COMPLETED")[1].split("50")[0] or "-" in row
+
+
+def test_the_table_and_the_charts_grade_alike():
+    """One rule, so a job red in a chart is red in the table."""
+    from jobscope import plot
+    thresholds = _thresholds()
+    red_map, default = thresholds.red_map(), thresholds.default
+    for header in ("GPU%", "GMEM%", "CPU%", "SM_ACT%"):
+        for value in (0, 10, 24, 25, 40, 49, 50, 99):
+            assert thresholds.grade(header, value) == plot.grade(header, value, red_map, default)
