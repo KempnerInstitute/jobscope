@@ -281,7 +281,11 @@ at all, so it is dropped from the row and counted as `no-runtime=N` in the
 ### The efficiency block
 
 One table row per graded metric, in the same order as the columns above it, so
-the block cannot drift from the table it summarizes. The set follows the view:
+the block cannot drift from the table it summarizes. It prints for a **single job**
+as well, where each metric shows a single `1` in the band its value falls in -- the
+job row gives the numbers, the table says where they sit. For one job the rest of
+the block is suppressed: the pooled row would repeat that job's own row, a `Worst`
+row would name it again, and every job count would be 1. The set follows the view:
 eight rows by default, `CPU%`/`MEM%` under `--cpu`, six under `--gpu`, the full
 catalog (18) under `--dcgm`. A metric that no job reported is omitted rather than
 printed as zeros, which would read as "nothing used it" instead of "nothing

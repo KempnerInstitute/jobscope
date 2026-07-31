@@ -250,16 +250,52 @@ def test_summary_renderer_two_adds_equals_summarize_csv(gpu_record):
     assert len(rows) == 2  # footer rows dropped by the parser
 
 
-def test_summary_renderer_single_row_no_footer(gpu_record, cpu_record):
-    # The second chunk is filtered out by the gpu view, so only one row renders
-    # and the whole footer block must stay suppressed.
+def test_a_single_job_gets_the_metric_table_but_not_the_rest(gpu_record, cpu_record):
+    """The table is how you see which band one job's numbers fall in.
+
+    The rest of the block says nothing for a lone job: the pooled row is that job's
+    own row repeated, a Worst row names it again, and every job count is 1.
+    """
+    # The second chunk is filtered out by the gpu view, so only one row renders.
     options = RenderOptions(view="gpu", show_dcgm=False, csv=False, header=True)
     streamed = _render_stream(report.SummaryRenderer, CTX, options,
                               [(["100"], {"100": gpu_record}, {}),
                                (["200"], {"200": cpu_record}, {})])
     assert "100" in streamed
-    for label in ("Used/", "GPUs:", "Bands:", "Worst:", "Jobs:"):
+    assert "METRIC" in streamed and "GPU%" in streamed        # the table prints
+    assert "red below 10%" in streamed                        # and its legend
+    for label in ("Used/", "Worst", "Jobs:"):
         assert label not in streamed
+
+
+def test_a_single_job_lands_in_exactly_one_band_per_metric():
+    """Which is the point: one job, so each metric has a single 1 and two 0s."""
+    records = {"1": _gpu_job("1", {"0": 90.0})}               # GPU% 90, CPU% 50
+    rows = _stat_rows(records)
+    assert rows["GPU%"][1:] == ["0", "0", "1"]                # green
+    assert rows["MEM%"][1:] == ["0", "0", "1"]                # 50% -> green
+    assert rows["GPU%"][0].endswith("(10%)")                  # and 10% of it idle
+
+
+def test_a_single_job_still_emits_its_stat_rows_in_csv():
+    records = {"1": _gpu_job("1", {"0": 90.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="gpu", csv=True, header=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    labels = [ln.split(",")[0] for ln in out.getvalue().splitlines()]
+    assert "StatGPU%" in labels
+    assert not any(la.startswith(("UsedPer", "Worst", "Jobs")) for la in labels)
+    # And plot still sees exactly the one job row.
+    _, parsed = plot.parse_csv(io.StringIO(out.getvalue()))
+    assert [r["JOBID"] for r in parsed] == ["1"]
+
+
+def test_sub_tenth_amounts_are_not_printed_as_zero():
+    """"0h (22%)" reads as nothing idle; the two halves of the cell must agree."""
+    records = {"1": _timed_job("1", 60, gpu_util=78.0)}       # 0.013 GPU-h idle
+    assert _stat_rows(records, view="gpu", time_weighted=True)["GPU%"][0] == "<0.1h (22%)"
 
 
 def test_summary_renderer_all_filtered_empty_message(cpu_record):

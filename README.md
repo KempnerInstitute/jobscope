@@ -202,7 +202,7 @@ JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR% 
 beside `SM_ACT%` deliberately: a GPU job whose `GPU%` is low and `CPU%` is high is
 held up on the host, and no single view used to show both.
 
-With more than one job the table ends in footers:
+With more than one job the table ends in a summary block:
 
 ```
 Used/GPU-hr:                              5      4            43   30     37.5  11.4  9.9  8.2  272
@@ -335,6 +335,32 @@ than `gpu-jobs=` -- a job with no stored blob still has Prometheus data.
 `ENERGY_kWh` and `PWRmax_W` have no pooled form -- one is a per-job total and the
 other a peak -- so they fall back to the plain per-job figure.
 `jobscope plot` skips every footer rather than charting them as jobs.
+
+### A single job gets the table too
+
+`jobscope <jobid>` prints the metric table for that one job, which is how you see
+which band each of its numbers falls in -- the row itself gives the values but not
+where they sit:
+
+```
+$ jobscope 35244230
+35244230     bdesinghu    COMPLETED 1     11     3      1     78     2       64.3  ...
+METRIC   IDLE          RED  YELLOW  GREEN
+CPU%     1.1h (89%)    0    1       0
+MEM%     9.8GBh (97%)  1    0       0
+GPU%     <0.1h (22%)   0    0       1
+GMEM%    0.2h (98%)    1    0       0
+SM_ACT%  0.1h (36%)    0    0       1
+OCC%     0.1h (86%)    0    1       0
+TENSOR%  0.2h (97%)    1    0       0
+DRAM%    0.1h (91%)    1    0       0
+```
+
+One job, so each metric has a single `1` marking its band: this one used its GPU
+and its SMs well, was middling on cores and occupancy, and barely touched the GPU
+memory or the tensor cores. The rest of the block is suppressed, because for one job
+the pooled row is that job's own row repeated, a `Worst` row names it again, and
+every job count is 1.
 
 - `--cpu` narrows to the host columns. For *finished* jobs that needs no Prometheus
   at all; a running job's `CPU%` comes from `cgroup_*`, so it does.

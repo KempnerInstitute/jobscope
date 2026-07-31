@@ -421,7 +421,11 @@ class EfficiencyTally:
         unit -- deciding per value printed "126.5TBh allocated, 5414.7GBh used".
         """
         scale, unit = self._unit()
-        return ("%.1f" % (weight / scale)).removesuffix(".0") + unit
+        value = weight / scale
+        if 0 < value < 0.05:
+            # Would print as "0", which reads as nothing beside its own "(22%)".
+            return "<0.1" + unit
+        return ("%.1f" % value).removesuffix(".0") + unit
 
     def _unit(self) -> Tuple[float, str]:
         """``(divisor, suffix)`` for this tally's amounts, promoting GB to TB."""
@@ -751,8 +755,11 @@ class SummaryRenderer:
             if options.header and not options.csv:
                 print("  (no GPU jobs in this selection)", file=self.out)
             return
-        if self.count == 1:
-            return
+        # A single job still gets the metric table: it is how you see which band each
+        # of its numbers falls in, which the row itself cannot say. What it does not
+        # get is the rest of the block -- for one job the pooled row is that job's own
+        # row repeated, a Worst row names it again, and the job counts are all 1.
+        alone = self.count == 1
 
         # The single aggregate row: each column pooled over the resource it
         # measures, so it reads "of all the GPU-hours (or GPUs, or core-hours) this
@@ -824,12 +831,15 @@ class SummaryRenderer:
             return ([label] + cells + [""] * len(self.headers))[:len(self.headers)]
 
         if options.csv:
-            used_row["JOBID"] = lead.csv_row if lead else "Used"
-            self.writer.writerow([used_row[h] for h in self.headers])
+            if not alone:
+                used_row["JOBID"] = lead.csv_row if lead else "Used"
+                self.writer.writerow([used_row[h] for h in self.headers])
             for one in stats:
                 # "Stat<METRIC>": parse_csv skips the prefix, since the metric set is
                 # open-ended (18 columns under --dcgm) and cannot be enumerated.
                 self.writer.writerow(padded("Stat" + one.header, one.csv_cells()))
+            if alone:
+                return
             for one in worst:
                 self.writer.writerow(padded("Worst" + _worst_slug(one.header), [
                     "%s=%s@%d%s" % (jid, one._amount(weight), round(value),
@@ -846,9 +856,12 @@ class SummaryRenderer:
             if options.header:
                 print("-" * len(self._line({c.header: c.header for c in self.columns},
                                            color=False)), file=self.out)
-            print(self._line(used_row), file=self.out)
+            if not alone:
+                print(self._line(used_row), file=self.out)
             for line in self._stat_table(stats):
                 print(line, file=self.out)
+            if alone:
+                return
             # Labels now carry counts, so their widths vary; pad them all (and
             # Jobs:) to one width so the job lists still line up under each other.
             rows_out = [("Worst %s (%d/%d):" % (_worst_slug(one.header),
