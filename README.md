@@ -238,8 +238,8 @@ Worst GPU (3/318):    36337781 48h@0% amazloumi  36358839 11.8h@0% amazloumi
 Worst SM (33/424):    36337781 48h@0% amazloumi  36358839 11.8h@0% amazloumi
 Worst POWER (39/424): 36337781 48h@73W amazloumi  36358839 11.8h@74W amazloumi
 Worst CPU (155/318):  36337781 768.2h@0% amazloumi  36358839 189.1h@0% amazloumi
-Worst both (3):       36337781 38%gpu+14%cpu  36358839 9%gpu+3%cpu
-Worst all (2):        36337781 38%gpu+28%sm+65%pw+14%cpu  36358839 9%gpu+7%sm+16%pw+3%cpu
+Worst both (3):       36337781 gpu0 cpu0  36358839 gpu0 cpu0
+Worst all (2):        36337781 gpu0 sm0 pw73W cpu0  36358839 gpu0 sm0 pw74W cpu0
 Jobs:                 cpu-jobs=318  gpu-jobs=318  gpus=381  no-runtime=4
 ```
 

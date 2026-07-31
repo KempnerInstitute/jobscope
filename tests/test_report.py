@@ -894,6 +894,49 @@ def test_every_graded_column_gets_a_row_in_column_order():
     assert "ENGINE%" in wide and "ENGINE%" not in rows
 
 
+def test_a_job_with_no_stored_blob_votes_in_no_tally():
+    """Half-measured jobs made the denominators disagree.
+
+    A finished job with no AdminComment has DCGM numbers but no CPU%/MEM%/GPU%/GMEM%.
+    Feeding it to the DCGM tallies alone put SM_ACT% over 117 jobs while GPU% had 88
+    on one partition, so the two Worst rows could not be compared. It is excluded
+    from every tally and counted as no-blob, staying in the listing as a real job.
+    """
+    good = _gpu_job("good", {"0": 90.0})
+    blank = dataclasses.replace(_gpu_job("blank", {"0": 5.0}), stats={})
+    records = {"good": good, "blank": blank}
+    dcgm = {j: ({"SM_ACT%": 5.0}, {}) for j in records}
+    rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
+    # One denominator everywhere: only the blob-having job voted.
+    for metric in ("GPU%", "SM_ACT%"):
+        red, yellow, green = (int(c) for c in rows[metric][1:])
+        assert red + yellow + green == 1, (metric, rows[metric])
+    # And it is still rendered, with the omission stated.
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=True, show_dcgm=True), out,
+        specs=DEFAULT_SPECS)
+    renderer.add(list(records), records, dcgm)
+    renderer.finish()
+    text = out.getvalue()
+    assert "blank" in text and "no-blob=1" in text
+
+
+def test_a_blob_without_gpu_data_still_votes():
+    """The exclusion is for a *missing* blob, not a CPU-only one.
+
+    A CPU-only job legitimately has no GPU% and must still count toward CPU%,
+    otherwise the whole CPU side of a mixed partition would vanish.
+    """
+    records = {"cpu_only": _gpu_job("cpu_only", None),
+               "gpu": _gpu_job("gpu", {"0": 90.0})}
+    rows = _stat_rows(records)
+    cpu_red, cpu_yellow, cpu_green = (int(c) for c in rows["CPU%"][1:])
+    assert cpu_red + cpu_yellow + cpu_green == 2      # both jobs voted on CPU%
+    gpu_red, gpu_yellow, gpu_green = (int(c) for c in rows["GPU%"][1:])
+    assert gpu_red + gpu_yellow + gpu_green == 1      # only one has a GPU%
+
+
 def test_a_metric_no_job_reported_is_omitted():
     """A row of zeros would read as "nothing used it", not "nothing measured it"."""
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
@@ -1008,19 +1051,23 @@ def test_the_combined_worst_requires_red_in_every_metric():
     assert "gpuhog" not in combined and "cpuhog" not in combined
 
 
-def test_the_combined_worst_normalizes_each_metric():
-    """Shares, not raw amounts: GPU-hours and core-hours cannot be added.
+def test_the_combined_worst_orders_by_normalized_waste_and_shows_values():
+    """Ranked by summed waste share, but the cells print the qualifying values.
 
-    Two jobs red in both, one wasting twice the resource of the other, so the
-    normalized shares are 2:1 and the order follows.
+    A share written "12%gpu" reads exactly like a utilization of 12%, which inverts
+    the meaning: every value on the row is *below* its cutoff. So the order carries
+    the ranking and the cells say why each job is there.
     """
     records = {"big": _timed_job("big", 3600, gpu_util=0.0, gpus=8, cores=8,
                                  cpu_seconds=0),
                "small": _timed_job("small", 3600, gpu_util=0.0, gpus=4, cores=4,
                                    cpu_seconds=0)}
     combined = _worst_lines(records)["Worst both"]
+    # big wastes twice the resource, so it leads.
     assert combined.index("big") < combined.index("small")
-    assert "big 67%gpu+67%cpu" in combined and "small 33%gpu+33%cpu" in combined
+    # And the cells are the values, not shares: both ran at 0%.
+    assert "big gpu0 cpu0" in combined and "small gpu0 cpu0" in combined
+    assert "%gpu" not in combined
 
 
 def test_a_job_green_in_one_metric_is_absent_from_the_combined_rows():
@@ -1113,11 +1160,12 @@ def test_the_four_metric_row_prints_every_component_share():
     records = {"a": _power_job("a", 3600, None, gpu_util=0.0, cpu_seconds=0),
                "b": _power_job("b", 7200, None, gpu_util=0.0, cpu_seconds=0)}
     rows = _worst_with_power(records, {"a": 73.0, "b": 73.0}, sm={"a": 0.0, "b": 0.0})
-    # Four terms, tagged so the reader sees which measure drove the ranking.
-    assert "%gpu+" in rows["Worst all"] and "%sm+" in rows["Worst all"]
-    assert "%pw+" in rows["Worst all"] and "%cpu" in rows["Worst all"]
-    # The two-metric row keeps its two.
-    assert "%sm" not in rows["Worst both"] and "%pw" not in rows["Worst both"]
+    # Four tagged values, each under its cutoff -- which is why the job qualified.
+    # Power carries its unit, since watts are not a percentage.
+    assert "gpu0 sm0 pw73W cpu0" in rows["Worst all"]
+    # The two-metric row names only its two.
+    assert "gpu0 cpu0" in rows["Worst both"]
+    assert "sm" not in rows["Worst both"] and "pw" not in rows["Worst both"]
 
 
 def test_power_gets_no_stats_table_row():

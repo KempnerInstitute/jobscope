@@ -270,6 +270,23 @@ _SHARE_TAG = {"GPU%": "gpu", "SM_ACT%": "sm", "POWER_W": "pw", "CPU%": "cpu"}
 _WORST_SLUG = {"GPU%": "GPU", "SM_ACT%": "SM", "POWER_W": "POWER", "CPU%": "CPU"}
 
 
+def _combined_cell(jid: str, values, tallies) -> str:
+    """One job on a combined row: its value in each of the row's metrics.
+
+    The values, not the waste shares that decide the order. A share written "12%gpu"
+    reads exactly like a utilization of 12%, which is the opposite of what puts a job
+    on the row -- every value here is *under* its cutoff. Showing the values says why
+    the job qualified; the order still says how much it wasted.
+    """
+    parts = []
+    for header, value in values:
+        if value is None:
+            continue
+        unit = "W" if tallies[header].value_unit == "W" else ""
+        parts.append("%s%d%s" % (_SHARE_TAG[header], round(value), unit))
+    return "%s %s" % (jid, " ".join(parts))
+
+
 def _worst_slug(header: str) -> str:
     """Row-label form of a metric name, e.g. ``SM_ACT%`` -> ``SM``."""
     return _WORST_SLUG.get(header, header.rstrip("%"))
@@ -520,12 +537,14 @@ class SummaryRenderer:
         self.durations = set()      # distinct runtimes, likewise
         self.gpu_total = 0          # GPUs across the selection, for the Jobs footer
         self.unweighted = 0         # jobs left out of the weighting for want of a runtime
+        self.no_blob = 0            # jobs with no stored blob, excluded from every tally
         # {jobid: ({header: wasted}, user, {headers it is red in})} for jobs red in
         # at least one graded
         # metric, which is what the combined rankings need: a share cannot be taken
         # until the selection's totals are known, so the candidates must be kept.
         # Bounded by the red jobs, not the selection -- on a healthy partition, few.
-        self.waste: Dict[str, Tuple[Dict[str, float], str, frozenset]] = {}
+        self.waste: Dict[str, Tuple[Dict[str, float], str, frozenset,
+                                    Dict[str, float]]] = {}
         # One tally per graded column, so every metric on screen gets a summary and
         # the set follows the view for free: 8 by default, CPU%/MEM% under --cpu,
         # 6 under --gpu, the full catalog under --dcgm. Under time weighting the
@@ -639,7 +658,7 @@ class SummaryRenderer:
             if tally.band_of(value) == "red":
                 red.add(header)
         if red:
-            self.waste[jid] = (wasted, user, frozenset(red))
+            self.waste[jid] = (wasted, user, frozenset(red), dict(values))
 
     def _combined_worst(self, headers: Tuple[str, ...]
                         ) -> List[Tuple[float, str, str, List[Tuple[str, float]]]]:
@@ -664,7 +683,7 @@ class SummaryRenderer:
             # zero total is undefined and the metric's own row already says so.
             return []
         scored = []
-        for jid, (wasted, user, red) in self.waste.items():
+        for jid, (wasted, user, red, values) in self.waste.items():
             if not set(headers) <= red:
                 # Red in *every* metric of the row, not any of them. An OR let a job
                 # that merely wasted some GPU-time onto the four-metric list while
@@ -672,13 +691,14 @@ class SummaryRenderer:
                 # "idle by every measure we have", which is the unambiguous case.
                 continue
             shares = [(h, wasted.get(h, 0.0) / t.waste_total) for h, t in tallies]
-            scored.append((sum(v for _h, v in shares), jid, user, shares))
+            scored.append((sum(v for _h, v in shares), jid, user,
+                           [(h, values.get(h)) for h, _t in tallies]))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return scored[:EfficiencyTally.WORST]
 
     def _combined_candidates(self, headers: Tuple[str, ...]) -> int:
         """How many jobs are red in *all* of ``headers``."""
-        return sum(1 for _w, _u, red in self.waste.values() if set(headers) <= red)
+        return sum(1 for _w, _u, red, _v in self.waste.values() if set(headers) <= red)
 
     def add(self, jobids: List[str], records: Dict[str, JobRecord],
             dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
@@ -738,17 +758,26 @@ class SummaryRenderer:
             # One value map for every graded metric, built once both the blob and
             # the DCGM values are in hand, and shared by the tallies and the waste
             # bookkeeping so the two cannot disagree about what a job scored.
-            values = {}
-            for header in self.tallies:
-                value = _blob_value(metrics, header)
-                if value is None and header in self.dcgm_headers and do_dcgm:
-                    value = dcgm_data.get(jid, ({}, {}))[0].get(header)
-                if value is not None:
-                    values[header] = value
-            for header, tally in self.tallies.items():
-                tally.add(jid, row["USER"], values.get(header),
-                          weights[tally.weight_key])
-            self._note_waste(jid, row["USER"], values, weights)
+            if metrics is None:
+                # No stored blob, so the job is only half measured: it has DCGM
+                # numbers but no CPU%/MEM%/GPU%/GMEM%. Feeding it to the DCGM tallies
+                # alone made their denominators disagree with the blob ones -- 117
+                # against 88 on one partition -- and a job cannot be compared with
+                # the rest on a metric it has no value for. It stays in the listing,
+                # since it is a real job; it just does not vote.
+                self.no_blob += 1
+            else:
+                values = {}
+                for header in self.tallies:
+                    value = _blob_value(metrics, header)
+                    if value is None and header in self.dcgm_headers and do_dcgm:
+                        value = dcgm_data.get(jid, ({}, {}))[0].get(header)
+                    if value is not None:
+                        values[header] = value
+                for header, tally in self.tallies.items():
+                    tally.add(jid, row["USER"], values.get(header),
+                              weights[tally.weight_key])
+                self._note_waste(jid, row["USER"], values, weights)
             if options.csv:
                 self.writer.writerow([row[h] for h in self.headers])
             else:
@@ -831,6 +860,8 @@ class SummaryRenderer:
                 counts.append("gpus=%d" % self.gpu_total)
         if self.unweighted:
             counts.append("no-runtime=%d" % self.unweighted)
+        if self.no_blob:
+            counts.append("no-blob=%d" % self.no_blob)
 
         def padded(label, cells):
             """A footer row padded to the header width, so the CSV stays rectangular.
@@ -854,9 +885,8 @@ class SummaryRenderer:
                     for _idle, jid, _user, weight, value in one.worst]))
             for name, _hs, rows in combined:
                 self.writer.writerow(padded("Worst" + name.capitalize(), [
-                    "%s=%s" % (jid, "+".join("%d" % round(100 * share)
-                                             for _h, share in shares))
-                    for _score, jid, _user, shares in rows]))
+                    _combined_cell(jid, values, self.tallies).replace(" ", "=", 1)
+                    for _score, jid, _user, values in rows]))
             self.writer.writerow(padded("Jobs", counts))
         else:
             # Three sections, because the block answers three questions: how was each
@@ -874,14 +904,11 @@ class SummaryRenderer:
                 for name, headers, ranked in combined:
                     # No denominator here: a row spanning metrics with different
                     # coverage has no single honest total, so only the candidate count
-                    # is shown. No username either, unlike the per-metric rows: with
-                    # four component shares the line runs past the table width, and
-                    # the same job ids appear above with their owners.
+                    # is shown. No username either, unlike the per-metric rows: the
+                    # same job ids appear above with their owners.
                     cells = "  ".join(
-                        "%s %s" % (jid, "+".join(
-                            "%d%%%s" % (round(100 * share), _SHARE_TAG[h])
-                            for h, share in shares))
-                        for _score, jid, _user, shares in ranked)
+                        _combined_cell(jid, values, self.tallies)
+                        for _score, jid, _user, values in ranked)
                     rows_out.append(("Worst %s (%d):" % (
                         name, self._combined_candidates(headers)), cells))
                 rows_out.append(("Jobs:", "  ".join(counts)))

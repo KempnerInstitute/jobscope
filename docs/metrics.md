@@ -401,9 +401,14 @@ that metric's pooled grade. Colour is dropped for `--csv`, a non-tty and
 `$NO_COLOR`, and the plain output is the tinted output minus the escapes -- the
 final column is left unpadded so that stays exactly true.
 
-A metric's own row is its denominator, so the DCGM rows can legitimately cover
-more jobs than `gpu-jobs=` on the `Jobs:` line: a finished job with no stored blob
-has no `GPU%` but still has Prometheus data.
+A job with **no stored blob** is excluded from every tally and counted as
+`no-blob=N`. Slurm writes the blob at job end, so without it a job has Prometheus
+numbers but no `CPU%`/`MEM%`/`GPU%`/`GMEM%`; letting it vote in the DCGM tallies
+alone put 117 jobs behind `SM_ACT%` against 88 behind `GPU%` on one partition, and a
+job cannot be ranked against the rest on a metric it has no value for. It stays in
+the listing regardless -- it ran, and its DCGM numbers are shown on its own row.
+Note this is a *missing* blob, not a CPU-only one: a CPU-only job's blob exists and
+simply carries no GPU data, so it still votes on `CPU%` and `MEM%`.
 
 The `Worst` rows name the top few jobs by resource-time **wasted**,
 `(1 - u) x weight`, not by resource-time held: a 100-hour job at 24% is a larger
@@ -452,9 +457,13 @@ in that measure and the shares summed:
 score = sum over measures of  waste(job, measure) / total_waste(measure)
 ```
 
-Every component is printed (`39%gpu+29%sm+65%pw+14%cpu`), so the reader sees which
-measure drove the ranking. A row is omitted when any of its measures wasted nothing,
-since a share of a zero total is undefined.
+Each cell prints the job's **value** in every metric the row names
+(`36337338 gpu0 sm0 pw70W cpu1`), all of them under their cutoffs, which is what put
+the job there; power carries its unit since watts are not a percentage. The order
+still carries the ranking by summed waste share. Printing the shares instead was
+actively misleading -- `12%gpu` reads as a utilization of 12%, the inverse of the
+row's meaning. A row is omitted when any of its measures wasted nothing, since a
+share of a zero total is undefined.
 
 **Candidacy is a conjunction**: a job appears only if it is red in *every* metric the
 row names. `Worst both:` is therefore "idle by GPU and by CPU", and `Worst all:`
