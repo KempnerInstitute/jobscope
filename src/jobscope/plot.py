@@ -22,8 +22,9 @@ ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
 # Every footer label the summary view has ever emitted: the retired Mean rows stay
 # listed so a previously-saved CSV still parses.
 FOOTER_ROWS = {"Mean", "MeanPerGPU", "MeanPerGPUHour", "Jobs",
-               "UsedPerGPU", "UsedPerGPUHour", "Worst",
-               "GPUhours", "GPUs", "Corehours", "Cores"}
+               "UsedPerGPU", "UsedPerGPUHour", "UsedPerCPU", "UsedPerCPUHour",
+               "GPUhours", "GPUs", "Corehours", "Cores",
+               "Worst", "WorstGPU", "WorstCPU", "WorstBoth"}
 
 HEAT_MAX_ROWS = 40
 PANEL_CAP = 12

@@ -201,9 +201,11 @@ With more than one job the table ends in footers:
 Used/GPU-hr:                     3   5      34  14   29.8  ...
 GPU-hours:   701.5 alloc  299.0 used  402.5 idle (57%)
 Core-hours:  9875.7 alloc  492.3 used  9383.4 idle (95%)
-Bands GPU%:  red<25 13 jobs (4%)/388.0h (55%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 302 jobs (95%)/313.1h (45%)
-Bands CPU%:  red<10 159 jobs (50%)/6240.6h (63%)  yellow<20 158 jobs (50%)/3303.3h (33%)  green 2 jobs (1%)/331.7h (3%)
-Worst:       35475803 142.9h@0% amazloumi  35476814 142.0h@0% amazloumi  36337781 43.1h@0% amazloumi
+Bands GPU%:  red<25 13 jobs (4%)/388.5h (55%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 302 jobs (95%)/318.2h (45%)
+Bands CPU%:  red<10 159 jobs (50%)/6249.1h (63%)  yellow<20 158 jobs (50%)/3366.7h (34%)  green 2 jobs (1%)/344.1h (3%)
+Worst GPU:   35475803 142.9h@0% amazloumi  35476814 142.0h@0% amazloumi  36337781 43.8h@0% amazloumi
+Worst CPU:   35475803 2286.6h@0% amazloumi  35476814 2271.9h@0% amazloumi  36337781 698.4h@0% amazloumi
+Worst both:  35475803 35%gpu+24%cpu amazloumi  35476814 35%gpu+24%cpu amazloumi  36337781 11%gpu+7%cpu amazloumi
 Jobs:        cpu-jobs=319  gpu-jobs=319  gpus=381  no-runtime=4
 ```
 
@@ -224,9 +226,18 @@ the block to one.
 The `Bands` rows are the part worth reading. Each gives a threshold band's share of the
 **jobs** and of the **resource-time**, and the gap between those two numbers is
 the finding: above, 4% of the jobs held 55% of the GPU-hours below 25%. Either
-number alone conceals it. `Worst:` then names the biggest offenders, ranked by
-resource-time *wasted* rather than held, so a long job at a mediocre rate
-outranks a short one at zero.
+number alone conceals it.
+
+The `Worst` rows then name the offenders, ranked by resource-time *wasted* rather
+than held, so a long job at a mediocre rate outranks a short one at zero. There
+is one per resource, plus a combined row. GPU-hours and core-hours cannot simply
+be added -- any exchange rate between them would be invented, and a wrong one
+decides the answer by itself -- so `Worst both:` expresses each job's waste as a
+share of the selection's total waste in that resource and sums the two shares.
+Both components are printed (`35%gpu+24%cpu`), so you can see which resource put
+a job on the list. Only jobs red in at least one resource are candidates: a
+95%-efficient job can idle 50 GPU-hours just by being enormous, and there is
+nothing to act on there.
 
 The cutoffs come from `[thresholds]` in your config -- the same ones that tint
 the cells and colour `jobscope plot`, so the footer is a tally of what you can

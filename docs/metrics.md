@@ -304,12 +304,32 @@ GPU-hours below 25% -- and either share alone conceals it. The bands come from
 cells and colour `jobscope plot`, so the block is a tally of what is already on
 screen rather than a second opinion.
 
-`Worst:` names the top few jobs by resource-time **wasted**, `(1 - u) x weight`,
-not by resource-time held: a 100-hour job at 24% is a larger finding than a
-10-hour job at 0%. It is omitted when no job falls in the red band.
+The `Worst` rows name the top few jobs by resource-time **wasted**,
+`(1 - u) x weight`, not by resource-time held: a 100-hour job at 24% is a larger
+finding than a 10-hour job at 0%. A row is omitted when no job falls in that
+resource's red band.
 
-`Worst:` comes from the leading resource -- GPUs where the view shows them --
-since the same jobs usually top both lists and one line is enough.
+There is one row per reported resource plus `Worst both:`. A combined ranking
+cannot add GPU-hours to core-hours -- any exchange rate is invented, and on a GPU
+cluster a wrong one decides the ranking by itself -- so each job's waste is
+normalised by the selection's own total waste in that resource and the two shares
+are summed:
+
+```
+score = idle_gpu / total_idle_gpu  +  idle_cpu / total_idle_cpu
+```
+
+Both components are printed, so the reader sees which resource drove the ranking.
+It is omitted when only one resource wasted anything, since the single-resource
+row already says it.
+
+Candidates are the jobs red in **at least one** resource, and for those the waste
+in the *other* resource counts too even where they are green there -- it is real
+waste; the red filter only decides who is a candidate. That filter is what keeps
+the list actionable: a 95%-efficient job can idle 50 GPU-hours simply by being
+enormous.
+
+
 
 Which jobs contribute is the part worth being exact about:
 

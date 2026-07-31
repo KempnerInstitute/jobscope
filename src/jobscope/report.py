@@ -286,6 +286,14 @@ class EfficiencyTally:
         """The red threshold for this column, from the site config."""
         return self.thresholds.red_map().get(self.header, self.thresholds.default)
 
+    def band_of(self, value: Optional[float]) -> str:
+        """This column's band for ``value``, or "" when it is not graded."""
+        return self.thresholds.grade(self.header, value)
+
+    def idle(self) -> float:
+        """Allocated resource-time that went unused."""
+        return self.total - self.used
+
     def _amount(self, weight: float) -> str:
         return "%.1f%s" % (weight / self.scale, self.unit) if self.unit \
             else "%d" % round(weight / self.scale)
@@ -381,6 +389,11 @@ class SummaryRenderer:
         self.durations = set()      # distinct runtimes, likewise
         self.gpu_total = 0          # GPUs across the selection, for the Jobs footer
         self.unweighted = 0         # jobs left out of the weighting for want of a runtime
+        # {jobid: (idle_gpu, idle_cpu, user)} for jobs red in at least one resource,
+        # which is what the combined ranking needs: the two shares cannot be summed
+        # until the selection's totals are known, so the candidates must be kept.
+        # Bounded by the red jobs, not the selection -- on a healthy partition, few.
+        self.waste: Dict[str, Tuple[float, float, str]] = {}
         # Both resources are tallied; finish() prints whichever the view is about.
         # Under time weighting the weights are resource-seconds, so they render as
         # hours; otherwise they are bare counts of GPUs or cores.
@@ -474,6 +487,47 @@ class SummaryRenderer:
         return {"cpu": cores * seconds, "mem": memory * seconds,
                 "gpu": gpus * seconds, "gmem": gpus * seconds}
 
+    def _note_waste(self, jid: str, user: str, metrics, weights: Dict[str, float]) -> None:
+        """Record a job's idle GPU and CPU resource, if it is red in either.
+
+        Both components are kept even for a job red in only one of them, because the
+        resource it wasted is real either way. The red filter is what keeps the
+        combined list actionable: a 95%-efficient job can idle 50 GPU-hours simply by
+        being enormous, and there is nothing to act on there.
+        """
+        if metrics is None:
+            return
+        cpu, _mem, gpu, _gmem = metrics
+        idle, red = {}, False
+        for key, value in (("gpu", gpu), ("cpu", cpu)):
+            weight = weights[key]
+            if value is None or weight <= 0:
+                idle[key] = 0.0
+                continue
+            idle[key] = (1 - value / 100.0) * weight
+            if self.tallies[key].band_of(value) == "red":
+                red = True
+        if red:
+            self.waste[jid] = (idle["gpu"], idle["cpu"], user)
+
+    def _combined_worst(self) -> List[Tuple[float, str, str, float, float]]:
+        """Worst jobs across both resources, as shares of each one's total waste.
+
+        GPU-hours and core-hours cannot be added -- any exchange rate between them
+        would be invented, and on a GPU cluster a wrong one decides the answer by
+        itself. Normalising each job by the selection's own total waste in that
+        resource avoids the question: a job that caused a third of the idle GPU-time
+        and a fifth of the idle core-time scores 0.33 + 0.20. Both shares are
+        reported, so the reader sees which resource drove the ranking.
+        """
+        gpu_idle, cpu_idle = self.tallies["gpu"].idle(), self.tallies["cpu"].idle()
+        if gpu_idle <= 0 or cpu_idle <= 0:
+            return []       # only one resource wasted anything; its own line says so
+        scored = [((g / gpu_idle) + (c / cpu_idle), jid, user, g / gpu_idle, c / cpu_idle)
+                  for jid, (g, c, user) in self.waste.items()]
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return scored[:EfficiencyTally.WORST]
+
     def add(self, jobids: List[str], records: Dict[str, JobRecord],
             dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
         self._start()
@@ -515,6 +569,7 @@ class SummaryRenderer:
                             self.gpu_counts.add(gpus)
                     if key in self.tallies:
                         self.tallies[key].add(jid, row["USER"], value, weights[key])
+                self._note_waste(jid, row["USER"], metrics, weights)
             if do_dcgm:
                 overall = dcgm_data.get(jid, ({}, {}))[0]
                 for header in self.dcgm_headers:
@@ -577,6 +632,7 @@ class SummaryRenderer:
         wanted = {"cpu": ("cpu",), "gpu": ("gpu",)}.get(options.view, ("gpu", "cpu"))
         shown = [self.tallies[key] for key in wanted if self.tallies[key].total]
         tally = shown[0] if shown else self.tallies["gpu"]
+        combined = self._combined_worst() if len(shown) > 1 else []
 
         # The job counts differ whenever the selection mixes CPU-only and GPU work:
         # a CPU-only job has no GPU% to average, so it is absent from the GPU
@@ -602,10 +658,15 @@ class SummaryRenderer:
             self.writer.writerow([used_row[h] for h in self.headers])
             for one in shown:
                 self.writer.writerow(padded(one.label.replace("-", ""), one.csv_cells()))
-            if tally.worst:
-                self.writer.writerow(padded("Worst", [
-                    "%s=%s@%d" % (jid, tally._amount(weight), round(value))
-                    for _idle, jid, _user, weight, value in tally.worst]))
+            for one in shown:
+                if one.worst:
+                    self.writer.writerow(padded("Worst" + one.header.rstrip("%"), [
+                        "%s=%s@%d" % (jid, one._amount(weight), round(value))
+                        for _idle, jid, _user, weight, value in one.worst]))
+            if len(shown) > 1 and combined:
+                self.writer.writerow(padded("WorstBoth", [
+                    "%s=%d+%d" % (jid, round(100 * gpu_share), round(100 * cpu_share))
+                    for _score, jid, _user, gpu_share, cpu_share in combined]))
             self.writer.writerow(padded("Jobs", counts))
         else:
             used_row["JOBID"] = tally.row
@@ -619,8 +680,18 @@ class SummaryRenderer:
                 # Each band row names its own column, so two of them do not collide.
                 print("%-12s %s" % ("Bands " + one.header + ":", one.bands_line()),
                       file=self.out)
-            if tally.worst:
-                print("%-12s %s" % ("Worst:", tally.worst_line()), file=self.out)
+            for one in shown:
+                if one.worst:
+                    print("%-12s %s" % ("Worst " + one.header.rstrip("%") + ":",
+                                        one.worst_line()), file=self.out)
+            if len(shown) > 1 and combined:
+                # Shares of each resource's total waste, summed. Printing both
+                # components shows which resource put the job on this list.
+                cells = "  ".join(
+                    "%s %d%%gpu+%d%%cpu %s" % (jid, round(100 * gpu_share),
+                                               round(100 * cpu_share), user)
+                    for _score, jid, user, gpu_share, cpu_share in combined)
+                print("%-12s %s" % ("Worst both:", cells), file=self.out)
             print("%-12s %s" % ("Jobs:", "  ".join(counts)), file=self.out)
 
 

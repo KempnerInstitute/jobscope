@@ -576,8 +576,88 @@ def test_worst_ranks_by_wasted_resource_not_by_size():
         CTX, RenderOptions(view="all", header=True, time_weighted=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    worst = [ln for ln in out.getvalue().splitlines() if ln.startswith("Worst:")][0]
+    worst = [ln for ln in out.getvalue().splitlines() if ln.startswith("Worst GPU:")][0]
     assert worst.index("big") < worst.index("small")
+
+
+def _worst_lines(records, view="all", time_weighted=True):
+    """``{label: line}`` for the Worst rows of a text-rendered table."""
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view=view, header=True, time_weighted=time_weighted), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    # Values are the payload only: a job id like "A" would otherwise match the "A"
+    # in "alice", and "C" the "C" in "Worst CPU:".
+    return {ln.split(":")[0]: ln.split(":", 1)[1] for ln in out.getvalue().splitlines()
+            if ln.startswith("Worst")}
+
+
+def test_the_combined_worst_normalizes_each_resource():
+    """The combined order can differ from both single-resource orders.
+
+    GPU-hours and core-hours are not addable, so each job's waste is expressed as a
+    share of the selection's total waste in that resource and the two shares summed.
+    Here A wastes almost all the GPU-time, B almost all the core-time, and C a
+    little under a third of each -- so B edges out A, and C trails both, an order
+    neither single list produces.
+    """
+    records = {
+        # 10 GPU-hours idle, but 90% of its 2 cores used.
+        "gpuhog": _timed_job("gpuhog", 3600, gpu_util=0.0, gpus=10, cores=2,
+                             cpu_seconds=6480),
+        # GPU busy, but 100 core-hours idle.
+        "cpuhog": _timed_job("cpuhog", 3600, gpu_util=95.0, gpus=1, cores=100,
+                             cpu_seconds=0),
+        # Red in both, moderately.
+        "middle": _timed_job("middle", 3600, gpu_util=0.0, gpus=4, cores=40,
+                             cpu_seconds=0),
+    }
+    lines = _worst_lines(records)
+    # Each single-resource list only holds jobs red in *that* resource.
+    assert lines["Worst GPU"].index("gpuhog") < lines["Worst GPU"].index("middle")
+    assert "cpuhog" not in lines["Worst GPU"]
+    assert lines["Worst CPU"].index("cpuhog") < lines["Worst CPU"].index("middle")
+    assert "gpuhog" not in lines["Worst CPU"]
+    both = lines["Worst both"]
+    assert both.index("cpuhog") < both.index("gpuhog") < both.index("middle")
+    # The shares say which resource put each job there.
+    assert "gpuhog 71%gpu+0%cpu" in both and "cpuhog 0%gpu+71%cpu" in both
+
+
+def test_the_combined_worst_counts_waste_from_a_resource_a_job_is_green_in():
+    """A job red in one resource still has its other-resource waste counted.
+
+    It is real waste; only the red filter decides who is a candidate at all.
+    """
+    records = {
+        "red_gpu": _timed_job("red_gpu", 3600, gpu_util=0.0, gpus=1,
+                              cores=10, cpu_seconds=18000),   # CPU% 50, green
+        "red_cpu": _timed_job("red_cpu", 3600, gpu_util=90.0, gpus=1,
+                              cores=10, cpu_seconds=0),       # CPU% 0, red
+    }
+    both = _worst_lines(records)["Worst both"]
+    # red_gpu is green on CPU yet still shows a nonzero CPU share (5 core-hours
+    # idle of 15 total).
+    assert "red_gpu 91%gpu+33%cpu" in both
+
+
+def test_no_combined_line_when_only_one_resource_wasted_anything():
+    """With nothing idle on one side, the combined view repeats the other."""
+    records = {"1": _timed_job("1", 3600, gpu_util=0.0, gpus=1, cores=4,
+                               cpu_seconds=4 * 3600),          # CPU% 100
+               "2": _timed_job("2", 3600, gpu_util=10.0, gpus=1, cores=4,
+                               cpu_seconds=4 * 3600)}
+    lines = _worst_lines(records)
+    assert "Worst GPU" in lines and "Worst both" not in lines
+
+
+def test_narrow_views_show_only_their_own_worst_row():
+    records = {"1": _timed_job("1", 3600, gpu_util=0.0, gpus=2, cores=8, cpu_seconds=0),
+               "2": _timed_job("2", 3600, gpu_util=5.0, gpus=1, cores=4, cpu_seconds=0)}
+    assert set(_worst_lines(records, view="gpu")) == {"Worst GPU"}
+    assert set(_worst_lines(records, view="cpu")) == {"Worst CPU"}
+    assert set(_worst_lines(records)) == {"Worst GPU", "Worst CPU", "Worst both"}
 
 
 def test_no_worst_line_when_nothing_is_red():
@@ -586,7 +666,8 @@ def test_no_worst_line_when_nothing_is_red():
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    assert "Worst:" not in out.getvalue()
+    # No label at all, not merely the old "Worst:" spelling.
+    assert "Worst" not in out.getvalue()
 
 
 def test_the_block_follows_the_cpu_view_to_cores():
