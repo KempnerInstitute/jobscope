@@ -294,7 +294,8 @@ def test_finished_streams_chunks_per_batch(monkeypatch, capsys, gpu_record):
     out = capsys.readouterr().out
     assert seen == [["100"], ["101"]]      # DCGM computed per chunk, still streaming
     assert len(clients) == 1               # one Prometheus client
-    assert out.count("Mean:") == 1 and out.index("Mean:") > out.index("101")
+    # One footer, printed once at the end, after every streamed chunk.
+    assert out.count("Used/") == 1 and out.index("Used/") > out.index("101")
 
 
 def test_explicit_jobids_do_not_stream(monkeypatch, capsys, cpu_record):

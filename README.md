@@ -28,7 +28,10 @@ JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_
 35246690     bdesinghu    COMPLETED 1     11     2      1     63     3       44.3     8.8     0.2      4.3     338      00:12:07
 35246691     bdesinghu    COMPLETED 1     11     3      1     67     2       43.8     8.7     0.2      4.4     341      00:13:05
 ------------------------------------------------------------------------------------------------------------------------------------
-Mean:                                     11     2            69     2       50.8     10.5    1.1      5.9     361
+Used/GPU-hr:                              11     2            69     2       50.8     10.5    1.1      5.9     361
+GPU-hours:   0.6 alloc  0.4 used  0.2 idle (31%)
+Bands:       GPU%  red<25 0 jobs (0%)/0.0h (0%)  yellow<50 0 jobs (0%)/0.0h (0%)  green 3 jobs (100%)/0.6h (100%)
+Jobs:        cpu-jobs=3  gpu-jobs=3  gpus=3
 ```
 
 ## Requirements
@@ -189,50 +192,45 @@ held up on the host, and no single view used to show both.
 With more than one job the table ends in footers:
 
 ```
-36337781   amazloumi  RUNNING  1   0   1   2    0   0    0.0  ...   <- 2 GPUs, idle
-36441613   tngotiaoco RUNNING  4  11   4  16   79  89   87.4  ...   <- 16 GPUs, busy
---------------------------------------------------------------------
-Mean:                            6   2       40  44   43.7  ...
-Mean/GPU:                                    70  79   77.7  ...
-Jobs:        cpu-jobs=2  gpu-jobs=2  gpus=18
+Used/GPU-hr:                     3   5      34  14   29.8  ...
+GPU-hours:   586.8 alloc  197.0 used  389.8 idle (66%)
+Bands:       GPU%  red<25 20 jobs (5%)/377.7h (64%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 361 jobs (94%)/208.7h (36%)
+Worst:       36470012 142.9h@0% rrahman  36470013 142.0h@0% rrahman  36471887 27.3h@0% jsmith
+Jobs:        cpu-jobs=384  gpu-jobs=385  gpus=468  no-runtime=2
 ```
 
-`Mean:` averages one value per job. The second row weights each job by the
-hardware it held, so it describes the *resource* rather than the typical job --
-above, per job the partition looks 40% used, but 70% of the allocated GPUs were
-actually busy, because the idle job holds 2 cards and the busy one 16.
+**There is no per-job mean**, on purpose. Utilization is bimodal -- jobs cluster
+near 0% or near 100% -- so an average of them describes a job that does not
+exist. On the day above it read 82%, while the partition was 66% idle.
 
-For **finished** jobs that row also accounts for how long each job ran, and is
-labelled `Mean/GPU-hr:`:
+`Used/GPU-hr:` is a ratio rather than a centre: used resource-time over allocated
+resource-time. Each column is pooled over the resource *it* measures -- GPU-hours
+for `GPU%`, core-hours for `CPU%`, GB-hours for `MEM%` -- so the row is the real
+utilization of the pool and stays true whatever the distribution looks like.
 
-```
-Mean:                           10   5      82   5   64.9  ...
-Mean/GPU-hr:                     3   5      34  14   29.8  ...
-Jobs:  cpu-jobs=384  gpu-jobs=384  gpus=468  gpu-hours=586.0
-```
+`Bands:` is the part worth reading. It gives each threshold band's share of the
+**jobs** and of the **resource-time**, and the gap between those two numbers is
+the finding: above, 5% of the jobs held 64% of the GPU-hours below 25%. Either
+number alone conceals it. `Worst:` then names the biggest offenders, ranked by
+resource-time *wasted* rather than held, so a long job at a mediocre rate
+outranks a short one at zero.
 
-Without it, 100 five-minute jobs outvote one two-day job 100:1. Per job that
-partition looks 82% busy; per GPU-hour it was 34% -- the short jobs were busy and
-the long ones were not. Each column is weighted by the resource it measures
-(GPU-hours for `GPU%`, core-hours for `CPU%`, GB-hours for `MEM%`), which makes
-the row the pooled utilization rather than an average of averages.
+The cutoffs come from `[thresholds]` in your config -- the same ones that tint
+the cells and colour `jobscope plot`, so the footer is a tally of what you can
+already see.
 
-The **running** view keeps plain `Mean/GPU:` instead. Its numbers are one scrape
-at a single moment, so weighting them by elapsed time would claim that instant
-represents the whole run; `--avg` folds each job over its runtime and does get the
-GPU-hour row.
-
-The weighted row appears only when it would differ from `Mean:` -- varying GPU
-counts, or varying runtimes. Under `Mean/GPU:` it is blank for `CPU%`/`MEM%`
-(weighting host metrics by GPU count means nothing); under either it is blank for
-`ENERGY_kWh`/`PWRmax_W`, which are a per-job total and a peak rather than an
-average over GPUs.
+The **running** view reports the same block over GPU *counts* rather than
+GPU-hours (`Used/GPU:`, `GPUs: 18 alloc ...`). Its numbers are one scrape at a
+single moment, so weighting them by elapsed time would claim that instant
+represents the whole run; `--avg` folds each job over its runtime and does get
+the hour-based form. A `--cpu` run switches the block to `CPU%` over core-hours.
 
 The two job counts differ whenever the selection mixes CPU-only and GPU work: a
-CPU-only job has no `GPU%` to average, so it is absent from the GPU means rather
-than counted as zero. A GPU job that sat idle *is* counted, as 0%. `gpus=` is the
-total behind the weighted row and `gpu-hours=` its denominator; `no-runtime=N`
+CPU-only job has no `GPU%` to pool, so it is absent from the GPU figures rather
+than counted as zero. A GPU job that sat idle *is* counted, as 0%. `no-runtime=N`
 appears when a job had no elapsed time to weight by and was left out.
+`ENERGY_kWh` and `PWRmax_W` have no pooled form -- one is a per-job total and the
+other a peak -- so they fall back to the plain per-job figure.
 `jobscope plot` skips every footer rather than charting them as jobs.
 
 - `--cpu` narrows to the host columns. For *finished* jobs that needs no Prometheus
@@ -245,8 +243,9 @@ appears when a job had no elapsed time to weight by and was left out.
 
 On a terminal, every `%` cell is tinted by how efficient it is -- **red** below the
 threshold, **yellow** below twice it, **green** above -- so an idle job is a red row
-and a healthy one is green. The `Mean:` footers are tinted too, which makes a
-wasteful selection obvious at a glance.
+and a healthy one is green. The pooled footer row is tinted too, and the same
+cutoffs define the `Bands:` tally, so a wasteful selection is obvious at a glance
+and quantified one line below.
 
 The cutoffs are per column and site-tunable in `[thresholds]`, and they are the
 same ones `jobscope plot` grades with, so a job red in a chart is red in the table:

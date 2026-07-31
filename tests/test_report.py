@@ -105,15 +105,15 @@ def test_summary_csv_roundtrips(gpu_record):
     assert rows[0]["CPU%"] == "75" and rows[0]["GPU%"] == "70"
 
 
-def test_summary_mean_row_and_csv_drop(gpu_record, cpu_record):
+def test_summary_footer_row_and_csv_drop(gpu_record, cpu_record):
     records = {"100": gpu_record, "200": cpu_record}
     text = _render(summarize, ["100", "200"], records, {},
                    CTX, RenderOptions(view="all", show_dcgm=False, csv=False, header=True))
-    assert "Mean:" in text
+    assert "Used/GPU:" in text
     csv_text = _render(summarize, ["100", "200"], records, {},
                        CTX, RenderOptions(view="all", show_dcgm=False, csv=True, header=True))
     _, rows = plot.parse_csv(io.StringIO(csv_text))
-    assert len(rows) == 2  # the Mean row is dropped by the parser
+    assert len(rows) == 2  # every footer row is dropped by the parser
 
 
 def test_summarize_no_jobs():
@@ -236,7 +236,7 @@ def test_summary_renderer_two_adds_equals_summarize_text(gpu_record):
     single = _render(summarize, jobids, records, dcgm, CTX, options)
     streamed = _render_stream(report.SummaryRenderer, CTX, options, chunks)
     assert streamed == single
-    assert streamed.count("Mean:") == 1
+    assert streamed.count("Used/GPU:") == 1
 
 
 def test_summary_renderer_two_adds_equals_summarize_csv(gpu_record):
@@ -246,18 +246,19 @@ def test_summary_renderer_two_adds_equals_summarize_csv(gpu_record):
     streamed = _render_stream(report.SummaryRenderer, CTX, options, chunks)
     assert streamed == single
     _, rows = plot.parse_csv(io.StringIO(streamed))
-    assert len(rows) == 2  # Mean row dropped by the parser
+    assert len(rows) == 2  # footer rows dropped by the parser
 
 
-def test_summary_renderer_single_row_no_mean(gpu_record, cpu_record):
+def test_summary_renderer_single_row_no_footer(gpu_record, cpu_record):
     # The second chunk is filtered out by the gpu view, so only one row renders
-    # and the Mean footer must stay suppressed.
+    # and the whole footer block must stay suppressed.
     options = RenderOptions(view="gpu", show_dcgm=False, csv=False, header=True)
     streamed = _render_stream(report.SummaryRenderer, CTX, options,
                               [(["100"], {"100": gpu_record}, {}),
                                (["200"], {"200": cpu_record}, {})])
     assert "100" in streamed
-    assert "Mean:" not in streamed
+    for label in ("Used/", "GPUs:", "Bands:", "Worst:", "Jobs:"):
+        assert label not in streamed
 
 
 def test_summary_renderer_all_filtered_empty_message(cpu_record):
@@ -289,15 +290,15 @@ def test_detail_renderer_empty_message_ignores_header_flag(cpu_record):
     assert "(no GPU jobs in this selection)" in streamed
 
 
-def test_mean_row_is_followed_by_the_two_job_counts(gpu_record, cpu_record):
-    """How many jobs each mean came from, as two labelled totals.
+def test_the_footer_reports_the_two_job_counts(gpu_record, cpu_record):
+    """How many jobs each figure came from, as two labelled totals.
 
     They differ whenever the selection mixes CPU-only and GPU work, which is the
     reason to print them at all: a CPU-only job has no GPU% to average.
     """
-    mean, counts = _mean_row({"100": gpu_record, "200": cpu_record}, show_dcgm=True,
-                             dcgm_data={"100": ({"SM_ACT%": 60.0}, {})})
-    assert mean["CPU%"]                            # a mean was printed
+    pooled, counts = _pooled_row({"100": gpu_record, "200": cpu_record}, show_dcgm=True,
+                                 dcgm_data={"100": ({"SM_ACT%": 60.0}, {})})
+    assert pooled["CPU%"]                          # a pooled figure was printed
     assert counts == {"cpu-jobs": 2, "gpu-jobs": 1, "gpus": 2}
 
 
@@ -317,7 +318,7 @@ def test_a_single_row_gets_no_footers(gpu_record):
     assert "Mean:" not in text and "Jobs:" not in text
 
 
-# --- the GPU mean, with and without GPU use ---------------------------------
+# --- which jobs reach the pooled figure -------------------------------------
 
 def _gpu_job(jid, utils, allocated=None):
     """A record whose blob reports `utils` (minor -> duty%) on one node."""
@@ -333,20 +334,25 @@ def _gpu_job(jid, utils, allocated=None):
                      cluster="c", user="alice")
 
 
-def _mean_row(records, show_dcgm=False, dcgm_data=None):
-    """``(mean by column, {"cpu-jobs": n, "gpu-jobs": m})`` from a rendered table."""
+def _pooled_row(records, show_dcgm=False, dcgm_data=None):
+    """``(pooled figure by column, {"cpu-jobs": n, ...})`` from a rendered table.
+
+    Finds the pooled row by prefix, since its label names the resource it is per
+    (UsedPerGPU / UsedPerGPUHour / UsedPerCPUHour ...).
+    """
     text = _render(summarize, list(records), records, dcgm_data or {}, CTX,
                    RenderOptions(view="all", show_dcgm=show_dcgm, csv=True, header=True))
     rows = {r.split(",")[0]: r.split(",") for r in text.splitlines()}
+    pooled = next(cells for label, cells in rows.items() if label.startswith("UsedPer"))
     counts = dict(cell.split("=") for cell in rows["Jobs"][1:] if "=" in cell)
-    return dict(zip(rows["JOBID"], rows["Mean"])), {k: int(v) for k, v in counts.items()}
+    return dict(zip(rows["JOBID"], pooled)), {k: int(v) for k, v in counts.items()}
 
 
-def test_a_job_with_no_gpu_is_left_out_of_the_gpu_mean():
-    """A CPU-only job has no GPU% to average, so it must not dilute the mean."""
+def test_a_job_with_no_gpu_is_left_out_of_the_gpu_figure():
+    """A CPU-only job has no GPU% to pool, so it must not dilute the figure."""
     records = {"1": _gpu_job("1", None), "2": _gpu_job("2", {"0": 80.0})}
-    mean, counts = _mean_row(records)
-    assert mean["GPU%"] == "80"        # not 40 -- the CPU-only job is excluded
+    pooled, counts = _pooled_row(records)
+    assert pooled["GPU%"] == "80"      # not 40 -- the CPU-only job is excluded
     # ... and the footer says so, while both jobs contributed CPU%.
     assert counts == {"cpu-jobs": 2, "gpu-jobs": 1, "gpus": 1}
 
@@ -358,8 +364,8 @@ def test_an_idle_gpu_job_is_counted_as_zero():
     finding.
     """
     records = {"1": _gpu_job("1", {"0": 0.0}), "2": _gpu_job("2", {"0": 100.0})}
-    mean, counts = _mean_row(records)
-    assert mean["GPU%"] == "50"        # mean(0, 100), not 100
+    pooled, counts = _pooled_row(records)
+    assert pooled["GPU%"] == "50"      # (0 + 100) over 2 GPUs, not 100
     assert counts["gpu-jobs"] == 2
 
 
@@ -389,33 +395,36 @@ def test_allocated_gpus_that_reported_nothing_are_not_assumed_idle():
 
 def test_a_gpu_job_with_no_samples_shows_a_dash_and_is_excluded():
     records = {"1": _gpu_job("1", None, allocated=2), "2": _gpu_job("2", {"0": 60.0})}
-    mean, counts = _mean_row(records)
-    assert mean["GPU%"] == "60"
+    pooled, counts = _pooled_row(records)
+    assert pooled["GPU%"] == "60"
     # The sample-less job cannot contribute, though it is still a rendered row.
     # gpus counts only the GPUs behind a measured value, so its 2 are absent too.
     assert counts == {"cpu-jobs": 2, "gpu-jobs": 1, "gpus": 1}
 
 
-def test_the_gpu_mean_is_per_job_not_per_gpu():
-    """Documented, not accidental: each job counts once, whatever its GPU count.
+def test_the_pooled_figure_is_per_gpu_not_per_job():
+    """The deliberate inversion: the footer describes the hardware, not the job.
 
-    A 4-GPU job at 100% and a 1-GPU job at 0% average to 50, not to the
-    GPU-weighted 80. The table is one row per job, so the footer matches it.
+    A 4-GPU job at 100% and a 1-GPU job at 0% average to 50 per job but 80 per
+    GPU. There is no per-job mean any more, because on real data it is the
+    misleading one: it weights a whole idle node the same as one busy card.
     """
     records = {"1": _gpu_job("1", {str(i): 100.0 for i in range(4)}),
                "2": _gpu_job("2", {"0": 0.0})}
-    mean, counts = _mean_row(records)
-    assert mean["GPU%"] == "50"
+    pooled, counts = _pooled_row(records)
+    assert pooled["GPU%"] == "80"      # (100*4 + 0*1)/5, not the per-job 50
     assert counts["gpu-jobs"] == 2
 
 
-# --- the GPU-weighted mean --------------------------------------------------
+# --- the pooled row ---------------------------------------------------------
 
-def _footers(records, show_dcgm=False, dcgm_data=None, specs=None):
-    """``{label: {column: cell}}`` for the Mean / MeanPerGPU / Jobs footers."""
+def _footers(records, show_dcgm=False, dcgm_data=None, specs=None, **kw):
+    """``{label: {column: cell}}`` for every footer row of a rendered table."""
     out = io.StringIO()
     renderer = report.SummaryRenderer(
-        CTX, RenderOptions(view="all", show_dcgm=show_dcgm, csv=True, header=True),
+        CTX, RenderOptions(view=kw.get("view", "all"), show_dcgm=show_dcgm,
+                           csv=True, header=True,
+                           time_weighted=kw.get("time_weighted", False)),
         out, specs=specs)
     renderer.add(list(records), records, dcgm_data or {})
     renderer.finish()
@@ -424,63 +433,133 @@ def _footers(records, show_dcgm=False, dcgm_data=None, specs=None):
     return {label: dict(zip(header, cells)) for label, cells in rows.items()}
 
 
-def test_the_weighted_mean_is_per_gpu_not_per_job():
-    """A big idle job should not be outvoted by a small busy one.
+def test_the_pooled_row_is_always_printed():
+    """It is the only aggregate now, so it cannot be omitted as a no-op.
 
-    2 idle GPUs and 16 busy ones average to 50% per job but 89% per GPU, and it is
-    the second that describes how the allocation was used.
+    The old per-GPU row was suppressed when every job held the same number of
+    GPUs, because it then repeated the per-job mean. With that mean gone,
+    suppressing it would leave a multi-job table with no summary at all.
     """
-    records = {"1": _gpu_job("1", {str(i): 0.0 for i in range(2)}),
-               "2": _gpu_job("2", {str(i): 100.0 for i in range(16)})}
-    footers = _footers(records)
-    assert footers["Mean"]["GPU%"] == "50"                  # mean(0, 100)
-    assert footers["MeanPerGPU"]["GPU%"] == "89"            # (0*2 + 100*16)/18
-    assert footers["Jobs"]["USER"] == "cpu-jobs=2"          # the labelled counts
-    assert "gpus=18" in footers["Jobs"].values()
-
-
-def test_the_weighted_row_is_omitted_when_it_would_repeat_the_mean():
-    """Uniform GPU counts make weighting a no-op, so the row would be noise."""
     records = {"1": _gpu_job("1", {"0": 20.0}), "2": _gpu_job("2", {"0": 80.0})}
-    assert "MeanPerGPU" not in _footers(records)
+    footers = _footers(records)
+    assert "Mean" not in footers                            # the per-job mean is gone
+    assert footers["UsedPerGPU"]["GPU%"] == "50"            # uniform weights, still shown
 
 
-def test_the_weighted_row_leaves_host_columns_blank():
-    """Weighting CPU% by GPU count would be meaningless."""
+def test_the_pooled_row_covers_the_host_columns_too():
+    """CPU% is pooled over allocated cores, not left blank.
+
+    Under the old GPU-count weighting these cells had to stay empty, since a GPU
+    count says nothing about CPU. Weighting each column by its own resource fixes
+    that, and the row is the only summary left, so it has to carry them.
+    """
     records = {"1": _gpu_job("1", {"0": 0.0}),
                "2": _gpu_job("2", {"0": 100.0, "1": 100.0})}
-    weighted = _footers(records)["MeanPerGPU"]
-    assert weighted["CPU%"] == "" and weighted["MEM%"] == ""
-    assert weighted["GPU%"] == "67"                         # (0*1 + 100*2)/3
+    pooled = _footers(records)["UsedPerGPU"]
+    assert pooled["GPU%"] == "67"                           # (0*1 + 100*2)/3
+    assert pooled["CPU%"] == "50"                           # both jobs hold 2 cores at 50%
 
 
-def test_a_job_with_no_gpu_does_not_reach_the_weighted_mean():
+def test_a_job_with_no_gpu_does_not_reach_the_pooled_gpu_figure():
     records = {"1": _gpu_job("1", None),
                "2": _gpu_job("2", {"0": 50.0}),
                "3": _gpu_job("3", {"0": 100.0, "1": 100.0})}
     footers = _footers(records)
-    assert footers["MeanPerGPU"]["GPU%"] == "83"            # (50*1 + 100*2)/3
+    assert footers["UsedPerGPU"]["GPU%"] == "83"            # (50*1 + 100*2)/3
     assert footers["Jobs"]["STATE"] == "gpu-jobs=2"
 
 
-def test_sum_and_max_metrics_are_not_gpu_weighted():
+def test_sum_and_max_metrics_fall_back_to_the_plain_mean():
     """ENERGY_kWh sums over a job's GPUs and PWRmax_W takes the max.
 
-    Scaling either by GPU count would produce a figure that means nothing, so those
-    cells stay blank while the mean-aggregated ones are weighted.
+    Neither divides by a GPU count, so there is no pooled form of them. They are
+    reported as the plain per-job figure rather than left blank, because the row
+    they sit in is now the table's only footer.
     """
     from jobscope.dcgm import ALL_SPECS
     records = {"1": _gpu_job("1", {"0": 0.0}),
                "2": _gpu_job("2", {"0": 100.0, "1": 100.0})}
     dcgm = {"1": ({"SM_ACT%": 10.0, "ENERGY_kWh": 1.0, "PWRmax_W": 300.0}, {}),
             "2": ({"SM_ACT%": 90.0, "ENERGY_kWh": 8.0, "PWRmax_W": 500.0}, {})}
-    footers = _footers(records, show_dcgm=True, dcgm_data=dcgm, specs=ALL_SPECS)
-    weighted = footers["MeanPerGPU"]
-    assert weighted["SM_ACT%"] == "63.3"        # (10*1 + 90*2)/3, a mean of means
-    assert weighted["ENERGY_kWh"] == ""         # a per-job total: not divisible by GPU
-    assert weighted["PWRmax_W"] == ""           # a peak: weighting it says nothing
-    # The unweighted footer still reports all three.
-    assert footers["Mean"]["ENERGY_kWh"] and footers["Mean"]["PWRmax_W"]
+    pooled = _footers(records, show_dcgm=True, dcgm_data=dcgm, specs=ALL_SPECS)["UsedPerGPU"]
+    assert pooled["SM_ACT%"] == "63.3"          # (10*1 + 90*2)/3, pooled over GPUs
+    assert pooled["ENERGY_kWh"] == "4.500"      # (1 + 8)/2, the per-job mean
+    assert pooled["PWRmax_W"] == "400"          # (300 + 500)/2, likewise
+
+
+# --- the efficiency block ---------------------------------------------------
+
+def test_the_bands_report_job_share_and_resource_share():
+    """The finding is the gap between the two shares.
+
+    One idle 16-GPU job against four busy 1-GPU jobs: 20% of the jobs, but 80% of
+    the GPUs. Either number alone hides it.
+    """
+    records = {"idle": _gpu_job("idle", {str(i): 0.0 for i in range(16)})}
+    records.update({str(i): _gpu_job(str(i), {"0": 90.0}) for i in range(4)})
+    line = _band_line(records)
+    assert "red<25 1 job (20%)/16 (80%)" in line
+    assert "green 4 jobs (80%)/4 (20%)" in line
+
+
+def _band_line(records, **kw):
+    """The Bands: line from a text-rendered table."""
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view=kw.get("view", "all"), csv=False, header=True,
+                           time_weighted=kw.get("time_weighted", False)), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    return [ln for ln in out.getvalue().splitlines() if ln.startswith("Bands:")][0]
+
+
+def test_the_totals_line_splits_allocation_into_used_and_idle():
+    records = {"idle": _gpu_job("idle", {str(i): 0.0 for i in range(3)}),
+               "busy": _gpu_job("busy", {"0": 100.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    text = out.getvalue()
+    assert "GPUs:        4 alloc  1 used  3 idle (75%)" in text
+
+
+def test_worst_ranks_by_wasted_resource_not_by_size():
+    """A large job at a mediocre rate wastes more than a small one at zero."""
+    records = {"big": _timed_job("big", 100 * 3600, gpu_util=24.0),    # 76 GPU-h idle
+               "small": _timed_job("small", 10 * 3600, gpu_util=0.0)}  # 10 GPU-h idle
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=True, time_weighted=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    worst = [ln for ln in out.getvalue().splitlines() if ln.startswith("Worst:")][0]
+    assert worst.index("big") < worst.index("small")
+
+
+def test_no_worst_line_when_nothing_is_red():
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 80.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    assert "Worst:" not in out.getvalue()
+
+
+def test_the_block_follows_the_cpu_view_to_cores():
+    """A --cpu run bands CPU% over cores, not GPU% over GPUs."""
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(CTX, RenderOptions(view="cpu", header=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    text = out.getvalue()
+    assert "Cores:" in text and "GPUs:" not in text
+    assert "CPU%" in [ln for ln in text.splitlines() if ln.startswith("Bands:")][0]
+    assert "Used/cpu:" in text
+    # GPU totals are noise in a view that hid the GPU columns.
+    jobs = [ln for ln in text.splitlines() if ln.startswith("Jobs:")][0]
+    assert "gpu-jobs" not in jobs and "gpus=" not in jobs
 
 
 # --- the time-weighted (per resource-hour) mean -----------------------------
@@ -531,18 +610,20 @@ def test_short_jobs_do_not_outvote_one_long_job():
     records = {"long": _timed_job("long", 2 * 86400, gpu_util=100.0)}
     records.update({str(i): _timed_job(str(i), 300, gpu_util=0.0) for i in range(100)})
     footers = _tw_footers(records)
-    assert footers["Mean"]["GPU%"] == "1"                 # (100 + 0*100)/101
-    # 172800 GPU-s busy of 202800 total.
-    assert footers["MeanPerGPUHour"]["GPU%"] == "85"
-    assert "gpu-hours=56.3" in footers["Jobs"].values()   # 202800s / 3600
+    # A per-job mean would read 1 -- (100 + 0*100)/101 -- and call this idle.
+    # 172800 GPU-seconds busy of 202800 allocated is 85.
+    assert footers["UsedPerGPUHour"]["GPU%"] == "85"
+    assert "allocated=56.3h" in footers["GPUhours"].values()   # 202800s / 3600
+    # 100 of 101 jobs are red, but they hold only 15% of the resource-time.
+    assert "red=100" in footers["GPUhours"].values()
 
 
-def test_time_weighting_shows_up_even_when_gpu_counts_match():
-    """Count weighting omits this row as a no-op; runtimes still differ."""
+def test_time_weighting_changes_the_answer_when_only_runtimes_differ():
+    """Equal GPU counts, unequal runtimes: only the time weighting sees it."""
     records = {"a": _timed_job("a", 36000, gpu_util=90.0),
                "b": _timed_job("b", 360, gpu_util=0.0)}
-    assert "MeanPerGPU" not in _footers(records.copy())   # uniform 1-GPU jobs
-    assert _tw_footers(records)["MeanPerGPUHour"]["GPU%"] == "89"
+    assert _footers(records)["UsedPerGPU"]["GPU%"] == "45"        # (90 + 0)/2 GPUs
+    assert _tw_footers(records)["UsedPerGPUHour"]["GPU%"] == "89"  # by GPU-hours
 
 
 def test_the_time_weighted_cpu_mean_is_the_pooled_utilization():
@@ -554,11 +635,11 @@ def test_the_time_weighted_cpu_mean_is_the_pooled_utilization():
     records = {"a": _timed_job("a", 7200, cores=4, cpu_seconds=28800),   # CPU% 100
                "b": _timed_job("b", 300, cores=8, cpu_seconds=240)}      # CPU% 10
     footers = _tw_footers(records)
-    assert footers["Mean"]["CPU%"] == "55"               # (100 + 10)/2, per job
     pooled = 100 * (28800 + 240) / (7200 * 4 + 300 * 8)
-    assert footers["MeanPerGPUHour"]["CPU%"] == str(round(pooled))     # 93
-    # CPU-only jobs, so there is no GPU resource-time to report.
-    assert "gpu-hours" not in " ".join(footers["Jobs"].values())
+    assert footers["UsedPerCPUHour"]["CPU%"] == str(round(pooled))     # 93
+    # Per core rather than per core-hour it is 40 -- (100*4 + 10*8)/12 -- and a
+    # per-job mean would say 55. Only the core-hour form is the real utilization.
+    assert _footers(records)["UsedPerCPU"]["CPU%"] == "40"
 
 
 def test_a_job_with_no_runtime_is_excluded_and_reported():
@@ -566,9 +647,8 @@ def test_a_job_with_no_runtime_is_excluded_and_reported():
     good = _timed_job("a", 3600, gpu_util=100.0)
     bad = dataclasses.replace(_timed_job("b", 3600, gpu_util=0.0), duration=None)
     footers = _tw_footers({"a": good, "b": bad})
-    assert footers["MeanPerGPUHour"]["GPU%"] == "100"    # only the timed job counts
-    assert footers["Mean"]["GPU%"] == "50"               # but both are in the plain mean
-    assert "no-runtime=1" in footers["Jobs"].values()
+    assert footers["UsedPerGPUHour"]["GPU%"] == "100"    # only the timed job counts
+    assert "no-runtime=1" in footers["Jobs"].values()    # and the omission is stated
 
 
 def test_instantaneous_running_values_are_not_time_weighted():
@@ -580,8 +660,8 @@ def test_instantaneous_running_values_are_not_time_weighted():
     """
     records = {"a": _timed_job("a", 2 * 86400, gpu_util=100.0),
                "b": _timed_job("b", 300, gpu_util=0.0, gpus=3)}
-    assert "MeanPerGPUHour" not in _footers(records)     # time_weighted off
-    assert _footers(records)["MeanPerGPU"]["GPU%"] == "25"   # (100*1 + 0*3)/4
+    assert "UsedPerGPUHour" not in _footers(records)     # time_weighted off
+    assert _footers(records)["UsedPerGPU"]["GPU%"] == "25"   # (100*1 + 0*3)/4
 
 
 def test_plot_skips_the_time_weighted_footer():
@@ -662,10 +742,11 @@ def test_the_header_and_rules_stay_plain():
 
 
 def test_the_footers_are_tinted_too():
-    """A red Mean row is the fastest read on whether a selection is wasteful."""
+    """A red pooled row is the fastest read on whether a selection is wasteful."""
     records = {"1": _gpu_job("1", {"0": 2.0}), "2": _gpu_job("2", {"0": 4.0})}
-    mean = [r for r in _render_colored(records).splitlines() if r.startswith("Mean:")][0]
-    assert "\033[31m" in mean
+    pooled = [r for r in _render_colored(records).splitlines()
+              if r.startswith("Used/")][0]
+    assert "\033[31m" in pooled
 
 
 def test_non_percent_columns_are_never_tinted(gpu_record):

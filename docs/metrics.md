@@ -235,30 +235,23 @@ Two levels of averaging apply, and they answer different questions.
 summed total, which is capacity-weighted -- the difference only shows on cards of
 unequal size.
 
-**Across jobs**, two rows are printed. `Mean:` averages one value per job, whatever
-its size or length. The second row weights each job by the resource it held, and
-which weight applies depends on what the values mean.
+**Across jobs**, there is deliberately **no mean**. Utilization is bimodal --
+jobs cluster near 0% or near 100% -- so the average lands in a range where few
+jobs live and describes none of them. Measured on one partition over one day,
+385 GPU jobs split 302 at 75-100% against 11 at 0-5%; the per-job mean read 82%
+while the partition was 66% idle, and the per-job median (89%) was worse still.
 
-For **finished jobs** (and `running --avg`, and an explicit job ID) each value
-already covers the job's whole runtime, so the weight is *resource-time* and the
-row is `Mean/GPU-hr:`. This is what keeps a swarm of short jobs from drowning out
-a long one: 100 five-minute jobs idling at 0% against one two-day job at 100%
-average to 1% per job, but the long job is 85% of the GPU-hours, so per GPU-hour
-the answer is 85%. Measured on one partition over a day, `GPU%` came to **82% per
-job but 34% per GPU-hour** -- the short jobs were busy, the long ones were not,
-and only the second number describes what the hardware did.
+What is printed instead is a pooled ratio plus a distribution.
 
-For the **instantaneous running view** the weight is the GPU count alone and the
-row is `Mean/GPU:`: a 4-GPU job at 100% and a 1-GPU job at 0% give 50% per job and
-80% per GPU. Time weighting is deliberately *not* applied there. Every value in
-that table is a single scrape at the same moment, and multiplying one by two days
-of elapsed time would assert that the instant represents those two days. Only
-values that already span a runtime can be weighted by it.
+### The pooled row
 
-Each column is weighted by the resource *it* measures, so the row is the pooled
-utilization rather than an average of averages:
+`Used/GPU-hr:` (finished jobs, `running --avg`, an explicit job ID) or
+`Used/GPU:` (the instantaneous running view) is used resource-time over allocated
+resource-time. Being a ratio of totals rather than a centre, it stays meaningful
+whatever the shape of the distribution. Each column is pooled over the resource
+*it* measures:
 
-| column | weight under `Mean/GPU-hr:` |
+| column | weight |
 |---|---|
 | `GPU%`, `GMEM%`, DCGM mean metrics | GPU-seconds (`#GPU` x elapsed) |
 | `CPU%` | core-seconds (allocated cores x elapsed) |
@@ -267,26 +260,51 @@ utilization rather than an average of averages:
 Weighting `CPU%` by core-seconds is exact, not merely reasonable: per job `CPU%`
 is `100 x cpu_seconds / (elapsed x cores)`, so summing numerator and denominator
 across the selection is identical to averaging the per-job values with weight
-`elapsed x cores`. Under `Mean/GPU:` the `CPU%` and `MEM%` cells are blank
-instead, since a job's GPU count says nothing about the CPU it held.
+`elapsed x cores`.
 
-The weighted row is omitted when it would only repeat `Mean:` -- equal GPU counts
-under count weighting, equal runtimes under time weighting -- and shown when a job
-is excluded from it, because the two rows then cover different sets. It covers
-only metrics whose cross-GPU aggregation is itself a mean (`MetricSpec.agg`):
-`ENERGY_kWh` sums over a job's GPUs and `PWRmax_W` takes the max, so scaling
-either would yield a number with no meaning, and those cells stay blank.
+Including elapsed time is what keeps a swarm of short jobs from drowning out a
+long one: 100 five-minute jobs idling at 0% against one two-day job at 100%
+average to 1% per job, but the long job is 85% of the GPU-hours. Time weighting
+is applied only where each value already spans its job's runtime. In the
+instantaneous running view the weights are bare resource counts, because every
+value there is a single scrape at the same moment and multiplying one by two days
+of elapsed time would assert that the instant represents those two days.
 
-A job whose elapsed time is unknown cannot be placed on the resource-hour scale at
-all. It stays in `Mean:` and is dropped from `Mean/GPU-hr:`, with the `Jobs:`
-footer reporting `no-runtime=N` so the omission is visible rather than silent.
-That footer also prints `gpu-hours=H`, the weighted row's own denominator.
+`ENERGY_kWh` sums over a job's GPUs and `PWRmax_W` takes the max
+(`MetricSpec.agg`), so neither has a pooled form; they fall back to the plain
+per-job figure rather than a weighting that would mean nothing.
+
+A job whose elapsed time is unknown cannot be placed on the resource-hour scale
+at all, so it is dropped from the row and counted as `no-runtime=N` in the
+`Jobs:` footer.
+
+### The efficiency block
+
+`GPU-hours:` splits the allocation into used and idle. `Bands:` then tallies each
+threshold band's share of the **jobs** and of the **resource-time**:
+
+```
+Bands:  GPU%  red<25 20 jobs (5%)/377.7h (64%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 361 jobs (94%)/208.7h (36%)
+```
+
+The gap between those two shares is the finding -- 5% of the jobs held 64% of the
+GPU-hours below 25% -- and either share alone conceals it. The bands come from
+`config.grade_band` and the site's `[thresholds]`, the same cutoffs that tint the
+cells and colour `jobscope plot`, so the block is a tally of what is already on
+screen rather than a second opinion.
+
+`Worst:` names the top few jobs by resource-time **wasted**, `(1 - u) x weight`,
+not by resource-time held: a 100-hour job at 24% is a larger finding than a
+10-hour job at 0%. It is omitted when no job falls in the red band.
+
+The block follows the view: `--cpu` bands `CPU%` over core-hours, and the
+instantaneous running view reports GPU counts rather than GPU-hours.
 
 Which jobs contribute is the part worth being exact about:
 
-| the job | contributes to the GPU mean? |
+| the job | contributes to the pooled GPU figure? |
 |---|---|
-| no GPU allocated | **no** -- there is no GPU% to average, and counting it would dilute |
+| no GPU allocated | **no** -- there is no GPU% to pool, and counting it would dilute |
 | GPU allocated, sat idle | **yes, as 0** -- this is the case worth finding, not hiding |
 | GPU allocated, no samples | **no** -- absence of data is not evidence of 0% use |
 | 4 allocated, 2 reported | the mean of the 2 that reported |
@@ -294,8 +312,10 @@ Which jobs contribute is the part worth being exact about:
 The last two lean the same way on purpose: jobscope never invents a zero for a
 GPU it has no measurement of, because a retention gap or an unscraped short job
 would then read as waste that was never observed. The cost is that such jobs
-quietly leave the average, which is why the `Jobs:` footer prints both totals --
+quietly leave the figure, which is why the `Jobs:` footer prints both totals --
 `cpu-jobs=18 gpu-jobs=17` says one job's GPU use is unmeasured rather than zero.
+The same jobs are absent from the band tally, so its shares are over measured
+resource-time only.
 
 `mean` by default; `max` for peak-like metrics; `sum` for energy. The per-job
 figure in the summary view uses this; the per-GPU rows in `detail`, `dcgm` and

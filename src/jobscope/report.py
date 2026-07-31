@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from .blob import blob_capacity, blob_detail, blob_metrics
-from .config import Thresholds
+from .config import DEFAULT_THRESHOLDS, Thresholds
 from .dcgm import (
     ALL_SPECS,
     DCGM_BLOB_HEADERS,
@@ -233,6 +233,105 @@ def extend_detail_row(row, per_gpu, duration=None, min_runtime=None, diagnose_on
     return out
 
 
+class EfficiencyTally:
+    """Where a selection's resource-time went, banded by the utilization thresholds.
+
+    A mean is a poor summary of this data: utilization is bimodal (jobs cluster at
+    either end), so the average lands in a range where few jobs live. Measured over
+    one day on one partition, GPU% averaged 82 per job while 5% of the jobs held
+    64% of the GPU-hours at under 25% -- two of them sat on 285 GPU-hours at 0%.
+    Counting jobs *and* the resource-time they held, per band, states that directly.
+
+    Fed one job at a time so the renderer stays streaming; ``worst`` is truncated
+    on every insert, so nothing here grows with the selection.
+    """
+
+    WORST = 3
+
+    def __init__(self, header: str, thresholds: "Thresholds", label: str,
+                 unit: str, scale: float = 1.0, row: str = "Used/GPU:",
+                 csv_row: str = "UsedPerGPU") -> None:
+        self.header = header            # the column being banded, "GPU%" or "CPU%"
+        self.thresholds = thresholds
+        self.label = label              # "GPU-hours", "GPUs", "Core-hours", ...
+        self.unit = unit                # "h" for resource-hours, "" for a count
+        self.scale = scale              # seconds -> hours, or 1 for a bare count
+        # What the pooled row is called. Kept to 12 characters, the width of the
+        # JOBID column: a longer label shifts every cell in the row one right.
+        self.row = row
+        self.csv_row = csv_row
+        self.bands = {band: [0, 0.0] for band in ("red", "yellow", "green")}
+        self.used = 0.0                 # resource-time actually utilized
+        self.total = 0.0                # resource-time allocated
+        self.worst: List[Tuple[float, str, str, float, float]] = []
+
+    def add(self, jobid: str, user: str, value: Optional[float], weight: float) -> None:
+        band = self.thresholds.grade(self.header, value)
+        if not band or weight <= 0:
+            # Ungraded (no measurement) or unweighable: counting it would either
+            # invent a utilization or give it no resource to account for.
+            return
+        self.bands[band][0] += 1
+        self.bands[band][1] += weight
+        self.used += (value / 100.0) * weight
+        self.total += weight
+        if band == "red":
+            # Ranked by resource-time *wasted*, not held: a 100-hour job at 24% is
+            # a bigger finding than a 10-hour job at 0%.
+            self.worst.append(((1 - value / 100.0) * weight, jobid, user, weight, value))
+            self.worst.sort(key=lambda item: -item[0])
+            del self.worst[self.WORST:]
+
+    def cutoff(self) -> float:
+        """The red threshold for this column, from the site config."""
+        return self.thresholds.red_map().get(self.header, self.thresholds.default)
+
+    def _amount(self, weight: float) -> str:
+        return "%.1f%s" % (weight / self.scale, self.unit) if self.unit \
+            else "%d" % round(weight / self.scale)
+
+    def totals_line(self) -> str:
+        """Allocated / used / idle. The unit is left to the row label."""
+        idle = self.total - self.used
+        bare = self._amount if not self.unit else (
+            lambda w: "%.1f" % (w / self.scale))
+        return "%s alloc  %s used  %s idle (%d%%)" % (
+            bare(self.total), bare(self.used), bare(idle),
+            round(100 * idle / self.total) if self.total else 0)
+
+    def bands_line(self) -> str:
+        """Each band's share of the jobs *and* of the resource-time.
+
+        Printing both is the point: "5% of jobs holding 64% of the GPU-hours" is
+        the finding, and either number alone conceals it.
+        """
+        red = self.cutoff()
+        jobs_total = sum(count for count, _ in self.bands.values())
+        parts = []
+        for band, edge in (("red", "<%g" % red), ("yellow", "<%g" % (2 * red)), ("green", "")):
+            jobs, weight = self.bands[band]
+            parts.append("%s%s %d job%s (%d%%)/%s (%d%%)" % (
+                band, edge, jobs, "" if jobs == 1 else "s",
+                round(100 * jobs / jobs_total) if jobs_total else 0,
+                self._amount(weight),
+                round(100 * weight / self.total) if self.total else 0))
+        return "%s  %s" % (self.header, "  ".join(parts))
+
+    def worst_line(self) -> str:
+        return "  ".join("%s %s@%d%% %s" % (jid, self._amount(weight), round(value), user)
+                         for _idle, jid, user, weight, value in self.worst)
+
+    def csv_cells(self) -> List[str]:
+        cells = ["column=%s" % self.header,
+                 "allocated=%s" % self._amount(self.total),
+                 "used=%s" % self._amount(self.used)]
+        for band in ("red", "yellow", "green"):
+            jobs, weight = self.bands[band]
+            cells.append("%s=%d" % (band, jobs))
+            cells.append("%s-amount=%s" % (band, self._amount(weight)))
+        return cells
+
+
 class SummaryRenderer:
     """Streaming form of summarize(): add() chunks as they arrive, then finish().
 
@@ -275,6 +374,21 @@ class SummaryRenderer:
         self.durations = set()      # distinct runtimes, likewise
         self.gpu_total = 0          # GPUs across the selection, for the Jobs footer
         self.unweighted = 0         # jobs left out of the weighting for want of a runtime
+        # Both resources are tallied; finish() prints whichever the view is about.
+        # Under time weighting the weights are resource-seconds, so they render as
+        # hours; otherwise they are bare counts of GPUs or cores.
+        thresholds = options.thresholds or Thresholds(**DEFAULT_THRESHOLDS)
+        hours = options.time_weighted
+        self.tallies = {
+            "gpu": EfficiencyTally("GPU%", thresholds, "GPU-hours" if hours else "GPUs",
+                                   "h" if hours else "", 3600.0 if hours else 1.0,
+                                   row="Used/GPU-hr:" if hours else "Used/GPU:",
+                                   csv_row="UsedPerGPUHour" if hours else "UsedPerGPU"),
+            "cpu": EfficiencyTally("CPU%", thresholds, "Core-hours" if hours else "Cores",
+                                   "h" if hours else "", 3600.0 if hours else 1.0,
+                                   row="Used/cpu-hr:" if hours else "Used/cpu:",
+                                   csv_row="UsedPerCPUHour" if hours else "UsedPerCPU"),
+        }
         self._started = False
 
     def _line(self, row: dict, color: bool = True) -> str:
@@ -323,17 +437,17 @@ class SummaryRenderer:
     def _weights(self, record: Optional[JobRecord], gpus: int) -> Dict[str, float]:
         """How much this job counts toward the weighted mean, per column family.
 
-        Without time weighting the weight is simply the GPU count, and CPU% / MEM%
-        get none: a job's GPU count says nothing about how much CPU it held, and
-        the row exists to answer "per GPU".
+        Each weight is the amount of the resource the column measures: cores for
+        CPU%, bytes for MEM%, GPUs for GPU% and GMEM%. Weighting each column by its
+        own resource is what makes the row the pooled utilization rather than an
+        average of averages.
 
-        With it, each weight is the *resource-time* the job was charged -- GPU
-        seconds, core seconds, byte seconds -- which is what stops 100 five-minute
-        jobs from outvoting one two-day job. Weighting by allocation size and time
-        together is also exactly the pooled utilization: CPU% is
-        ``100 x cpu_seconds / (elapsed x cores)`` per job, so summing the numerator
-        and the denominator over the selection is the same as averaging the per-job
-        values weighted by ``elapsed x cores``.
+        Under time weighting the weight is that resource multiplied by the elapsed
+        seconds -- the *resource-time* the job was charged -- which is what stops
+        100 five-minute jobs from outvoting one two-day job. For CPU% the identity
+        is exact: per job it is ``100 x cpu_seconds / (elapsed x cores)``, so
+        summing numerator and denominator over the selection is the same as
+        averaging the per-job values weighted by ``elapsed x cores``.
 
         A job with an unknown runtime cannot be placed on that scale, so it is left
         out of the weighted row (and counted in ``unweighted``) rather than silently
@@ -341,14 +455,15 @@ class SummaryRenderer:
         """
         if record is None:
             return {"cpu": 0.0, "mem": 0.0, "gpu": 0.0, "gmem": 0.0}
+        cores, memory = blob_capacity(record.stats)
         if not self.options.time_weighted:
-            return {"cpu": 0.0, "mem": 0.0, "gpu": float(gpus), "gmem": float(gpus)}
+            return {"cpu": float(cores), "mem": float(memory),
+                    "gpu": float(gpus), "gmem": float(gpus)}
         seconds = record.duration
         if not seconds or seconds <= 0:
             self.unweighted += 1
             return {"cpu": 0.0, "mem": 0.0, "gpu": 0.0, "gmem": 0.0}
         self.durations.add(seconds)
-        cores, memory = blob_capacity(record.stats)
         return {"cpu": cores * seconds, "mem": memory * seconds,
                 "gpu": gpus * seconds, "gmem": gpus * seconds}
 
@@ -391,6 +506,8 @@ class SummaryRenderer:
                             # total matches the GPUs actually behind the GPU figures.
                             self.gpu_total += gpus
                             self.gpu_counts.add(gpus)
+                    if key in self.tallies:
+                        self.tallies[key].add(jid, row["USER"], value, weights[key])
             if do_dcgm:
                 overall = dcgm_data.get(jid, ({}, {}))[0]
                 for header in self.dcgm_headers:
@@ -421,80 +538,78 @@ class SummaryRenderer:
         if self.count == 1:
             return
 
-        def mean(key: str) -> str:
-            total, count = self.sums[key]
-            return str(round(total / count)) if count else "-"
-
-        mean_row = {c.header: "" for c in self.columns}
+        # The single aggregate row: each column pooled over the resource it
+        # measures, so it reads "of all the GPU-hours (or GPUs, or core-hours) this
+        # selection held, this fraction was used". There is deliberately no per-job
+        # mean. Utilization is bimodal -- jobs cluster near 0% or near 100% -- so
+        # its average describes a job that does not exist, and it hides exactly the
+        # case worth finding: a handful of large idle jobs among many small busy
+        # ones. Unlike a mean this row stays true under that distribution, because
+        # it is a ratio of totals rather than a centre.
+        used_row = {c.header: "" for c in self.columns}
         for key, header in (("cpu", "CPU%"), ("mem", "MEM%"),
                             ("gpu", "GPU%"), ("gmem", "GMEM%")):
-            mean_row[header] = mean(key)
+            total, n = self.weighted[key]
+            used_row[header] = str(round(total / n)) if n else "-"
         if options.show_dcgm:
             for header in self.dcgm_headers:
-                total, count = self.sums_dcgm[header]
-                mean_row[header] = format_by_header(header, total / count) if count else "-"
-
-        # The same figures weighted by how much hardware each job held -- and, under
-        # time weighting, for how long. Per job, a 4-GPU job at 100% and a 1-GPU job
-        # at 0% average to 50; per GPU that is 80; and if the busy job ran for two
-        # days against the idle one's five minutes, per GPU-hour it is ~100. Only
-        # worth a row when the weights actually vary, otherwise it repeats Mean.
-        # Varying weights are the usual reason, but an excluded job is another: if
-        # one job has no runtime the weighted mean is over a different set than the
-        # plain one, so the two differ even when every weight is equal.
-        weighted_row = None
-        if len(self.gpu_counts) > 1 or (options.time_weighted
-                                       and (len(self.durations) > 1 or self.unweighted)):
-            weighted_row = {c.header: "" for c in self.columns}
-            keys = (("cpu", "CPU%"), ("mem", "MEM%"), ("gpu", "GPU%"), ("gmem", "GMEM%"))
-            for key, header in keys:
-                total, n = self.weighted[key]
-                if not n:
-                    # Blank, not "-": under GPU-count weighting CPU% and MEM% are
-                    # not being claimed as unavailable, they are not applicable.
-                    weighted_row[header] = "-" if options.time_weighted else ""
-                    continue
-                weighted_row[header] = str(round(total / n))
-            if options.show_dcgm:
-                for header in self.weightable:
+                if header in self.weightable:
                     total, n = self.weighted_dcgm[header]
-                    weighted_row[header] = (format_by_header(header, total / n) if n else "-")
+                else:
+                    # A per-job total (ENERGY_kWh) or a peak (PWRmax_W): there is no
+                    # resource to divide it by, so report the plain figure instead
+                    # of a weighting that would mean nothing.
+                    total, n = self.sums_dcgm[header]
+                used_row[header] = format_by_header(header, total / n) if n else "-"
 
-        # How many jobs each mean came from, plus the resource total behind the
-        # weighted row. The job counts differ whenever the selection mixes CPU-only
-        # and GPU work: a CPU-only job has no GPU% to average, so it is absent from
-        # the GPU figures rather than counted as zero.
-        counts = ["cpu-jobs=%d" % self.sums["cpu"][1], "gpu-jobs=%d" % self.sums["gpu"][1]]
-        if self.gpu_total:
-            counts.append("gpus=%d" % self.gpu_total)
-        if options.time_weighted and self.weighted["gpu"][1]:
-            # The weighted row's own denominator, in GPU-hours: the resource-time
-            # the GPU figures are an average over.
-            counts.append("gpu-hours=%s" % format_number(self.weighted["gpu"][1] / 3600.0, 1))
+        # Where that resource-time actually went. The GPU tally leads when the
+        # selection has GPU work and the view shows it; otherwise the CPU one, so a
+        # --cpu run is not silently blank.
+        tally = self.tallies["gpu"]
+        if options.view == "cpu" or not tally.total:
+            tally = self.tallies["cpu"]
+
+        # The job counts differ whenever the selection mixes CPU-only and GPU work:
+        # a CPU-only job has no GPU% to average, so it is absent from the GPU
+        # figures rather than counted as zero.
+        counts = ["cpu-jobs=%d" % self.sums["cpu"][1]]
+        if options.view != "cpu":
+            # A --cpu run hid the GPU columns; repeating GPU totals here is noise.
+            counts.append("gpu-jobs=%d" % self.sums["gpu"][1])
+            if self.gpu_total:
+                counts.append("gpus=%d" % self.gpu_total)
+        # gpu-hours is not repeated here: the resource line above already states the
+        # weighted row's denominator, and states it split into used and idle.
         if self.unweighted:
             counts.append("no-runtime=%d" % self.unweighted)
 
+        def padded(label, cells):
+            """A footer row padded to the header width, so the CSV stays rectangular.
+            parse_csv drops it by its first cell either way."""
+            return ([label] + cells + [""] * len(self.headers))[:len(self.headers)]
+
         if options.csv:
-            mean_row["JOBID"] = "Mean"
-            self.writer.writerow([mean_row[h] for h in self.headers])
-            if weighted_row is not None:
-                weighted_row["JOBID"] = ("MeanPerGPUHour" if options.time_weighted
-                                         else "MeanPerGPU")
-                self.writer.writerow([weighted_row[h] for h in self.headers])
-            # Padded to the header width so the CSV stays rectangular; parse_csv
-            # drops the row by its first cell either way.
-            self.writer.writerow((["Jobs"] + counts
-                                  + [""] * len(self.headers))[:len(self.headers)])
+            used_row["JOBID"] = tally.csv_row
+            self.writer.writerow([used_row[h] for h in self.headers])
+            if tally.total:
+                self.writer.writerow(padded(tally.label.replace("-", ""),
+                                            tally.csv_cells()))
+                if tally.worst:
+                    self.writer.writerow(padded("Worst", [
+                        "%s=%s@%d" % (jid, tally._amount(weight), round(value))
+                        for _idle, jid, _user, weight, value in tally.worst]))
+            self.writer.writerow(padded("Jobs", counts))
         else:
-            mean_row["JOBID"] = "Mean:"
+            used_row["JOBID"] = tally.row
             if options.header:
                 print("-" * len(self._line({c.header: c.header for c in self.columns},
                                            color=False)), file=self.out)
-            print(self._line(mean_row), file=self.out)
-            if weighted_row is not None:
-                weighted_row["JOBID"] = ("Mean/GPU-hr:" if options.time_weighted
-                                         else "Mean/GPU:")
-                print(self._line(weighted_row), file=self.out)
+            print(self._line(used_row), file=self.out)
+            if tally.total:
+                print("%-12s %s" % (tally.label + ":", tally.totals_line()), file=self.out)
+                print("%-12s %s" % ("Bands:", tally.bands_line()), file=self.out)
+                if tally.worst:
+                    print("%-12s %s" % ("Worst:", tally.worst_line()), file=self.out)
             print("%-12s %s" % ("Jobs:", "  ".join(counts)), file=self.out)
 
 
