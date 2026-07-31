@@ -167,8 +167,13 @@ The header states the window it actually scanned, since `last 1 day` does not sa
   Window:    2026-07-30 11:25 .. 2026-07-31 11:25
 ```
 
-A bare `-N` gets one too -- it reaches back 30 days by default, which is worth
-knowing. For an explicit `-S`/`-E` the `Select` line already *is* the window, so it
+A bare `-N` gets one too, and its span is decided at query time. sacct has no
+"last N", so a window has to be scanned and trimmed; jobscope starts at one day and
+widens (1, 3, 7, 30) only until the window holds enough jobs. On a busy partition
+that is the difference between 2.8 seconds and not finishing: one day of
+`kempner_eng` takes ~1.2s to list where 30 days does not return inside the 60s cap.
+The `Window` line reports the span it settled on, so `-N 3` for a user whose newest
+job is five days old shows a seven-day window. For an explicit `-S`/`-E` the `Select` line already *is* the window, so it
 is not repeated; that also shows how `-S DATE` alone was widened to the whole
 calendar day.
 

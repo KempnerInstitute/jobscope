@@ -62,23 +62,16 @@ def test_explicit_window_is_left_alone():
     assert (selection.starttime, selection.endtime) == ("2026-07-15", "2026-07-20")
 
 
-def test_lastn_gets_the_default_lookback_resolved():
-    """-N trims client-side, but the window is still made explicit.
+def test_lastn_leaves_its_window_to_the_ladder():
+    """-N is resolved at query time, not here.
 
-    It used to be left unset for sacct to default, which meant the header could only
-    echo "now-30days" back at the reader instead of naming the dates scanned.
+    sacct has no "last N", so a window must be scanned and trimmed. Fixing one here
+    would mean scanning the whole default lookback to find a job or two; select_jobs
+    instead widens a rung at a time and writes back what it settled on.
     """
-    from jobscope.sacct import DEFAULT_LOOKBACK_DAYS, format_window
     selection = sacct_selection(Request(mode=FINISHED, lastn=5, user="alice"))
     assert selection.lastn == 5
-    start, end = selection.window()
-    assert "now" not in start and "now" not in end
-    # Real dates, spanning the default lookback.
-    shown = format_window(start, end)
-    assert shown.count("..") == 1 and len(shown.split(" .. ")) == 2
-    span = time.mktime(time.strptime(end, "%Y-%m-%dT%H:%M:%S")) - \
-        time.mktime(time.strptime(start, "%Y-%m-%dT%H:%M:%S"))
-    assert abs(span - DEFAULT_LOOKBACK_DAYS * 86400) < 5
+    assert selection.starttime is None and selection.endtime is None
 
 
 def test_sacct_selection_carries_every_filter():

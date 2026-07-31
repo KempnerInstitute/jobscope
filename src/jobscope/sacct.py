@@ -44,6 +44,8 @@ DEFAULT_STATE = "completed"
 # How far back a request that names no window reaches. Resolved to real timestamps by
 # select.sacct_selection, so the header can print dates rather than "now-30days".
 DEFAULT_LOOKBACK_DAYS = 30
+# Windows -N tries, narrowest first, stopping as soon as one holds enough jobs.
+LASTN_LADDER = (1, 3, 7, DEFAULT_LOOKBACK_DAYS)
 # Last-resort fallbacks, for a Selection built without going through that resolution.
 DEFAULT_START = "now-%ddays" % DEFAULT_LOOKBACK_DAYS
 DEFAULT_END = "now"
@@ -279,12 +281,8 @@ def run_capture(cmd: List[str], timeout: Optional[float], what: str,
     return out
 
 
-def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[str], str]:
-    """Return ``(jobids, description)``. Per-job data is fetched afterward in bulk."""
-    if selection.jobids:
-        return list(selection.jobids), "%d job ID(s)" % len(selection.jobids)
-
-    start, end = selection.window()
+def _select_cmd(selection: Selection, start: str, end: str) -> List[str]:
+    """The sacct command that lists candidate job IDs for a window."""
     cmd = ["sacct", "-X", "-S", start, "-E", end,
            "--noheader", "-P", "-o", "JobID,State"]
     # -a spans every user; otherwise scope to one. Mutually exclusive by
@@ -295,22 +293,71 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
     if selection.partition:
         cmd += ["-r", selection.partition]
     # Always filtered by state, so sacct never hands back a job that is still
-    # running: `finished` reporting a RUNNING job was the bug this closes.
+    # running: `finished` reporting a RUNNING job was the bug this closed.
     cmd += ["-s", ",".join(states_for(selection.state))]
-    out = run_capture(cmd, timeout, "sacct query")
+    return cmd
 
+
+def _query_ids(selection: Selection, start: str, end: str,
+               timeout: Optional[float]) -> List[str]:
+    """Finished job IDs in ``[start, end]``, oldest first as sacct returns them."""
+    out = run_capture(_select_cmd(selection, start, end), timeout, "sacct query")
     ids = []
     for line in out.splitlines():
         parts = line.split("|", 1)
-        # Belt and braces behind the -s filter above: whatever sacct returns, a job
-        # that has not finished has no final numbers and does not belong here.
+        # Belt and braces behind the -s filter: whatever sacct returns, a job that has
+        # not finished has no final numbers and does not belong here.
         if len(parts) == 2 and not parts[1].upper().startswith(
                 ("PENDING", "RUNNING", "SUSPENDED", "REQUEUED")):
             ids.append(parts[0])
+    return ids
 
+
+def _query_lastn(selection: Selection, timeout: Optional[float]) -> List[str]:
+    """Widen the window a rung at a time until it holds ``lastn`` jobs.
+
+    ``-N`` asks for the most recent few jobs, and sacct has no "last N" -- a window
+    has to be scanned and trimmed. Scanning the full default lookback to find one job
+    is the slowest possible way to answer the cheapest question: on one busy partition
+    a day took 1.2s and 30 days did not return inside 60s. So start narrow and only
+    widen when the window genuinely does not hold enough.
+
+    The window actually used is written back onto ``selection``, so the header reports
+    the span that was scanned rather than the one that was asked for.
+    """
+    ids: List[str] = []
+    for index, days in enumerate(LASTN_LADDER):
+        start, end = days_to_window(days)
+        try:
+            found = _query_ids(selection, start, end, timeout)
+        except JobscopeError:
+            # A later rung timing out should not throw away a narrower rung's answer:
+            # some jobs beat an error, and the header will say how far back it looked.
+            if index == 0 or not ids:
+                raise
+            break
+        selection.starttime, selection.endtime = start, end
+        ids = found
+        if len(ids) >= selection.lastn:
+            break
+    return ids
+
+
+def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[str], str]:
+    """Return ``(jobids, description)``. Per-job data is fetched afterward in bulk."""
+    if selection.jobids:
+        return list(selection.jobids), "%d job ID(s)" % len(selection.jobids)
+
+    if selection.lastn is not None and not selection.starttime:
+        ids = _query_lastn(selection, timeout)
+    else:
+        ids = _query_ids(selection, *selection.window(), timeout=timeout)
+
+    start, end = selection.window()
     if selection.lastn is not None:
-        ids = ids[-selection.lastn:]  # sacct lists ascending, so the last N are the most recent
-        desc = "last %d jobs" % selection.lastn
+        ids = ids[-selection.lastn:]  # sacct lists ascending, so the last N are newest
+        desc = "last %d job%s" % (selection.lastn,
+                                  "s" if selection.lastn != 1 else "")
     elif selection.days is not None:
         desc = "last %d day%s" % (selection.days, "s" if selection.days != 1 else "")
     else:

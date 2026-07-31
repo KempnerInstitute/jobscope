@@ -1,12 +1,14 @@
 """Tests for job selection, the bulk fetch, and the subprocess helper."""
 
 import errno
+import time
 
 import pytest
 
 from jobscope import sacct
 from jobscope.errors import JobscopeError
 from jobscope.sacct import (
+    TIMESTAMP_FORMAT,
     Selection,
     days_to_window,
     default_user,
@@ -104,8 +106,68 @@ def test_select_jobs_lastn(monkeypatch):
     monkeypatch.setattr(sacct, "run_capture",
                         lambda *a, **k: "100|COMPLETED\n101|COMPLETED\n")
     ids, desc = select_jobs(Selection(user="alice", lastn=1), None)
+    assert ids == ["101"]                       # ascending, so the tail is newest
+    assert desc == "last 1 job, completed"      # singular
+
+
+def test_lastn_stops_at_the_narrowest_window_that_holds_enough(monkeypatch):
+    """Scanning the full lookback to find one job is the slowest way to answer the
+    cheapest question: measured, one day took 1.2s where 30 days timed out at 60."""
+    windows = []
+
+    def fake(cmd, *a, **k):
+        windows.append((cmd[cmd.index("-S") + 1], cmd[cmd.index("-E") + 1]))
+        return "100|COMPLETED\n101|COMPLETED\n"
+
+    monkeypatch.setattr(sacct, "run_capture", fake)
+    selection = Selection(user="alice", lastn=1)
+    ids, _desc = select_jobs(selection, None)
     assert ids == ["101"]
-    assert desc == "last 1 jobs, completed"
+    assert len(windows) == 1                    # the first rung sufficed
+    # And the span it settled on is reported, not the one that was asked for.
+    assert selection.starttime == windows[0][0]
+    span = time.mktime(time.strptime(selection.endtime, TIMESTAMP_FORMAT)) - \
+        time.mktime(time.strptime(selection.starttime, TIMESTAMP_FORMAT))
+    assert abs(span - sacct.LASTN_LADDER[0] * 86400) < 5
+
+
+def test_lastn_widens_until_it_has_enough(monkeypatch):
+    calls = []
+
+    def fake(cmd, *a, **k):
+        calls.append(cmd[cmd.index("-S") + 1])
+        # Nothing until the third rung, then two jobs.
+        return "100|COMPLETED\n101|COMPLETED\n" if len(calls) >= 3 else ""
+
+    monkeypatch.setattr(sacct, "run_capture", fake)
+    ids, _desc = select_jobs(Selection(user="alice", lastn=2), None)
+    assert ids == ["100", "101"]
+    assert len(calls) == 3
+
+
+def test_lastn_keeps_a_narrow_answer_when_a_wider_query_times_out(monkeypatch):
+    """Some jobs beat an error, and the header says how far back it managed to look."""
+    calls = []
+
+    def fake(cmd, *a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            return "100|COMPLETED\n"
+        raise JobscopeError("sacct query timed out after 60s")
+
+    monkeypatch.setattr(sacct, "run_capture", fake)
+    ids, _desc = select_jobs(Selection(user="alice", lastn=5), None)
+    assert ids == ["100"]                       # not an exception
+    assert len(calls) == 2
+
+
+def test_lastn_still_raises_when_even_the_narrowest_window_fails(monkeypatch):
+    def boom(*a, **k):
+        raise JobscopeError("sacct query timed out after 60s")
+
+    monkeypatch.setattr(sacct, "run_capture", boom)
+    with pytest.raises(JobscopeError, match="timed out"):
+        select_jobs(Selection(user="alice", lastn=5), None)
 
 
 def test_select_jobs_days_desc(monkeypatch):

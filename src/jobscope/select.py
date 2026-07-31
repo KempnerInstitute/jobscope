@@ -37,7 +37,6 @@ from .live_blob import fill_running, note_offline_gap
 from .prometheus import PrometheusClient, client_from_config
 from .report import RenderOptions, context_pairs, dcgm_timeseries, live_timeseries
 from .sacct import (
-    DEFAULT_LOOKBACK_DAYS,
     JobRecord,
     Selection,
     days_to_window,
@@ -206,10 +205,9 @@ def sacct_selection(request: Request) -> Selection:
         start, end = days_to_window(request.days)
     elif start and not end:
         end = end_of_day(start)     # -S alone selects that calendar day
-    elif not start:
-        # -N alone, or nothing: resolve the default lookback here too, so the header
-        # can name real dates instead of echoing sacct's "now-30days" back.
-        start, end = days_to_window(DEFAULT_LOOKBACK_DAYS)
+    # A bare -N deliberately leaves the window unset: select_jobs widens it a rung at
+    # a time until it holds enough jobs, and writes back the span it settled on. That
+    # is much cheaper than scanning the whole default lookback to find a job or two.
     return Selection(user=request.user, jobids=list(request.jobids),
                      account=request.account, partition=request.partition,
                      state=request.state, lastn=request.lastn, days=request.days,
