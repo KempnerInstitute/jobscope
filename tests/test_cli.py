@@ -2,6 +2,7 @@
 
 import argparse
 import dataclasses
+import sys
 
 import pytest
 
@@ -859,3 +860,98 @@ def test_narrowing_leaves_a_formattable_usage_line(capsys):
     for argv in (["--ts"], ["--per-gpu"], ["--cpu", "--ts"], ["-j", "1", "--per-gpu"]):
         body, _ = _help_for(argv, capsys)
         assert body.startswith("usage: jobscope")
+
+
+# --- --plot_ts: the time-series chart in one command -------------------------
+
+_TS_HEAD = "JOBID,EPOCH,TIME,NODE,GPU,GPU%,GMEM%\n"
+
+
+def _ts_rows(jobids=("100",), nodes=("node01",), gpus=("0", "1", "2", "3")):
+    return "".join(
+        "%s,%d,2020-01-01T00:%02d:00,%s,%s,%d,%d\n" % (j, 1000 + 60 * t, t, n, g, 90 + t, 50 + t)
+        for j in jobids for n in nodes for g in gpus for t in range(3))
+
+
+def _fake_ts(monkeypatch, body):
+    """Stand in for emit_timeseries, writing `body` to wherever it was told to."""
+    def emit(*a, **kw):
+        (kw.get("out") or sys.stdout).write(_TS_HEAD + body)
+    monkeypatch.setattr(cli, "emit_timeseries", emit)
+
+
+@pytest.mark.parametrize("flag", ["--plot-ts", "--plot_ts"])
+def test_plot_ts_is_the_timeseries_plus_a_chart(flag):
+    """It implies --ts, so every --ts path -- schema, --step, --nodename -- applies."""
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args([flag])
+    assert args.plot_ts is True
+
+
+def test_plot_ts_charts_instead_of_writing_the_csv(monkeypatch, capsys):
+    _fake_ts(monkeypatch, _ts_rows())
+    main(["-j", "1", "--plot_ts"])
+    out = capsys.readouterr().out
+    assert "JOBID,EPOCH" not in out      # the CSV went to the chart, not to stdout
+    assert "┤" in out and "GPU%" in out
+
+
+def test_plot_ts_takes_its_column_count_from_the_data(monkeypatch, capsys):
+    """No --gpu to type: the CSV already says how many there are."""
+    monkeypatch.setenv("COLUMNS", "210")     # wide enough for all four abreast
+    _fake_ts(monkeypatch, _ts_rows(gpus=("0", "1", "2", "3")))
+    main(["-j", "1", "--plot_ts"])
+    titles = [ln for ln in capsys.readouterr().out.splitlines() if "gpu0" in ln]
+    assert titles and all(("gpu%d" % g) in titles[0] for g in range(4))
+
+
+def test_plot_ts_narrows_the_columns_to_the_terminal(monkeypatch, capsys):
+    """Same 4 -> fewer degradation the --per-gpu charts have; the rest wrap."""
+    monkeypatch.setenv("COLUMNS", "100")
+    _fake_ts(monkeypatch, _ts_rows(gpus=("0", "1", "2", "3")))
+    main(["-j", "1", "--plot_ts"])
+    titles = [ln for ln in capsys.readouterr().out.splitlines() if "gpu0" in ln]
+    assert "gpu3" not in titles[0]
+
+
+def test_plot_ts_needs_a_nodename_when_the_job_spanned_nodes(monkeypatch, capsys):
+    """The multinode branch charts one metric per node, which is not what was asked."""
+    _fake_ts(monkeypatch, _ts_rows(nodes=("node01", "node02")))
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--plot_ts"])
+    err = capsys.readouterr().err
+    assert "node01, node02" in err and "--nodename" in err
+
+
+def test_plot_ts_needs_no_nodename_for_a_single_node_job(monkeypatch, capsys):
+    _fake_ts(monkeypatch, _ts_rows(nodes=("node01",)))
+    main(["-j", "1", "--plot_ts"])
+    assert "┤" in capsys.readouterr().out
+
+
+def test_plot_ts_refuses_several_jobs(monkeypatch, capsys):
+    """Series key on (NODE, GPU) alone, so two jobs on one GPU would become one line."""
+    _fake_ts(monkeypatch, _ts_rows(jobids=("100", "101")))
+    with pytest.raises(SystemExit):
+        main(["finished", "-D", "1", "--plot_ts"])
+    err = capsys.readouterr().err
+    assert "one job" in err and "100, 101" in err and "-j JOBID" in err
+
+
+def test_plot_ts_and_csv_contradict(capsys):
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--plot_ts", "--csv"])
+    assert "drop --csv" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("other", ["--ts", "--per-gpu"])
+def test_plot_ts_is_exclusive_with_the_other_granularities(other):
+    _, subparsers = build_parser()
+    with pytest.raises(SystemExit):
+        subparsers.choices[RUNNING].parse_intermixed_args(["--plot-ts", other])
+
+
+def test_plot_ts_help_hides_what_it_rules_out(capsys):
+    _, hidden = _help_for(["-j", "1", "--plot-ts"], capsys)
+    assert {"--csv", "--ts", "--per-gpu"} <= set(hidden)
+    assert "--nodename" not in hidden      # the flag it points you at

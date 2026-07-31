@@ -277,3 +277,30 @@ def test_a_missing_gpu_in_the_list_names_every_one_that_is_absent(tmp_path, caps
                   extra=["--gpu", "0,7,9"])
     assert "'7'" in str(exc.value) and "'9'" in str(exc.value)
     assert "0, 1, 2, 3" in str(exc.value)
+
+
+def test_default_args_carries_every_option_the_subcommand_defines():
+    """--plot_ts renders without going through the subcommand, so its namespace has to
+    stay in step. Derived from add_arguments rather than written out, which is what
+    this pins: adding a plot option must not leave the one-command path missing it."""
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=False)
+    plot.add_arguments(parser)
+    defined = {a.dest for a in parser._actions if a.dest != "help"}
+    assert defined <= set(vars(plot.default_args()))
+
+
+def test_default_args_applies_overrides():
+    args = plot.default_args(kind="line", by="metric", columns=True)
+    assert (args.kind, args.by, args.columns) == ("line", "metric", True)
+    assert args.gpu is None and args.compact is False      # the rest stay default
+
+
+def test_columns_grids_without_naming_the_gpus(tmp_path, capsys):
+    """The gap --plot_ts needed filled: a grid without listing every card by hand."""
+    out = _run_plot(tmp_path, "gc.csv", _GRID_CSV, capsys,
+                    extra=["--by", "metric", "--columns", "--metric", "GMEM%",
+                           "--width", "200"])
+    titles = [ln for ln in out.splitlines() if "gpu0" in ln]
+    assert titles and all(("gpu%d" % g) in titles[0] for g in range(4))

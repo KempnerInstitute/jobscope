@@ -7,6 +7,7 @@ with --kind. plotext and rich are imported lazily so the other subcommands never
 pay for them.
 """
 
+import argparse
 import csv
 import os
 import shutil
@@ -406,7 +407,7 @@ def render_line(columns, rows, args, plt, Console):
     # that answers "did one card diverge", and 7 metrics x 4 GPUs is 28 panels, which
     # should be asked for rather than arrived at.
     as_columns = (not multinode and n_keys > 1
-                  and bool(args.gpu) and len(gpu_list(args.gpu)) > 1)
+                  and (args.columns or len(gpu_list(args.gpu or "")) > 1))
 
     if multinode:
         metric = metrics[0]
@@ -482,6 +483,9 @@ def add_arguments(parser):
     parser.add_argument("--by", choices=["metric", "gpu"], default="gpu",
                         help="line: facet by 'gpu' (default; one panel per GPU, all metrics on a shared "
                              "axis) or 'metric' (one panel per metric, own y-axis)")
+    parser.add_argument("--columns", action="store_true",
+                        help="line + --by metric: one panel per GPU side by side, instead of "
+                             "overlaying them (what naming several in --gpu also does)")
     parser.add_argument("--compact", action="store_true",
                         help="line: one braille sparkline row per metric, instead of full-height panels")
     parser.add_argument("--title", help="override the chart title")
@@ -493,13 +497,35 @@ def add_arguments(parser):
                         help="disable color (also respects $NO_COLOR)")
 
 
-def run(args) -> None:
-    """Execute the ``plot`` subcommand from parsed arguments."""
+def default_args(**overrides):
+    """A plot argument namespace with every default filled in.
+
+    Derived from :func:`add_arguments` rather than written out, so a caller that
+    renders without going through the subcommand -- ``--plot_ts`` -- cannot go stale
+    the first time ``plot`` grows an option.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    add_arguments(parser)
+    args = parser.parse_args([])
+    for name, value in overrides.items():
+        setattr(args, name, value)
+    return args
+
+
+def run(args, fobj=None) -> None:
+    """Execute the ``plot`` subcommand from parsed arguments.
+
+    ``fobj`` renders an already-open CSV instead of a file or stdin, which is how
+    ``--plot_ts`` charts the series it just emitted: everything below is then shared,
+    so the one-command chart cannot drift from the piped one.
+    """
     if os.environ.get("NO_COLOR"):
         args.no_color = True
 
     path = args.file_opt or args.file
-    if path:
+    if fobj is not None:
+        pass
+    elif path:
         try:
             fobj = open(path, newline="")
         except OSError as exc:

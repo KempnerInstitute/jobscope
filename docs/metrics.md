@@ -6,7 +6,8 @@ could answer. Read this when a number looks wrong, when two views disagree, or
 before adding a metric.
 
 Companion documents: `jobscope describe` (column reference) and `jobscope describe
---dcgm --ext` (the full metric catalog). `--per-gpu` and `--ts` give per-GPU rows.
+--dcgm --ext` (the full metric catalog). `--per-gpu` and `--ts` give per-GPU rows, and `--plot_ts` charts that series in
+place of writing it.
 
 ---
 

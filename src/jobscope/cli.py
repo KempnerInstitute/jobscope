@@ -17,6 +17,7 @@ aliases; see :data:`DEPRECATED`.
 """
 
 import argparse
+import io
 import os
 import sys
 from typing import List, Optional
@@ -148,6 +149,10 @@ def build_parser():
                             "(--hwdetail is the old name for it)")
     grain.add_argument("--ts", "--timeseries", dest="ts", action="store_true",
                        help="the per-scrape time series as CSV (pipes to 'jobscope plot')")
+    grain.add_argument("--plot-ts", "--plot_ts", dest="plot_ts", action="store_true",
+                       help="chart that time series instead of writing it: one panel per "
+                            "metric, one column per GPU. Needs --nodename on a "
+                            "multi-node job")
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
                        help="--per-gpu / --ts: report only this node's GPUs")
@@ -288,14 +293,20 @@ def _inert_dests(args) -> set:
     else:
         hide.add("avg")          # raises: a finished job is always folded over its runtime
         hide.add("min_elapsed")  # only ever reaches LiveSelection
-    if args.ts:
+    if args.ts or args.plot_ts:
         # emit_timeseries drops these with a note; the series has no host, advisory or
         # aggregate columns to put them in, and nothing is plotted. --nodename is not
         # among them: the series carries a NODE column, so the filter applies.
         hide.update({"view", "diagnose", "diag_short", "per_gpu", "no_plot"})
+        if args.plot_ts:
+            hide.update({"csv", "ts"})   # raises / mutually exclusive
+        else:
+            hide.add("plot_ts")
     else:
         hide.add("step")  # only emit_timeseries reads it
         hide.add("ts" if args.per_gpu else "nodename")
+        if args.per_gpu:
+            hide.add("plot_ts")
     if args.view == "cpu":
         # show_dcgm goes false, so the spec list is never built and DIAG has no GPU
         # metric to advise on.
@@ -492,8 +503,44 @@ def _want_color(args) -> bool:
     return bool(getattr(sys.stdout, "isatty", lambda: False)())
 
 
+def _plot_timeseries(text: str, args) -> None:
+    """Chart the series ``--plot_ts`` just emitted, in place of writing its CSV.
+
+    The two guards are here rather than in the renderer because only the emitted CSV
+    knows how many nodes and jobs it covers, and because the fix for each is a flag on
+    this side of the pipe.
+    """
+    _columns, rows = plot.parse_csv(io.StringIO(text))
+    if not rows:
+        # emit_timeseries has already said why on stderr.
+        return
+    jobids = sorted({r.get("JOBID") for r in rows if r.get("JOBID")})
+    if len(jobids) > 1:
+        # render_line keys its series on (NODE, GPU) alone, so two jobs that shared a
+        # GPU would concatenate into one line: a chart that looks right and is not.
+        raise JobscopeError(
+            "--plot_ts charts one job; this selection has %d (%s%s). Pick one with -j JOBID."
+            % (len(jobids), ", ".join(jobids[:4]), ", ..." if len(jobids) > 4 else ""))
+    nodes = sorted({r.get("NODE") for r in rows if r.get("NODE")})
+    if len(nodes) > 1:
+        raise JobscopeError(
+            "--plot_ts charts one node; this job ran on %d: %s. Add --nodename=NODE."
+            % (len(nodes), ", ".join(nodes)))
+    plot.run(plot.default_args(kind="line", by="metric", columns=True,
+                               no_color=args.no_color),
+             fobj=io.StringIO(text))
+
+
 def handle_report(args) -> None:
     """The one data path: select jobs, then render at the chosen granularity."""
+    if args.plot_ts:
+        # --plot_ts *is* --ts, with the CSV charted instead of written. Setting it here,
+        # before anything reads it, means every --ts path applies unchanged: the schema,
+        # --step, and the --nodename guard just below.
+        if args.csv:
+            raise JobscopeError("--plot_ts draws a chart; drop --csv, or drop --plot_ts "
+                                "to keep the CSV")
+        args.ts = True
     cfg = _apply_config(args)
     request = build_request(args, cfg)
     timeout = _timeout(args, cfg)
@@ -537,7 +584,13 @@ def handle_report(args) -> None:
             if on:
                 print("note: %s does not apply to --ts (a per-GPU metric series)" % flag,
                       file=sys.stderr)
-        emit_timeseries(request, cfg, timeout, workers, specs, args.step, options)
+        if not args.plot_ts:
+            emit_timeseries(request, cfg, timeout, workers, specs, args.step, options)
+            return
+        buffer = io.StringIO()
+        emit_timeseries(request, cfg, timeout, workers, specs, args.step, options,
+                        out=buffer)
+        _plot_timeseries(buffer.getvalue(), args)
         return
 
     # The detail granularity renders the fixed DETAIL_COLUMNS, so it takes no spec

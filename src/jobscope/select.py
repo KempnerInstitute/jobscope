@@ -292,7 +292,7 @@ def _fill_running(records, jobids, cfg, timeout, workers, client):
 
 def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[float],
                     workers: int, specs: List[MetricSpec], step: Optional[int],
-                    options: RenderOptions) -> None:
+                    options: RenderOptions, out=None) -> None:
     """Write the per-scrape CSV for ``request``, from whichever source applies.
 
     Unlike the table granularities this dispatches rather than returning chunks:
@@ -300,6 +300,9 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
     window versus over ``[start, now]``), and forcing them into the chunk shape
     would buy nothing. Both write the identical schema, which is what
     ``jobscope plot`` depends on.
+
+    ``out`` sends the CSV somewhere other than stdout, which is how ``--plot_ts``
+    captures it and charts it in the same command.
     """
     if request.live:
         selection = _live_selection(request)
@@ -317,7 +320,7 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
                 raise no_such_node(options.nodename, {g.host for g in gpus.values()})
             gpus = kept
         samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, step)
-        live_timeseries(jobs, samples, gpus, specs, options)
+        live_timeseries(jobs, samples, gpus, specs, options, out=out)
         return
 
     selection = sacct_selection(request)
@@ -327,4 +330,4 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
         return
     records = fetch(jobids, timeout)
     client = client_from_config(cfg, timeout)
-    dcgm_timeseries(jobids, records, specs, client, timeout, options, step=step)
+    dcgm_timeseries(jobids, records, specs, client, timeout, options, step=step, out=out)

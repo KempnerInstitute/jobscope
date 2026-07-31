@@ -215,6 +215,7 @@ job that is running right now.
 | *(default)* | one row per job |
 | `--per-gpu` | one row per GPU, with node name and GPU number (see below). `--hwdetail` is the old name and still works |
 | `--ts` | the per-scrape time series as CSV |
+| `--plot_ts` | that time series charted instead: one panel per metric, one column per GPU |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--dcgm` | the full DCGM metric catalog |
 | `--avg` | `running` only: fold over the runtime instead of a snapshot |
@@ -692,6 +693,22 @@ node read side by side, one row per metric:
 jobscope -j 36441613 --nodename holygpu8a10501 --ts \
   | jobscope plot --by metric --gpu 0,1,2,3
 ```
+
+`--columns` asks for the same grid without naming the cards. And since every part of
+that pipeline after `--ts` is mechanical -- the CSV already says how many GPUs there
+are -- **`--plot_ts` is the whole thing in one command**:
+
+```bash
+jobscope -j 36441613 --nodename holygpu8a10501 --plot_ts
+jobscope -j 36606149 --plot_ts        # single-node job: no --nodename needed
+```
+
+It *is* `--ts`, with the CSV charted rather than written, so the schema, `--step` and
+the `--nodename` filter all behave the same. It charts one job on one node, and says
+so rather than guessing: several nodes without `--nodename` names them and asks for
+one, and several jobs points at `-j`. That second guard matters because the chart
+would otherwise be quietly wrong -- series key on `(node, GPU)`, so two jobs that
+shared a card would join into one line.
 
 ```
 GMEM%
