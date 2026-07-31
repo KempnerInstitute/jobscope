@@ -336,6 +336,33 @@ than `gpu-jobs=` -- a job with no stored blob still has Prometheus data.
 other a peak -- so they fall back to the plain per-job figure.
 `jobscope plot` skips every footer rather than charting them as jobs.
 
+### `--plot_avgeff`: the same numbers as bars
+
+Comparing eight idle percentages by eye is what a bar chart is for. `--plot_avgeff`
+(or `--plot-avgeff`) appends one horizontal bar per metric after the summary:
+
+```
+Avg efficiency by metric  (filled = used, grey = idle)
+     CPU%  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   10%
+     MEM%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    6%
+     GPU%  █████████████████████████░░░░░░░░░   74%
+    GMEM%  ████████████████░░░░░░░░░░░░░░░░░░   48%
+  SM_ACT%  ██████████████████████░░░░░░░░░░░░   65%
+     OCC%  ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░   20%
+  TENSOR%  ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░   18%
+    DRAM%  █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   14%
+```
+
+Bar length is the pooled utilization and the filled run is tinted by its band, so
+this is the `IDLE` column read the other way round: bar percent plus `IDLE` percent
+is always 100. It follows the table's metric set, so `--cpu`, `--gpu` and `--dcgm`
+narrow or widen it too, and it prints for a single job as well -- there it is that
+job's profile across metrics. `POWER_W` has no bar, for the same reason it has no
+table row.
+
+Not emitted with `--csv`. Distinct from `jobscope plot`, which charts the per-job
+CSV; this needs no pipe and no plotting libraries.
+
 ### A single job gets the table too
 
 `jobscope <jobid>` prints the metric table for that one job, which is how you see

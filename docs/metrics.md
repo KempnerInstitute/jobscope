@@ -328,6 +328,23 @@ threshold for each row is what made the old cutoff column confusing. `POWER_W` h
 its own knob because watts are not a percentage. A two-line legend above the table
 states both.
 
+### `--plot_avgeff`
+
+Appends one horizontal bar per graded metric after the footer: length is the pooled
+utilization, the filled run tinted by the band that value falls in. It is the `IDLE`
+column read the other way round -- bar percent plus `IDLE` percent is 100 for every
+metric, because both derive from `EfficiencyTally.pooled()` -- so a chart and the
+table it sits under cannot disagree.
+
+It reuses the table's metric list, so the set follows `--cpu` / `--gpu` / `--dcgm`
+and omits whatever no job reported; `POWER_W` has no bar for the same reason it has
+no row. A nonzero utilization always draws at least one block, since an empty bar
+beside a "1%" contradicts itself.
+
+Drawn with block characters and the report's own SGR codes rather than `rich`: the
+report path is the common one and should not import a rendering library to print a
+table. Suppressed under `--csv`, and its title follows `--noheader`.
+
 ### What green does not mean
 
 Green is `>= 2x` the red cutoff, which is a low bar: with `cpu = 10` a job at 21%

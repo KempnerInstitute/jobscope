@@ -625,3 +625,10 @@ def test_the_running_snapshot_is_not_weighted_by_time(monkeypatch):
 def test_running_avg_is_weighted_by_time(monkeypatch):
     """--avg folds each job over its own runtime, which restores the premise."""
     assert _options_for(["running", "--avg"], monkeypatch).time_weighted is True
+
+
+def test_both_spellings_of_the_efficiency_plot_flag_reach_the_renderer(monkeypatch):
+    """The underscore form is the one asked for; the hyphen matches every other flag."""
+    for spelling in ("--plot_avgeff", "--plot-avgeff"):
+        assert _options_for(["finished", "-D", "1", spelling], monkeypatch).plot_avgeff
+    assert not _options_for(["finished", "-D", "1"], monkeypatch).plot_avgeff

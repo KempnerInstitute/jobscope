@@ -568,6 +568,104 @@ def _stat_rows(records, **kw):
     return rows
 
 
+def _eff_bars(records, **kw):
+    """``{metric: (filled_blocks, percent)}`` from the --plot_avgeff bars."""
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view=kw.get("view", "all"), header=kw.get("header", True),
+                           csv=kw.get("csv", False), plot_avgeff=True,
+                           color=kw.get("color", False),
+                           thresholds=kw.get("thresholds"),
+                           show_dcgm=kw.get("show_dcgm", False),
+                           time_weighted=kw.get("time_weighted", False)),
+        out, specs=kw.get("specs"))
+    renderer.add(list(records), records, kw.get("dcgm_data") or {})
+    renderer.finish()
+    bars = {}
+    for line in out.getvalue().splitlines():
+        if "\u2588" in line or "\u2591" in line:
+            head, _, tail = line.strip().partition("  ")
+            bars[head] = (tail.count("\u2588"), int(tail.strip().rstrip("%").split()[-1]))
+    return bars
+
+
+def test_the_bars_complement_the_idle_column():
+    """Chart and table are the same figure, so they cannot disagree.
+
+    Bar percent plus IDLE percent is 100 for every metric, because both come from
+    the tally's pooled utilization.
+    """
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    bars = _eff_bars(records)
+    rows = _stat_rows(records)
+    assert set(bars) == set(rows)
+    for metric, (_blocks, pct) in bars.items():
+        idle = int(rows[metric][0].rsplit("(", 1)[1].rstrip("%)"))
+        assert pct + idle == 100, (metric, pct, idle)
+
+
+def test_the_bars_follow_the_tables_metric_set():
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    assert list(_eff_bars(records)) == ["CPU%", "MEM%", "GPU%", "GMEM%"]
+    assert list(_eff_bars(records, view="cpu")) == ["CPU%", "MEM%"]
+    assert list(_eff_bars(records, view="gpu")) == ["GPU%", "GMEM%"]
+
+
+def test_power_gets_no_bar():
+    """Watts are not a percentage of anything, so there is nothing to fill."""
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    dcgm = {j: ({"POWER_W": 73.0, "SM_ACT%": 40.0}, {}) for j in records}
+    bars = _eff_bars(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
+    assert "SM_ACT%" in bars and "POWER_W" not in bars
+
+
+def test_a_nonzero_bar_is_never_drawn_empty():
+    """An empty bar beside a "1%" contradicts itself."""
+    records = {"1": _gpu_job("1", {"0": 1.0}), "2": _gpu_job("2", {"0": 1.0})}
+    blocks, pct = _eff_bars(records)["GPU%"]
+    assert pct == 1 and blocks == 1
+
+
+def test_the_bars_are_tinted_by_band_and_only_when_colour_is_on():
+    records = {"1": _gpu_job("1", {"0": 95.0}), "2": _gpu_job("2", {"0": 95.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="gpu", header=True, plot_avgeff=True, color=True,
+                           thresholds=_thresholds()), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    bar = [ln for ln in out.getvalue().splitlines() if "\u2588" in ln][0]
+    assert report._SGR["green"] in bar          # 95% is green at a cutoff of 10
+    # Colour off: the block characters carry the shape on their own.
+    assert "\033" not in "".join(_eff_bars(records, view="gpu"))
+
+
+def test_no_bars_in_csv_and_none_without_the_flag():
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    assert _eff_bars(records, csv=True) == {}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    assert "\u2588" not in out.getvalue()      # opt-in only
+
+
+def test_a_single_job_gets_bars_too():
+    records = {"1": _gpu_job("1", {"0": 90.0})}
+    assert _eff_bars(records)["GPU%"] == (31, 90)   # 90% of 34 blocks
+
+
+def test_the_bar_title_obeys_noheader():
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="gpu", header=False, plot_avgeff=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    text = out.getvalue()
+    assert "Avg efficiency" not in text and "\u2588" in text
+
+
 def test_the_stat_table_carries_a_legend():
     """Two things in the table read wrongly without it.
 

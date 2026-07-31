@@ -169,6 +169,8 @@ class RenderOptions:
     # running snapshot every value is the same moment, so scaling one by two days
     # of elapsed time would claim that instant represents those two days.
     time_weighted: bool = False
+    # Append horizontal efficiency bars, one per graded metric, after the footer.
+    plot_avgeff: bool = False
     # Tint %-metric cells by their threshold band. Off unless the caller has
     # established that the destination is a terminal that wants colour.
     color: bool = False
@@ -861,6 +863,7 @@ class SummaryRenderer:
             for line in self._stat_table(stats):
                 print(line, file=self.out)
             if alone:
+                self._print_bars(stats)
                 return
             # Labels now carry counts, so their widths vary; pad them all (and
             # Jobs:) to one width so the job lists still line up under each other.
@@ -884,6 +887,7 @@ class SummaryRenderer:
             width = max(len(label) for label, _ in rows_out)
             for label, cells in rows_out:
                 print("%-*s %s" % (width, label, cells), file=self.out)
+            self._print_bars(stats)
 
 
     STAT_HEADERS = ("METRIC", "IDLE", "RED", "YELLOW", "GREEN")
@@ -908,6 +912,54 @@ class SummaryRenderer:
         values = {"red": thresholds.red, "yellow": 2 * thresholds.red,
                   "power": thresholds.power_w}
         return [line % values for line in self.STAT_LEGEND]
+
+    BAR_WIDTH = 34
+
+    def _print_bars(self, stats: List["EfficiencyTally"]) -> None:
+        """Emit the efficiency bars, when asked for and the destination is text.
+
+        Never in CSV: a bar chart has no place in a machine format, and parse_csv
+        would have to be taught to skip it.
+        """
+        if not self.options.plot_avgeff or self.options.csv:
+            return
+        for line in self._eff_bars(stats):
+            print(line, file=self.out)
+
+    def _eff_bars(self, stats: List["EfficiencyTally"]) -> List[str]:
+        """Horizontal utilization bars, one per graded metric.
+
+        The same data as the table's IDLE column, in the form that answers "which
+        resource was wasted" without arithmetic: bar length is the pooled
+        utilization, so bar percent and IDLE percent always sum to 100.
+
+        Drawn with block characters and this module's own SGR codes rather than
+        rich, for the reason recorded beside :data:`_SGR` -- the report path is the
+        common one and should not import a rendering library to print a table.
+        """
+        if not stats:
+            return []
+        label = max(len(one.header) for one in stats)
+        out = []
+        if self.options.header:
+            out.append("Avg efficiency by metric  (filled = used, grey = idle)")
+        for one in stats:
+            used = one.pooled()
+            if used is None:
+                continue
+            filled = max(0, min(self.BAR_WIDTH,
+                                int(round(used / 100.0 * self.BAR_WIDTH))))
+            if used > 0 and filled == 0:
+                # An empty bar beside a "1%" contradicts itself; show the smallest
+                # mark instead. Same reason sub-0.1 amounts read "<0.1" not "0".
+                filled = 1
+            band = one.band_of(used) if self.options.color else ""
+            run = "\u2588" * filled
+            out.append("  %*s  %s%s  %3d%%" % (
+                label, one.header,
+                _SGR[band] + run + _RESET if band and run else run,
+                "\u2591" * (self.BAR_WIDTH - filled), round(used)))
+        return out
 
     def _stat_table(self, stats: List["EfficiencyTally"]) -> List[str]:
         """The per-metric table: one row per graded metric, tinted by band.

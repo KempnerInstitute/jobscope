@@ -124,6 +124,10 @@ def build_parser():
     shape.add_argument("--avg", action="store_true",
                        help="running: fold each metric over the job's runtime, making the "
                             "values comparable to jobstats (default: the newest scrape)")
+    shape.add_argument("--plot-avgeff", "--plot_avgeff", dest="plot_avgeff",
+                       action="store_true",
+                       help="append horizontal efficiency bars, one per metric, "
+                            "after the summary")
     shape.add_argument("--diagnose", action="store_true",
                        help="add an advisory DIAG column")
     shape.add_argument("--diag-short", dest="diag_short", type=int, default=None,
@@ -385,7 +389,7 @@ def handle_report(args) -> None:
         header=args.header,
         min_runtime=(args.diag_short if args.diag_short is not None
                      else cfg.defaults.min_runtime),
-        time_weighted=time_weighted,
+        time_weighted=time_weighted, plot_avgeff=args.plot_avgeff,
         color=_want_color(args), thresholds=cfg.thresholds)
 
     if args.ts:
