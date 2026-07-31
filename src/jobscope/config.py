@@ -32,7 +32,12 @@ DEFAULT_MIN_RUNTIME = 180
 # Runtime floor for the running view: jobs younger than this are hidden, since a
 # job still ramping up reads as idle. A duration string, as --min-elapsed takes.
 DEFAULT_MIN_ELAPSED = "10m"
-DEFAULT_THRESHOLDS = {"gpu": 25.0, "gmem": 20.0, "cpu": 25.0, "mem": 25.0, "default": 15.0}
+# Red cutoffs in percent, per graded column. ``cpu`` is 10 rather than 25 because
+# CPU% measures the *allocated* cores a job kept busy, and a GPU job legitimately
+# keeps very few: measured over a day on one GPU partition, CPU% had a median of 10
+# and a maximum of 18 across 396 jobs, so a cutoff of 25 put every single job in
+# red and distinguished nothing. 10 places roughly the bottom quartile there.
+DEFAULT_THRESHOLDS = {"gpu": 25.0, "gmem": 20.0, "cpu": 10.0, "mem": 25.0, "default": 15.0}
 
 
 @dataclass(frozen=True)

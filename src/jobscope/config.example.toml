@@ -32,7 +32,10 @@ sampling_period = 60
 # renders red, below twice the cutoff yellow, otherwise green.
 gpu = 25
 gmem = 20
-cpu = 25
+# CPU% is the share of *allocated* cores kept busy, and a GPU job legitimately
+# keeps few of them, so this sits well below the others. Raise it on a CPU
+# partition, where a job asking for cores is expected to use them.
+cpu = 10
 mem = 25
 # Cutoff applied to any other %-metric (e.g. the DCGM utilization columns).
 default = 15

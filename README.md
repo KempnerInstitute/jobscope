@@ -253,10 +253,17 @@ same ones `jobscope plot` grades with, so a job red in a chart is red in the tab
 ```
 gpu = 25      GPU% red below this, yellow below 50
 gmem = 20     GMEM%
-cpu = 25      CPU%
+cpu = 10      CPU%  (low on purpose -- see below)
 mem = 25      MEM%
 default = 15  every other %-metric (SM_ACT%, OCC%, TENSOR%, DRAM%, ...)
 ```
+
+`cpu` sits below the others because `CPU%` is the share of *allocated* cores a job
+kept busy, and a GPU job legitimately keeps very few -- it asks for a batch of
+cores and puts the work on the GPU. Measured over a day on one GPU partition,
+`CPU%` had a median of 10 and a maximum of 18 across 396 jobs, so the old cutoff
+of 25 marked every job red and distinguished nothing. Raise it on a CPU
+partition, where a job that asks for cores is expected to use them.
 
 Colour is dropped automatically when the output is not a terminal, with `--csv`,
 under `$NO_COLOR`, or with `--no-color` -- escape codes in a redirected file are
