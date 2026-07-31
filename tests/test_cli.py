@@ -718,11 +718,21 @@ def test_node_is_accepted_as_an_alias(monkeypatch):
                         monkeypatch).nodename == "n1"
 
 
-def test_nodename_without_per_gpu_is_rejected(capsys):
+def test_nodename_without_a_per_gpu_view_is_rejected(capsys):
     """The per-job table's NODE column is a count, so there is no name to match."""
     with pytest.raises(SystemExit):
         main(["-j", "1", "--nodename=n1"])
-    assert "needs --per-gpu" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "needs --per-gpu or --ts" in err
+
+
+def test_nodename_reaches_the_timeseries_emitter(monkeypatch):
+    """--ts carries a NODE column too, so the filter applies to it."""
+    captured = {}
+    monkeypatch.setattr(cli, "emit_timeseries",
+                        lambda *a, **kw: captured.setdefault("options", a[-1]))
+    main(["-j", "1", "--ts", "--nodename=n1"])
+    assert captured["options"].nodename == "n1"
 
 
 # --- the help narrows to what the invocation can use ------------------------
@@ -787,9 +797,9 @@ def test_finished_hides_the_running_only_flags(capsys):
 def test_ts_hides_what_the_series_drops(capsys):
     """emit_timeseries notes these as dropped; the help should not offer them."""
     body, hidden = _help_for(["--ts"], capsys)
-    assert {"--cpu", "--gpu", "--diagnose", "--per-gpu", "--nodename",
-            "--no-plot"} <= set(hidden)
-    assert "--step" in body    # --ts is the only thing that reads it
+    assert {"--cpu", "--gpu", "--diagnose", "--per-gpu", "--no-plot"} <= set(hidden)
+    assert "--step" in body      # --ts is the only thing that reads it
+    assert "--nodename" in body  # the series carries a NODE column, so it filters
 
 
 def test_cpu_hides_the_gpu_only_columns(capsys):

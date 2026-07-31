@@ -539,9 +539,23 @@ jobscope -j 36441613 --per-gpu --nodename=holygpu8a10401   # 4 per-GPU charts
 
 `--nodename` (or `--node`) filters the rows to that node and drops jobs that never
 touched it. A name matching nothing is an error listing the nodes the selection *did*
-touch -- an empty report would read as an idle node rather than a typo. It needs
-`--per-gpu`: the per-job table's `NODE` column is a count, so there is no name there
-to match.
+touch -- an empty report would read as an idle node rather than a typo.
+
+It applies to **`--ts` as well**, which carries the same `NODE` column:
+
+```bash
+jobscope -j 36441613 --ts --nodename=holygpu8a10401 | jobscope plot --kind line
+```
+
+There the filter runs *before* the queries, so one node of a four-node job costs a
+quarter of the Prometheus range queries rather than fetching all four and discarding
+three. The CSV schema is untouched, so it still pipes to `jobscope plot`; a name that
+matches nothing writes no header at all, since a header with no rows under it reads as
+an idle node and gives `plot` nothing to chart.
+
+What `--nodename` does not work with is the per-job table, whose `NODE` column is a
+*count*: there is no name there to match, so asking for one is an error rather than an
+empty report.
 
 The charts follow the view, so `--cpu` narrows them to `CPU%` and `--dcgm` widens
 them, and `--no-plot` omits them.

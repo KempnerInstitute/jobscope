@@ -191,6 +191,18 @@ class RenderOptions:
     thresholds: Optional["Thresholds"] = None
 
 
+def no_such_node(nodename: str, seen) -> JobscopeError:
+    """The error for a ``--nodename`` that matched nothing.
+
+    Naming the nodes the selection *did* touch is the whole value of it: an empty
+    report reads as an idle node rather than a typo. Shared by every view that takes
+    the filter -- the per-GPU table and both ``--ts`` emitters -- so a mistyped name
+    gets the same answer whichever one you were running.
+    """
+    return JobscopeError("no rows for node %r in this selection; it ran on: %s"
+                         % (nodename, ", ".join(sorted(seen)) or "(none)"))
+
+
 def cell_value(cell) -> Optional[float]:
     """The number in a rendered cell, or None when there is not one.
 
@@ -1372,9 +1384,7 @@ class DetailRenderer:
     def finish(self) -> None:
         self._start()
         if self.options.nodename and not self.matched:
-            raise JobscopeError(
-                "no rows for node %r in this selection; it ran on: %s"
-                % (self.options.nodename, ", ".join(sorted(self.nodes_seen)) or "(none)"))
+            raise no_such_node(self.options.nodename, self.nodes_seen)
         if self.count == 0 and not self.options.csv:
             print("(no GPU jobs in this selection)", file=self.out)
 
@@ -1433,9 +1443,22 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
     derived = applicable_derived(specs)
     sampling_period = client.sampling_period
     writer = csv.writer(out, lineterminator="\n")
-    if options.header:
-        writer.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"]
-                        + [header for _key, header, _dec in columns])
+    nodes_seen, matched, wrote_header = set(), False, False
+
+    def write(row) -> None:
+        """Emit *row*, writing the header first if it has not been written yet.
+
+        Lazily, because a --nodename that matches nothing raises below: a header with
+        no rows under it is a CSV that reads as "this node was idle" and confuses
+        `jobscope plot` into "no numeric values". Nothing written is the honest answer,
+        and it is what the live path already does.
+        """
+        nonlocal wrote_header
+        if options.header and not wrote_header:
+            writer.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"]
+                            + [header for _key, header, _dec in columns])
+            wrote_header = True
+        writer.writerow(row)
 
     for jid in jobids:
         record = records.get(jid)
@@ -1444,6 +1467,15 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
             print("warn: job %s has no GPU samples" % jid, file=sys.stderr)
             continue
         uuid_to = {g["uuid"]: (g["node"], g["minor"]) for g in gpus}
+        if options.nodename:
+            # Before the queries, not after: dropping the other nodes' UUIDs here
+            # shrinks the regex, so a 4-node job costs a quarter of the range queries
+            # instead of fetching three nodes' samples to throw them away.
+            nodes_seen.update(node for node, _ in uuid_to.values())
+            uuid_to = {u: nm for u, nm in uuid_to.items() if nm[0] == options.nodename}
+            if not uuid_to:
+                continue
+            matched = True
         regex = "^(" + "|".join(uuid_to) + ")$"
         # --step wins; otherwise never finer than the scrape interval, and coarse
         # enough to stay under Prometheus' points-per-series cap on a long job.
@@ -1476,7 +1508,10 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
                              + [format_number(cells.get(h), d, missing="")
                                 for _k, h, d in columns]))
         for _, _, _, row in sorted(rows, key=lambda x: (x[0], x[1], x[2])):
-            writer.writerow(row)
+            write(row)
+
+    if options.nodename and not matched:
+        raise no_such_node(options.nodename, nodes_seen)
 
 
 # How each spec's window reducer reads in the --describe output.

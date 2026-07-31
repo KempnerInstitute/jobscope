@@ -35,7 +35,13 @@ from .live import (
 )
 from .live_blob import fill_running, note_offline_gap
 from .prometheus import PrometheusClient, client_from_config
-from .report import RenderOptions, context_pairs, dcgm_timeseries, live_timeseries
+from .report import (
+    RenderOptions,
+    context_pairs,
+    dcgm_timeseries,
+    live_timeseries,
+    no_such_node,
+)
 from .sacct import (
     JobRecord,
     Selection,
@@ -303,6 +309,13 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
             return
         client = client_from_config(cfg, timeout)
         gpus = discover_gpus(client, jobs, timeout)
+        if options.nodename:
+            # Filter before collect_timeseries, so the other nodes' GPUs are never
+            # queried rather than queried and discarded.
+            kept = {u: g for u, g in gpus.items() if g.host == options.nodename}
+            if not kept:
+                raise no_such_node(options.nodename, {g.host for g in gpus.values()})
+            gpus = kept
         samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, step)
         live_timeseries(jobs, samples, gpus, specs, options)
         return

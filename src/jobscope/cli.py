@@ -150,7 +150,7 @@ def build_parser():
                        help="the per-scrape time series as CSV (pipes to 'jobscope plot')")
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
-                       help="--per-gpu: report only this node's GPUs")
+                       help="--per-gpu / --ts: report only this node's GPUs")
     block = shape.add_mutually_exclusive_group()
     block.add_argument("--cpu", action="store_const", const="cpu", dest="view",
                        help="CPU columns only")
@@ -290,8 +290,9 @@ def _inert_dests(args) -> set:
         hide.add("min_elapsed")  # only ever reaches LiveSelection
     if args.ts:
         # emit_timeseries drops these with a note; the series has no host, advisory or
-        # aggregate columns to put them in, and nothing is plotted.
-        hide.update({"view", "diagnose", "diag_short", "per_gpu", "nodename", "no_plot"})
+        # aggregate columns to put them in, and nothing is plotted. --nodename is not
+        # among them: the series carries a NODE column, so the filter applies.
+        hide.update({"view", "diagnose", "diag_short", "per_gpu", "no_plot"})
     else:
         hide.add("step")  # only emit_timeseries reads it
         hide.add("ts" if args.per_gpu else "nodename")
@@ -501,10 +502,10 @@ def handle_report(args) -> None:
     if args.plot_avgeff:
         print("note: --plot_avgeff is the default now; use --no-plot to omit the "
               "efficiency bars", file=sys.stderr)
-    if args.nodename and not args.per_gpu:
+    if args.nodename and not (args.per_gpu or args.ts):
         # The per-job table's NODE column is a count of nodes, not a name, so there is
         # nothing there to match; say so rather than filtering nothing.
-        raise JobscopeError("--nodename needs --per-gpu, which is the view whose rows "
+        raise JobscopeError("--nodename needs --per-gpu or --ts, the views whose rows "
                             "carry a node name")
     view = args.view or "all"
     diagnose = args.diagnose

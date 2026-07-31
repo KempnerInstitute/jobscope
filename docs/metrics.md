@@ -84,7 +84,9 @@ per GPU. `--per-gpu` closes each job block with the efficiency chart repeated pe
 node -- or per GPU once a single node is in play, that being the only thing left that
 distinguishes the rows. A node's value is the mean over its GPU rows, which within a
 node is the pooled figure; `CPU%` is already a per-node number repeated on each row,
-so averaging returns it unchanged. `--nodename=NODE` narrows the rows to one node. `--ts` keys by UUID throughout, so it is the accurate view on a MIG node;
+so averaging returns it unchanged. `--nodename=NODE` narrows the rows to one node,
+in both views -- for `--ts` before the range queries are issued, so the skipped
+nodes are never fetched. `--ts` keys by UUID throughout, so it is the accurate view on a MIG node;
 `--per-gpu` keys by `(node, minor)` like the blob does, which MIG siblings share.
 
 `GMEM%` is derived (`GMEM_GB / GMEM_TOTAL_GB`) rather than queried, and

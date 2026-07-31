@@ -1796,3 +1796,60 @@ def test_the_table_and_the_charts_grade_alike():
         for value in (0, 10, 24, 25, 40, 49, 50, 99):
             assert (thresholds.grade(header, value) or "white") == \
                 plot.grade(header, value, thresholds)
+
+
+class _TwoNodeTimeseriesClient(_TimeseriesClient):
+    """Two GPUs on two nodes, so --nodename has something to choose between."""
+
+    def query(self, query, at, timeout=None):
+        return [{"metric": {"uuid": "U0", "host": "node01:9400", "minor_number": "0"}},
+                {"metric": {"uuid": "U1", "host": "node02:9400", "minor_number": "1"}}]
+
+    def query_range(self, query, start, end, step, timeout=None):
+        if "DCGM_FI_PROF_SM_ACTIVE" not in query:
+            return []
+        return [{"metric": {"UUID": "U0"}, "values": [[1000, "0.8"]]},
+                {"metric": {"UUID": "U1"}, "values": [[1000, "0.4"]]}]
+
+
+def _ts_nodes(nodename, gpu_record):
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
+                            nodename=nodename)
+    text = _render(dcgm_timeseries, ["100"], {"100": gpu_record}, DEFAULT_SPECS,
+                   _TwoNodeTimeseriesClient(), None, options)
+    _cols, rows = plot.parse_csv(io.StringIO(text))
+    return [r["NODE"] for r in rows]
+
+
+def test_the_timeseries_takes_the_nodename_filter(gpu_record):
+    assert _ts_nodes(None, gpu_record) == ["node01", "node02"]
+    assert _ts_nodes("node01", gpu_record) == ["node01"]
+
+
+def test_an_unmatched_nodename_fails_the_timeseries(gpu_record):
+    with pytest.raises(JobscopeError) as exc:
+        _ts_nodes("node99", gpu_record)
+    assert "node01" in str(exc.value) and "node02" in str(exc.value)
+
+
+def test_a_failed_timeseries_filter_writes_no_header(gpu_record):
+    """A header with no rows under it reads as an idle node, and breaks the plot."""
+    out = io.StringIO()
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
+                            nodename="node99")
+    with pytest.raises(JobscopeError):
+        dcgm_timeseries(["100"], {"100": gpu_record}, DEFAULT_SPECS,
+                        _TwoNodeTimeseriesClient(), None, options, out=out)
+    assert out.getvalue() == ""
+
+
+def test_the_timeseries_header_is_unchanged_by_the_filter(gpu_record):
+    """`jobscope plot` keys on this schema, so filtering rows must not touch it."""
+    def header(nodename):
+        options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
+                                nodename=nodename)
+        text = _render(dcgm_timeseries, ["100"], {"100": gpu_record}, DEFAULT_SPECS,
+                       _TwoNodeTimeseriesClient(), None, options)
+        return text.splitlines()[0]
+
+    assert header("node01") == header(None)
