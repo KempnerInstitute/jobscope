@@ -160,9 +160,29 @@ an explicit window. Passing one of these without a mode word implies `finished`,
 so `jobscope -D 3` still means what it always did.
 
 **Filters**, every mode: `-p` partition, `-u` user, `-a` all users, `-A` account,
-`-t` state (`finished` only), `--min-elapsed` runtime floor (`running` only,
-default 10m -- a job still loading data reads as idle; `[defaults] min_elapsed`
-changes it, `0s` disables it).
+`-t` how the job ended (`finished` only, see below), `--min-elapsed` runtime floor
+(`running` only, default 10m -- a job still loading data reads as idle;
+`[defaults] min_elapsed` changes it, `0s` disables it).
+
+**`finished` means finished.** It reports **completed jobs only** by default, and
+never jobs that are still running -- a running job has no final numbers, so mixing
+it into a report of finished ones distorts every figure. `-t` selects other endings:
+
+| `-t` | Slurm states |
+|---|---|
+| `completed` (default) | `COMPLETED` |
+| `failed` | `FAILED`, `OUT_OF_MEMORY`, `NODE_FAIL`, `BOOT_FAIL` |
+| `timeout` | `TIMEOUT`, `DEADLINE` |
+| `cancelled` | `CANCELLED`, `PREEMPTED`, `REVOKED` |
+| `all` | every state above |
+
+Comma-separated to combine: `jobscope finished -t failed,timeout`. The groups are
+separate because they are different problems -- a timeout usually means the walltime
+or the resource request was wrong, a cancellation is a person, and a failure is the
+job. Passing a live state (`-t running`) is an error pointing at `jobscope running`.
+
+An explicit job ID is never filtered this way, so `jobscope <jobid>` still reports a
+job that is running right now.
 
 **Level 3 — granularity** (pick one) and **columns**:
 

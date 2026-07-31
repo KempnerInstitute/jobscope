@@ -23,8 +23,51 @@ from .errors import JobscopeError
 
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
-FAILED_STATES = ("FAILED,TIMEOUT,OUT_OF_MEMORY,NODE_FAIL,CANCELLED,"
-                 "DEADLINE,BOOT_FAIL,PREEMPTED")
+# What each -t name covers. Separated rather than lumped into one "failed" bucket
+# because they are different problems: a timeout usually means the walltime or the
+# resource request was wrong, a cancellation is a person, and a true failure is the
+# job itself. RUNNING and PENDING appear in none of them -- `finished` means finished,
+# and `jobscope running` is the live view.
+STATE_GROUPS = {
+    "completed": ("COMPLETED",),
+    "failed": ("FAILED", "OUT_OF_MEMORY", "NODE_FAIL", "BOOT_FAIL"),
+    "timeout": ("TIMEOUT", "DEADLINE"),
+    "cancelled": ("CANCELLED", "PREEMPTED", "REVOKED"),
+}
+# Every terminal state jobscope knows, which is what -t all selects.
+FINISHED_STATES = tuple(state for group in STATE_GROUPS.values() for state in group)
+# Not selectable: they are not finished. Named so the error can say where to look.
+LIVE_STATES = ("running", "pending", "suspended", "requeued")
+
+DEFAULT_STATE = "completed"
+
+
+def states_for(spec: Optional[str]) -> Tuple[str, ...]:
+    """The sacct states a ``-t`` value selects, e.g. ``failed,timeout``.
+
+    ``all`` (and an unset value) means every finished state. Always an explicit list,
+    never "no filter": without one sacct returns jobs that are still running, and a
+    running job has no final numbers to report.
+    """
+    if spec in (None, "", "all"):
+        return FINISHED_STATES
+    chosen: List[str] = []
+    for name in str(spec).split(","):
+        name = name.strip().lower()
+        if not name:
+            continue
+        if name in LIVE_STATES:
+            raise JobscopeError(
+                "-t %s is not a finished state; use 'jobscope running' for live jobs"
+                % name)
+        if name not in STATE_GROUPS:
+            raise JobscopeError(
+                "unknown -t value %r: choose from %s, or 'all' (comma-separated)"
+                % (name, ", ".join(sorted(STATE_GROUPS))))
+        chosen.extend(state for state in STATE_GROUPS[name] if state not in chosen)
+    if not chosen:
+        raise JobscopeError("-t needs at least one state")
+    return tuple(chosen)
 
 # Chunk bounds for the batched sacct -j queries. JOBS_PER_CHUNK is the primary
 # bound: sacct costs ~35 ms per call regardless of id count, so small batches
@@ -44,7 +87,7 @@ class Selection:
     jobids: List[str] = field(default_factory=list)
     account: Optional[str] = None
     partition: Optional[str] = None
-    state: str = "all"
+    state: str = DEFAULT_STATE
     lastn: Optional[int] = None
     days: Optional[int] = None
     starttime: Optional[str] = None
@@ -219,16 +262,18 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
         cmd += ["-A", selection.account]
     if selection.partition:
         cmd += ["-r", selection.partition]
-    if selection.state == "completed":
-        cmd += ["-s", "COMPLETED"]
-    elif selection.state == "failed":
-        cmd += ["-s", FAILED_STATES]
+    # Always filtered by state, so sacct never hands back a job that is still
+    # running: `finished` reporting a RUNNING job was the bug this closes.
+    cmd += ["-s", ",".join(states_for(selection.state))]
     out = run_capture(cmd, timeout, "sacct query")
 
     ids = []
     for line in out.splitlines():
         parts = line.split("|", 1)
-        if len(parts) == 2 and not parts[1].startswith("PENDING"):
+        # Belt and braces behind the -s filter above: whatever sacct returns, a job
+        # that has not finished has no final numbers and does not belong here.
+        if len(parts) == 2 and not parts[1].upper().startswith(
+                ("PENDING", "RUNNING", "SUSPENDED", "REQUEUED")):
             ids.append(parts[0])
 
     if selection.lastn is not None:

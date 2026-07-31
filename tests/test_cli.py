@@ -81,7 +81,7 @@ def test_deprecated_live_is_always_running():
 def _args(**kw):
     base = dict(mode=RUNNING, jobids=[], jobids_opt=None, days=None, lastn=None,
                 starttime=None, endtime=None, min_elapsed=None, partition=None,
-                user="alice", all_users=False, account=None, state="all",
+                user="alice", all_users=False, account=None, state=None,
                 hwdetail=False, ts=False, view=None, dcgm=False, avg=False,
                 diagnose=False, diag_short=None, header=True, csv=False, step=None,
                 timeout=None, workers=None, config_path=None, explicit_mode=False)
@@ -658,3 +658,40 @@ def test_the_timeseries_path_cannot_reach_the_summary_renderer(monkeypatch):
                         lambda *a, **kw: pytest.fail("--ts resolved a summary chunk"))
     main(["finished", "-D", "1", "--ts", "--csv"])
     assert called == {"ts": True}
+
+
+def _request_for(argv, monkeypatch):
+    """The Request handle_report builds for `argv`, without running a query."""
+    captured = {}
+
+    def fake(request, *a, **kw):
+        captured["req"] = request
+        return select_mod.Resolved(context=[], chunks=[])
+
+    monkeypatch.setattr(cli, "resolve", fake)
+    monkeypatch.setattr(cli, "SummaryRenderer",
+                        lambda *a, **kw: type("R", (), {"add": lambda *x: None,
+                                                        "finish": lambda *x: None})())
+    main(argv)
+    return captured["req"]
+
+
+def test_finished_defaults_to_completed_only(monkeypatch):
+    """`finished` used to include running jobs, which have no final numbers."""
+    assert _request_for(["finished", "-D", "1"], monkeypatch).state == "completed"
+
+
+def test_dash_t_reaches_the_request_verbatim(monkeypatch):
+    """sacct.states_for does the validating, so the CLI passes the string through."""
+    got = _request_for(["finished", "-D", "1", "-t", "failed,timeout"], monkeypatch)
+    assert got.state == "failed,timeout"
+
+
+def test_dash_t_still_implies_the_finished_mode():
+    assert resolve_argv(["-t", "timeout"]) == [FINISHED, "-t", "timeout"]
+
+
+def test_an_explicit_running_plus_state_is_rejected(capsys):
+    with pytest.raises(SystemExit):
+        main(["running", "-t", "completed"])
+    assert "does not apply to running jobs" in capsys.readouterr().err

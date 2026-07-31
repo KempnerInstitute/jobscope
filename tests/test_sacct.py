@@ -86,26 +86,33 @@ def test_select_jobs_explicit_ids_bypass():
     assert desc == "2 job ID(s)"
 
 
-def test_select_jobs_parses_and_skips_pending(monkeypatch):
+def test_select_jobs_skips_jobs_that_have_not_finished(monkeypatch):
+    """`finished` means finished: a running job has no final numbers to report.
+
+    The -s filter should keep these out at the sacct end; the client-side skip is
+    the belt-and-braces behind it, and this pins it.
+    """
     monkeypatch.setattr(sacct, "run_capture",
-                        lambda *a, **k: "100|COMPLETED\n101|RUNNING\n102|PENDING\n")
+                        lambda *a, **k: "100|COMPLETED\n101|RUNNING\n"
+                                        "102|PENDING\n103|SUSPENDED\n")
     ids, desc = select_jobs(Selection(user="alice"), None)
-    assert ids == ["100", "101"]
-    assert desc == "now-30days .. now"
+    assert ids == ["100"]
+    assert desc == "now-30days .. now, completed"
 
 
 def test_select_jobs_lastn(monkeypatch):
-    monkeypatch.setattr(sacct, "run_capture", lambda *a, **k: "100|COMPLETED\n101|RUNNING\n")
+    monkeypatch.setattr(sacct, "run_capture",
+                        lambda *a, **k: "100|COMPLETED\n101|COMPLETED\n")
     ids, desc = select_jobs(Selection(user="alice", lastn=1), None)
     assert ids == ["101"]
-    assert desc == "last 1 jobs"
+    assert desc == "last 1 jobs, completed"
 
 
 def test_select_jobs_days_desc(monkeypatch):
     monkeypatch.setattr(sacct, "run_capture", lambda *a, **k: "100|COMPLETED\n")
     ids, desc = select_jobs(
         Selection(user="alice", days=3, starttime="2026-01-01T00:00:00", endtime="now"), None)
-    assert desc == "last 3 days"
+    assert desc == "last 3 days, completed"
 
 
 def test_fetch_parses_record(monkeypatch):
@@ -395,3 +402,35 @@ def test_run_capture_oserror_soft_returns_none(monkeypatch):
 
     monkeypatch.setattr(sacct.subprocess, "Popen", boom)
     assert run_capture(["sacct", "-j", "1"], None, "sacct query", soft=True) is None
+
+
+def test_the_state_filter_is_always_passed_to_sacct(monkeypatch):
+    """Without -s, sacct returns running jobs, which is what made `finished` wrong."""
+    seen = {}
+
+    def fake(cmd, *a, **k):
+        seen["cmd"] = cmd
+        return "100|COMPLETED\n"
+
+    monkeypatch.setattr(sacct, "run_capture", fake)
+    select_jobs(Selection(user="alice"), None)
+    assert "-s" in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("-s") + 1] == "COMPLETED"
+    select_jobs(Selection(user="alice", state="failed,timeout"), None)
+    passed = seen["cmd"][seen["cmd"].index("-s") + 1].split(",")
+    assert "TIMEOUT" in passed and "FAILED" in passed and "COMPLETED" not in passed
+
+
+def test_state_groups_are_separable_and_composable():
+    from jobscope.sacct import states_for
+    assert states_for("completed") == ("COMPLETED",)
+    assert "TIMEOUT" not in states_for("failed")      # no longer an umbrella
+    assert set(states_for("failed,timeout")) == set(states_for("failed")) | set(
+        states_for("timeout"))
+    assert set(states_for("all")) > set(states_for("failed,timeout"))
+    # Nothing live is selectable, however it is spelled.
+    for live in ("running", "RUNNING", "pending"):
+        with pytest.raises(JobscopeError, match="jobscope running"):
+            states_for(live)
+    with pytest.raises(JobscopeError, match="unknown"):
+        states_for("nonsense")

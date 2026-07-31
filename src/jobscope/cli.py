@@ -32,7 +32,7 @@ from .report import (
     describe,
     describe_dcgm,
 )
-from .sacct import default_user
+from .sacct import DEFAULT_STATE, default_user
 from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
 
 MODES = (RUNNING, FINISHED)
@@ -105,8 +105,13 @@ def build_parser():
     filters.add_argument("-a", "--all-users", dest="all_users", action="store_true",
                          help="every user's jobs, not just your own")
     filters.add_argument("-A", "--account", help="narrow to this account")
-    filters.add_argument("-t", "--state", choices=["all", "completed", "failed"],
-                         default="all", help="finished: job state (default: all)")
+    # No argparse choices: the value composes with commas ("-t failed,timeout"), so
+    # sacct.states_for validates it and can say what went wrong. Default None rather
+    # than "completed" so `running` can tell an explicit -t from the default.
+    filters.add_argument("-t", "--state", default=None, metavar="STATE",
+                         help="finished: which endings to include -- completed "
+                              "(default), failed, timeout, cancelled, or all; "
+                              "comma-separated, e.g. -t failed,timeout")
 
     shape = report.add_argument_group("granularity and columns")
     grain = shape.add_mutually_exclusive_group()
@@ -304,7 +309,7 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
                 raise JobscopeError(
                     "%s selects a past window, which does not apply to running jobs.\n"
                     "Use 'jobscope finished %s ...', or drop the flag." % (flag, short))
-        if args.state != "all":
+        if args.state is not None:
             raise JobscopeError("-t/--state does not apply to running jobs (all are RUNNING)")
     elif args.avg:
         raise JobscopeError(
@@ -349,7 +354,7 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
     return Request(
         mode=mode, jobids=jobids,
         days=days, lastn=args.lastn, starttime=args.starttime, endtime=args.endtime,
-        state=args.state, user=user, all_users=args.all_users,
+        state=args.state or DEFAULT_STATE, user=user, all_users=args.all_users,
         account=args.account, partition=args.partition,
         min_elapsed=_min_elapsed(args, cfg), average=args.avg,
     )
