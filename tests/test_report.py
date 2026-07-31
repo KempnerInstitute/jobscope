@@ -483,6 +483,119 @@ def test_sum_and_max_metrics_are_not_gpu_weighted():
     assert footers["Mean"]["ENERGY_kWh"] and footers["Mean"]["PWRmax_W"]
 
 
+# --- the time-weighted (per resource-hour) mean -----------------------------
+
+def _timed_job(jid, seconds, gpu_util=None, gpus=1, cores=2, cpu_seconds=None,
+               used_gb=8, total_gb=16):
+    """A job that ran for `seconds`, holding `cores` cores and `gpus` GPUs.
+
+    Separate from :func:`_gpu_job`, which fixes the runtime at 100s: the point
+    here is that runtimes differ. ``cpu_seconds`` defaults to half the available
+    core-seconds, i.e. CPU% = 50.
+    """
+    if cpu_seconds is None:
+        cpu_seconds = 0.5 * seconds * cores
+    node = {"total_time": cpu_seconds, "cpus": cores,
+            "used_memory": used_gb * GIB, "total_memory": total_gb * GIB}
+    if gpu_util is not None:
+        node["gpu_utilization"] = {str(i): gpu_util for i in range(gpus)}
+        node["gpu_used_memory"] = {str(i): 40 * GIB for i in range(gpus)}
+        node["gpu_total_memory"] = {str(i): 80 * GIB for i in range(gpus)}
+    return JobRecord(jobid=jid, state="COMPLETED", name="j", runtime="-", nodes="1",
+                     gpus=gpus if gpu_util is not None else 0,
+                     stats={"total_time": seconds, "nodes": {"n1": node}},
+                     start=1000, end=1000 + seconds, duration=seconds,
+                     jobid_raw=jid, cluster="c", user="alice")
+
+
+def _tw_footers(records, **kw):
+    """:func:`_footers` with resource-time weighting on."""
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", csv=True, header=True, time_weighted=True,
+                           show_dcgm=kw.get("show_dcgm", False)),
+        out, specs=kw.get("specs"))
+    renderer.add(list(records), records, kw.get("dcgm_data") or {})
+    renderer.finish()
+    rows = {r.split(",")[0]: r.split(",") for r in out.getvalue().splitlines()}
+    return {label: dict(zip(rows["JOBID"], cells)) for label, cells in rows.items()}
+
+
+def test_short_jobs_do_not_outvote_one_long_job():
+    """The skew that motivates this row: 100 five-minute jobs against one 2-day job.
+
+    Per job the long job is 1/101 of the answer, so a busy two-day run reads as an
+    idle cluster. Weighted by GPU-hours it is 85% of the resource-time, which is
+    what actually happened to the hardware.
+    """
+    records = {"long": _timed_job("long", 2 * 86400, gpu_util=100.0)}
+    records.update({str(i): _timed_job(str(i), 300, gpu_util=0.0) for i in range(100)})
+    footers = _tw_footers(records)
+    assert footers["Mean"]["GPU%"] == "1"                 # (100 + 0*100)/101
+    # 172800 GPU-s busy of 202800 total.
+    assert footers["MeanPerGPUHour"]["GPU%"] == "85"
+    assert "gpu-hours=56.3" in footers["Jobs"].values()   # 202800s / 3600
+
+
+def test_time_weighting_shows_up_even_when_gpu_counts_match():
+    """Count weighting omits this row as a no-op; runtimes still differ."""
+    records = {"a": _timed_job("a", 36000, gpu_util=90.0),
+               "b": _timed_job("b", 360, gpu_util=0.0)}
+    assert "MeanPerGPU" not in _footers(records.copy())   # uniform 1-GPU jobs
+    assert _tw_footers(records)["MeanPerGPUHour"]["GPU%"] == "89"
+
+
+def test_the_time_weighted_cpu_mean_is_the_pooled_utilization():
+    """Weighting CPU% by core-hours reproduces 100 x sum(cpu_s) / sum(core_s).
+
+    That identity is the reason to weight by allocation size as well as time: the
+    row is not a nicer average, it is the real utilization of the pool.
+    """
+    records = {"a": _timed_job("a", 7200, cores=4, cpu_seconds=28800),   # CPU% 100
+               "b": _timed_job("b", 300, cores=8, cpu_seconds=240)}      # CPU% 10
+    footers = _tw_footers(records)
+    assert footers["Mean"]["CPU%"] == "55"               # (100 + 10)/2, per job
+    pooled = 100 * (28800 + 240) / (7200 * 4 + 300 * 8)
+    assert footers["MeanPerGPUHour"]["CPU%"] == str(round(pooled))     # 93
+    # CPU-only jobs, so there is no GPU resource-time to report.
+    assert "gpu-hours" not in " ".join(footers["Jobs"].values())
+
+
+def test_a_job_with_no_runtime_is_excluded_and_reported():
+    """Without an elapsed time a job cannot be placed on the resource-hour scale."""
+    good = _timed_job("a", 3600, gpu_util=100.0)
+    bad = dataclasses.replace(_timed_job("b", 3600, gpu_util=0.0), duration=None)
+    footers = _tw_footers({"a": good, "b": bad})
+    assert footers["MeanPerGPUHour"]["GPU%"] == "100"    # only the timed job counts
+    assert footers["Mean"]["GPU%"] == "50"               # but both are in the plain mean
+    assert "no-runtime=1" in footers["Jobs"].values()
+
+
+def test_instantaneous_running_values_are_not_time_weighted():
+    """A snapshot is one moment for every job, so elapsed time is not its weight.
+
+    Weighting a single scrape by two days of runtime would claim that instant
+    represents those two days. Only --avg and finished jobs carry runtime-long
+    values, so only they get the GPU-hour row.
+    """
+    records = {"a": _timed_job("a", 2 * 86400, gpu_util=100.0),
+               "b": _timed_job("b", 300, gpu_util=0.0, gpus=3)}
+    assert "MeanPerGPUHour" not in _footers(records)     # time_weighted off
+    assert _footers(records)["MeanPerGPU"]["GPU%"] == "25"   # (100*1 + 0*3)/4
+
+
+def test_plot_skips_the_time_weighted_footer():
+    records = {"a": _timed_job("a", 7200, gpu_util=100.0),
+               "b": _timed_job("b", 300, gpu_util=0.0)}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", csv=True, header=True, time_weighted=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    _, rows = plot.parse_csv(io.StringIO(out.getvalue()))
+    assert {r["JOBID"] for r in rows} == {"a", "b"}
+
+
 def test_plot_skips_the_weighted_footer_too():
     records = {"1": _gpu_job("1", {"0": 0.0}),
                "2": _gpu_job("2", {"0": 100.0, "1": 100.0})}

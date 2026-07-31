@@ -197,22 +197,43 @@ Mean/GPU:                                    70  79   77.7  ...
 Jobs:        cpu-jobs=2  gpu-jobs=2  gpus=18
 ```
 
-`Mean:` averages one value per job. `Mean/GPU:` weights each by the job's GPU
-count, so it is the mean *per GPU* -- above, per job the partition looks 40% used,
-but 70% of the allocated GPUs were actually busy, because the idle job holds 2
-cards and the busy one 16. Use `Mean/GPU:` to judge how the hardware was used and
-`Mean:` to judge the typical job.
+`Mean:` averages one value per job. The second row weights each job by the
+hardware it held, so it describes the *resource* rather than the typical job --
+above, per job the partition looks 40% used, but 70% of the allocated GPUs were
+actually busy, because the idle job holds 2 cards and the busy one 16.
 
-`Mean/GPU:` appears only when GPU counts vary, since otherwise it repeats `Mean:`
-exactly. It is blank for `CPU%`/`MEM%` (weighting host metrics by GPU count means
-nothing) and for `ENERGY_kWh`/`PWRmax_W`, which are a per-job total and a peak
-rather than an average over GPUs.
+For **finished** jobs that row also accounts for how long each job ran, and is
+labelled `Mean/GPU-hr:`:
+
+```
+Mean:                           10   5      82   5   64.9  ...
+Mean/GPU-hr:                     3   5      34  14   29.8  ...
+Jobs:  cpu-jobs=384  gpu-jobs=384  gpus=468  gpu-hours=586.0
+```
+
+Without it, 100 five-minute jobs outvote one two-day job 100:1. Per job that
+partition looks 82% busy; per GPU-hour it was 34% -- the short jobs were busy and
+the long ones were not. Each column is weighted by the resource it measures
+(GPU-hours for `GPU%`, core-hours for `CPU%`, GB-hours for `MEM%`), which makes
+the row the pooled utilization rather than an average of averages.
+
+The **running** view keeps plain `Mean/GPU:` instead. Its numbers are one scrape
+at a single moment, so weighting them by elapsed time would claim that instant
+represents the whole run; `--avg` folds each job over its runtime and does get the
+GPU-hour row.
+
+The weighted row appears only when it would differ from `Mean:` -- varying GPU
+counts, or varying runtimes. Under `Mean/GPU:` it is blank for `CPU%`/`MEM%`
+(weighting host metrics by GPU count means nothing); under either it is blank for
+`ENERGY_kWh`/`PWRmax_W`, which are a per-job total and a peak rather than an
+average over GPUs.
 
 The two job counts differ whenever the selection mixes CPU-only and GPU work: a
 CPU-only job has no `GPU%` to average, so it is absent from the GPU means rather
 than counted as zero. A GPU job that sat idle *is* counted, as 0%. `gpus=` is the
-total behind `Mean/GPU:`. `jobscope plot` skips every footer rather than charting
-them as jobs.
+total behind the weighted row and `gpu-hours=` its denominator; `no-runtime=N`
+appears when a job had no elapsed time to weight by and was left out.
+`jobscope plot` skips every footer rather than charting them as jobs.
 
 - `--cpu` narrows to the host columns. For *finished* jobs that needs no Prometheus
   at all; a running job's `CPU%` comes from `cgroup_*`, so it does.

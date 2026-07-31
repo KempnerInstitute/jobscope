@@ -42,6 +42,23 @@ def bytes_to_gb(num_bytes: float) -> str:
     return "{:.1f}".format(num_bytes / GIB).rstrip("0").rstrip(".") + "GB"
 
 
+def blob_capacity(stats: dict) -> Tuple[int, int]:
+    """Allocated ``(cores, memory_bytes)`` summed over a job's nodes.
+
+    The *size* of the allocation, independent of how much of it was used. Paired
+    with elapsed time this gives the core-hours and GB-hours a job was charged,
+    which is what weights a utilization average by how much hardware it held and
+    for how long -- see :meth:`jobscope.report.SummaryRenderer.finish`. Returns
+    zeros for an empty blob, so a caller that multiplies by them contributes
+    nothing rather than crashing.
+    """
+    if not stats or "nodes" not in stats:
+        return 0, 0
+    nodes = list(stats["nodes"].values())
+    return (sum(n.get("cpus", 0) or 0 for n in nodes),
+            sum(n.get("total_memory", 0) or 0 for n in nodes))
+
+
 def blob_metrics(stats: dict) -> Optional[BlobMetrics]:
     """Overall ``(cpu%, mem%, gpu%, gmem%)`` for a job, or None if the blob is empty.
 

@@ -375,11 +375,17 @@ def handle_report(args) -> None:
         diagnose = False
     show_dcgm = view in ("all", "gpu")
     specs = ALL_SPECS if args.dcgm else DEFAULT_SPECS
+    # Weight the mean by resource-time wherever the values already span whole
+    # runtimes: a finished job's blob does, an explicit job ID's reconstruction
+    # does, and running --avg does. The bare running view is a snapshot of one
+    # moment, which no amount of elapsed time makes representative.
+    time_weighted = request.mode != RUNNING or request.average
     options = RenderOptions(
         view=view, show_dcgm=show_dcgm, diagnose=diagnose, csv=args.csv,
         header=args.header,
         min_runtime=(args.diag_short if args.diag_short is not None
                      else cfg.defaults.min_runtime),
+        time_weighted=time_weighted,
         color=_want_color(args), thresholds=cfg.thresholds)
 
     if args.ts:

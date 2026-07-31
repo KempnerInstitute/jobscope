@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from .blob import blob_detail, blob_metrics
+from .blob import blob_capacity, blob_detail, blob_metrics
 from .config import Thresholds
 from .dcgm import (
     ALL_SPECS,
@@ -163,6 +163,12 @@ class RenderOptions:
     csv: bool = False
     header: bool = True
     min_runtime: int = 180
+    # Weight the mean by allocated resource-time (GPU-hours, core-hours) instead
+    # of by GPU count. Valid only where each job's value already covers its whole
+    # runtime -- a finished job's blob, or running --avg. On an instantaneous
+    # running snapshot every value is the same moment, so scaling one by two days
+    # of elapsed time would claim that instant represents those two days.
+    time_weighted: bool = False
     # Tint %-metric cells by their threshold band. Off unless the caller has
     # established that the destination is a terminal that wants colour.
     color: bool = False
@@ -249,10 +255,13 @@ class SummaryRenderer:
         self.count = 0
         self.sums = {key: [0, 0] for key in ("cpu", "mem", "gpu", "gmem")}  # [total, count]
         self.sums_dcgm = {header: [0.0, 0] for header in self.dcgm_headers}
-        # The same GPU figures weighted by each job's GPU count: [sum(v * n), sum(n)].
-        # A job's value is one number for all its GPUs, so multiplying by n and
-        # dividing by the total recovers the per-GPU mean across the selection.
-        self.weighted = {key: [0.0, 0] for key in ("gpu", "gmem")}
+        # The same figures weighted by how much hardware each job held, and (when
+        # the values cover whole runtimes) for how long: [sum(v * w), sum(w)].
+        # A job's value is one number for all its GPUs, so multiplying by the
+        # weight and dividing by the total weight recovers the per-resource mean
+        # across the selection. CPU% and MEM% join this row only under time
+        # weighting, since GPU count says nothing about them.
+        self.weighted = {key: [0.0, 0.0] for key in ("cpu", "mem", "gpu", "gmem")}
         # Only metrics whose cross-GPU aggregation is itself a mean can be
         # GPU-weighted. ENERGY_kWh sums over a job's GPUs and PWRmax_W takes the
         # max, so scaling either by GPU count would produce a number that means
@@ -261,8 +270,11 @@ class SummaryRenderer:
                            if spec.agg == "mean" and spec.header in self.dcgm_headers}
         if specs is None:
             self.weightable = set(self.dcgm_headers)
-        self.weighted_dcgm = {header: [0.0, 0] for header in self.weightable}
+        self.weighted_dcgm = {header: [0.0, 0.0] for header in self.weightable}
         self.gpu_counts = set()     # distinct GPU counts, to know if weighting matters
+        self.durations = set()      # distinct runtimes, likewise
+        self.gpu_total = 0          # GPUs across the selection, for the Jobs footer
+        self.unweighted = 0         # jobs left out of the weighting for want of a runtime
         self._started = False
 
     def _line(self, row: dict, color: bool = True) -> str:
@@ -308,6 +320,38 @@ class SummaryRenderer:
             print(header_line, file=self.out)
             print("-" * len(header_line), file=self.out)
 
+    def _weights(self, record: Optional[JobRecord], gpus: int) -> Dict[str, float]:
+        """How much this job counts toward the weighted mean, per column family.
+
+        Without time weighting the weight is simply the GPU count, and CPU% / MEM%
+        get none: a job's GPU count says nothing about how much CPU it held, and
+        the row exists to answer "per GPU".
+
+        With it, each weight is the *resource-time* the job was charged -- GPU
+        seconds, core seconds, byte seconds -- which is what stops 100 five-minute
+        jobs from outvoting one two-day job. Weighting by allocation size and time
+        together is also exactly the pooled utilization: CPU% is
+        ``100 x cpu_seconds / (elapsed x cores)`` per job, so summing the numerator
+        and the denominator over the selection is the same as averaging the per-job
+        values weighted by ``elapsed x cores``.
+
+        A job with an unknown runtime cannot be placed on that scale, so it is left
+        out of the weighted row (and counted in ``unweighted``) rather than silently
+        given a weight of zero or one.
+        """
+        if record is None:
+            return {"cpu": 0.0, "mem": 0.0, "gpu": 0.0, "gmem": 0.0}
+        if not self.options.time_weighted:
+            return {"cpu": 0.0, "mem": 0.0, "gpu": float(gpus), "gmem": float(gpus)}
+        seconds = record.duration
+        if not seconds or seconds <= 0:
+            self.unweighted += 1
+            return {"cpu": 0.0, "mem": 0.0, "gpu": 0.0, "gmem": 0.0}
+        self.durations.add(seconds)
+        cores, memory = blob_capacity(record.stats)
+        return {"cpu": cores * seconds, "mem": memory * seconds,
+                "gpu": gpus * seconds, "gmem": gpus * seconds}
+
     def add(self, jobids: List[str], records: Dict[str, JobRecord],
             dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
         self._start()
@@ -327,6 +371,7 @@ class SummaryRenderer:
                 "RUNTIME": record.runtime if record else "-",
             }
             gpus = record.gpus if record else 0
+            weights = self._weights(record, gpus)
             metrics = blob_metrics(record.stats if record else None)
             if metrics is None:
                 for col in ("CPU%", "MEM%", "GPU%", "GMEM%"):
@@ -338,9 +383,13 @@ class SummaryRenderer:
                     if value is not None:
                         self.sums[key][0] += value
                         self.sums[key][1] += 1
-                        if key in self.weighted and gpus:
-                            self.weighted[key][0] += value * gpus
-                            self.weighted[key][1] += gpus
+                        if weights[key]:
+                            self.weighted[key][0] += value * weights[key]
+                            self.weighted[key][1] += weights[key]
+                        if key == "gpu" and gpus:
+                            # Counted here rather than per allocation, so the footer
+                            # total matches the GPUs actually behind the GPU figures.
+                            self.gpu_total += gpus
                             self.gpu_counts.add(gpus)
             if do_dcgm:
                 overall = dcgm_data.get(jid, ({}, {}))[0]
@@ -350,9 +399,9 @@ class SummaryRenderer:
                     if value is not None:
                         self.sums_dcgm[header][0] += value
                         self.sums_dcgm[header][1] += 1
-                        if gpus and header in self.weightable:
-                            self.weighted_dcgm[header][0] += value * gpus
-                            self.weighted_dcgm[header][1] += gpus
+                        if weights["gpu"] and header in self.weightable:
+                            self.weighted_dcgm[header][0] += value * weights["gpu"]
+                            self.weighted_dcgm[header][1] += weights["gpu"]
                 if options.diagnose:
                     row["DIAG"] = diagnose_dcgm(overall, record.duration if record else None,
                                                 options.min_runtime)
@@ -385,34 +434,52 @@ class SummaryRenderer:
                 total, count = self.sums_dcgm[header]
                 mean_row[header] = format_by_header(header, total / count) if count else "-"
 
-        # The same GPU figures weighted by GPU count, i.e. the mean per GPU rather
-        # than per job: a 4-GPU job at 100% and a 1-GPU job at 0% average to 50 per
-        # job but 80 per GPU. Only worth a row when the counts actually vary --
-        # otherwise it repeats the Mean row exactly.
+        # The same figures weighted by how much hardware each job held -- and, under
+        # time weighting, for how long. Per job, a 4-GPU job at 100% and a 1-GPU job
+        # at 0% average to 50; per GPU that is 80; and if the busy job ran for two
+        # days against the idle one's five minutes, per GPU-hour it is ~100. Only
+        # worth a row when the weights actually vary, otherwise it repeats Mean.
+        # Varying weights are the usual reason, but an excluded job is another: if
+        # one job has no runtime the weighted mean is over a different set than the
+        # plain one, so the two differ even when every weight is equal.
         weighted_row = None
-        if len(self.gpu_counts) > 1:
+        if len(self.gpu_counts) > 1 or (options.time_weighted
+                                       and (len(self.durations) > 1 or self.unweighted)):
             weighted_row = {c.header: "" for c in self.columns}
-            for key, header in (("gpu", "GPU%"), ("gmem", "GMEM%")):
+            keys = (("cpu", "CPU%"), ("mem", "MEM%"), ("gpu", "GPU%"), ("gmem", "GMEM%"))
+            for key, header in keys:
                 total, n = self.weighted[key]
-                weighted_row[header] = str(round(total / n)) if n else "-"
+                if not n:
+                    # Blank, not "-": under GPU-count weighting CPU% and MEM% are
+                    # not being claimed as unavailable, they are not applicable.
+                    weighted_row[header] = "-" if options.time_weighted else ""
+                    continue
+                weighted_row[header] = str(round(total / n))
             if options.show_dcgm:
                 for header in self.weightable:
                     total, n = self.weighted_dcgm[header]
                     weighted_row[header] = (format_by_header(header, total / n) if n else "-")
 
-        # How many jobs each mean came from, plus the GPU total behind the weighted
-        # row. The job counts differ whenever the selection mixes CPU-only and GPU
-        # work: a CPU-only job has no GPU% to average, so it is absent from the GPU
-        # figures rather than counted as zero.
+        # How many jobs each mean came from, plus the resource total behind the
+        # weighted row. The job counts differ whenever the selection mixes CPU-only
+        # and GPU work: a CPU-only job has no GPU% to average, so it is absent from
+        # the GPU figures rather than counted as zero.
         counts = ["cpu-jobs=%d" % self.sums["cpu"][1], "gpu-jobs=%d" % self.sums["gpu"][1]]
-        if self.weighted["gpu"][1]:
-            counts.append("gpus=%d" % self.weighted["gpu"][1])
+        if self.gpu_total:
+            counts.append("gpus=%d" % self.gpu_total)
+        if options.time_weighted and self.weighted["gpu"][1]:
+            # The weighted row's own denominator, in GPU-hours: the resource-time
+            # the GPU figures are an average over.
+            counts.append("gpu-hours=%s" % format_number(self.weighted["gpu"][1] / 3600.0, 1))
+        if self.unweighted:
+            counts.append("no-runtime=%d" % self.unweighted)
 
         if options.csv:
             mean_row["JOBID"] = "Mean"
             self.writer.writerow([mean_row[h] for h in self.headers])
             if weighted_row is not None:
-                weighted_row["JOBID"] = "MeanPerGPU"
+                weighted_row["JOBID"] = ("MeanPerGPUHour" if options.time_weighted
+                                         else "MeanPerGPU")
                 self.writer.writerow([weighted_row[h] for h in self.headers])
             # Padded to the header width so the CSV stays rectangular; parse_csv
             # drops the row by its first cell either way.
@@ -425,7 +492,8 @@ class SummaryRenderer:
                                            color=False)), file=self.out)
             print(self._line(mean_row), file=self.out)
             if weighted_row is not None:
-                weighted_row["JOBID"] = "Mean/GPU:"
+                weighted_row["JOBID"] = ("Mean/GPU-hr:" if options.time_weighted
+                                         else "Mean/GPU:")
                 print(self._line(weighted_row), file=self.out)
             print("%-12s %s" % ("Jobs:", "  ".join(counts)), file=self.out)
 

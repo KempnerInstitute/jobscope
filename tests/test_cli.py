@@ -582,3 +582,45 @@ def test_a_stdout_without_isatty_is_treated_as_not_a_terminal(monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.setattr(cli.sys, "stdout", object())
     assert cli._want_color(_color_args()) is False
+
+
+# --- which weighting the mean footer uses -----------------------------------
+
+def _options_for(argv, monkeypatch):
+    """The RenderOptions handle_report builds for `argv`, without running a query."""
+    captured = {}
+
+    class FakeRenderer:
+        def __init__(self, context, options, **kw):
+            captured["options"] = options
+
+        def add(self, *a, **kw):
+            pass
+
+        def finish(self):
+            pass
+
+    monkeypatch.setattr(cli, "SummaryRenderer", FakeRenderer)
+    monkeypatch.setattr(cli, "resolve",
+                        lambda *a, **kw: select_mod.Resolved(context=[], chunks=[]))
+    main(argv)
+    return captured["options"]
+
+
+def test_finished_jobs_are_weighted_by_resource_time(monkeypatch):
+    """A finished job's values span its whole runtime, so runtime is a valid weight."""
+    assert _options_for(["finished", "-D", "1"], monkeypatch).time_weighted is True
+
+
+def test_an_explicit_job_id_is_weighted_by_resource_time(monkeypatch):
+    assert _options_for(["35244230"], monkeypatch).time_weighted is True
+
+
+def test_the_running_snapshot_is_not_weighted_by_time(monkeypatch):
+    """Every value is the same instant; elapsed time is not evidence about it."""
+    assert _options_for(["running"], monkeypatch).time_weighted is False
+
+
+def test_running_avg_is_weighted_by_time(monkeypatch):
+    """--avg folds each job over its own runtime, which restores the premise."""
+    assert _options_for(["running", "--avg"], monkeypatch).time_weighted is True
