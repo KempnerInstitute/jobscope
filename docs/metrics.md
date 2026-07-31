@@ -228,6 +228,33 @@ cannot be clipped (§2) and are bounded by the window alone.
 
 ### Across a job's GPUs (`MetricSpec.agg`)
 
+Two levels of averaging apply, and they answer different questions.
+
+**Within a job**, `GPU%` is the mean over the GPUs the blob reports for it, so a
+4-GPU job with one idle card reads 75%. `GMEM%` instead divides summed used by
+summed total, which is capacity-weighted -- the difference only shows on cards of
+unequal size.
+
+**Across jobs**, the `Mean:` footer averages one value per job, whatever its GPU
+count: a 4-GPU job at 100% and a 1-GPU job at 0% give 50%, not the GPU-weighted
+80%. The table is one row per job, so the footer matches the rows above it.
+
+Which jobs contribute is the part worth being exact about:
+
+| the job | contributes to the GPU mean? |
+|---|---|
+| no GPU allocated | **no** -- there is no GPU% to average, and counting it would dilute |
+| GPU allocated, sat idle | **yes, as 0** -- this is the case worth finding, not hiding |
+| GPU allocated, no samples | **no** -- absence of data is not evidence of 0% use |
+| 4 allocated, 2 reported | the mean of the 2 that reported |
+
+The last two lean the same way on purpose: jobscope never invents a zero for a
+GPU it has no measurement of, because a retention gap or an unscraped short job
+would then read as waste that was never observed. The cost is that such jobs
+quietly leave the average, which is why the `Jobs:` footer prints the contributing
+count per column -- if `GPU%` says 17 where `CPU%` says 18, one job's GPU use is
+unmeasured rather than zero.
+
 `mean` by default; `max` for peak-like metrics; `sum` for energy. The per-job
 figure in the summary view uses this; the per-GPU rows in `detail`, `dcgm` and
 `live` do not reduce across GPUs at all.

@@ -4,6 +4,7 @@ import dataclasses
 import io
 
 from jobscope import plot, report
+from jobscope.blob import GIB
 from jobscope.dcgm import DEFAULT_SPECS, GPU_SUMMARY_SPECS
 from jobscope.report import (
     SUMMARY_COLUMNS,
@@ -17,7 +18,7 @@ from jobscope.report import (
     fmt_context,
     summarize,
 )
-from jobscope.sacct import Selection
+from jobscope.sacct import JobRecord, Selection
 
 CTX = [("User", "alice"), ("Select", "x")]
 
@@ -322,3 +323,93 @@ def test_a_single_row_gets_no_footers(gpu_record):
     text = _render(summarize, ["100"], {"100": gpu_record}, {}, CTX,
                    RenderOptions(view="all", show_dcgm=False, csv=False, header=True))
     assert "Mean:" not in text and "Jobs:" not in text
+
+
+# --- the GPU mean, with and without GPU use ---------------------------------
+
+def _gpu_job(jid, utils, allocated=None):
+    """A record whose blob reports `utils` (minor -> duty%) on one node."""
+    node = {"total_time": 100, "cpus": 2, "used_memory": 8 * GIB, "total_memory": 16 * GIB}
+    if utils is not None:
+        node["gpu_utilization"] = utils
+        node["gpu_used_memory"] = {k: 40 * GIB for k in utils}
+        node["gpu_total_memory"] = {k: 80 * GIB for k in utils}
+    return JobRecord(jobid=jid, state="COMPLETED", name="j", runtime="00:10:00", nodes="1",
+                     gpus=allocated if allocated is not None else len(utils or {}),
+                     stats={"total_time": 100, "nodes": {"n1": node}},
+                     start=1000, end=1100, duration=100, jobid_raw=jid,
+                     cluster="c", user="alice")
+
+
+def _mean_row(records):
+    text = _render(summarize, list(records), records, {}, CTX,
+                   RenderOptions(view="all", show_dcgm=False, csv=True, header=True))
+    rows = {r.split(",")[0]: r.split(",") for r in text.splitlines()}
+    header = rows["JOBID"]
+    return dict(zip(header, rows["Mean"])), dict(zip(header, rows["Jobs"]))
+
+
+def test_a_job_with_no_gpu_is_left_out_of_the_gpu_mean():
+    """A CPU-only job has no GPU% to average, so it must not dilute the mean."""
+    records = {"1": _gpu_job("1", None), "2": _gpu_job("2", {"0": 80.0})}
+    mean, jobs = _mean_row(records)
+    assert mean["GPU%"] == "80"        # not 40 -- the CPU-only job is excluded
+    assert jobs["GPU%"] == "1"         # ... and the footer says so
+    assert jobs["CPU%"] == "2"         # while both contributed CPU%
+
+
+def test_an_idle_gpu_job_is_counted_as_zero():
+    """The distinction that matters: allocated-but-unused is 0%, not absent.
+
+    Dropping these would flatter the average by hiding exactly the jobs worth
+    finding.
+    """
+    records = {"1": _gpu_job("1", {"0": 0.0}), "2": _gpu_job("2", {"0": 100.0})}
+    mean, jobs = _mean_row(records)
+    assert mean["GPU%"] == "50"        # mean(0, 100), not 100
+    assert jobs["GPU%"] == "2"
+
+
+def test_a_jobs_own_gpu_mean_spans_its_gpus():
+    records = {"1": _gpu_job("1", {"0": 100.0, "1": 100.0, "2": 100.0, "3": 0.0})}
+    text = _render(summarize, ["1"], records, {}, CTX,
+                   RenderOptions(view="all", show_dcgm=False, csv=True, header=True))
+    _, rows = plot.parse_csv(io.StringIO(text))
+    assert rows[0]["GPU%"] == "75"     # mean(100, 100, 100, 0) over the job's own GPUs
+
+
+def test_allocated_gpus_that_reported_nothing_are_not_assumed_idle():
+    """Absence of samples is not evidence of 0% use.
+
+    A job can allocate 4 GPUs and have only 2 in the blob -- MIG reports no duty
+    cycle at all, and a very short job may be missed by the scrape. Averaging the
+    two that reported matches what jobstats stored; inventing zeros for the others
+    would read as waste that was never measured. The Jobs footer is what makes the
+    shortfall visible.
+    """
+    records = {"1": _gpu_job("1", {"0": 100.0, "1": 100.0}, allocated=4)}
+    text = _render(summarize, ["1"], records, {}, CTX,
+                   RenderOptions(view="all", show_dcgm=False, csv=True, header=True))
+    _, rows = plot.parse_csv(io.StringIO(text))
+    assert rows[0]["GPU%"] == "100" and rows[0]["#GPU"] == "4"
+
+
+def test_a_gpu_job_with_no_samples_shows_a_dash_and_is_excluded():
+    records = {"1": _gpu_job("1", None, allocated=2), "2": _gpu_job("2", {"0": 60.0})}
+    mean, jobs = _mean_row(records)
+    assert mean["GPU%"] == "60"
+    assert jobs["GPU%"] == "1"         # the sample-less job cannot contribute
+    assert jobs["#GPU"] == "2"         # but it is still one of the rows rendered
+
+
+def test_the_gpu_mean_is_per_job_not_per_gpu():
+    """Documented, not accidental: each job counts once, whatever its GPU count.
+
+    A 4-GPU job at 100% and a 1-GPU job at 0% average to 50, not to the
+    GPU-weighted 80. The table is one row per job, so the footer matches it.
+    """
+    records = {"1": _gpu_job("1", {str(i): 100.0 for i in range(4)}),
+               "2": _gpu_job("2", {"0": 0.0})}
+    mean, jobs = _mean_row(records)
+    assert mean["GPU%"] == "50"
+    assert jobs["GPU%"] == "2"
