@@ -553,10 +553,13 @@ class EfficiencyTally:
             return
         self.bands[band][0] += 1
         self.bands[band][1] += weight
-        if not self.absolute:
-            self.used += (value / 100.0) * weight
-        self.total += weight
         wasted = self.waste_of(value, weight)
+        # Used is whatever was not wasted, for both kinds of metric. For a percentage
+        # that is (value/100) * weight, exactly as before. For POWER_W it is the
+        # resource-time at or above the floor, which is the only reading of "used"
+        # watts admit. One definition, so IDLE cannot mean two things.
+        self.used += weight - wasted
+        self.total += weight
         self.waste_total += wasted
         if band == "red":
             # Ranked by resource-time *wasted*, not held: a 100-hour job at 24% is
@@ -726,10 +729,10 @@ class SummaryRenderer:
         self.tallies = {header: EfficiencyTally(header, thresholds, *_resource_of(header, hours))
                         for header in self.headers if header.endswith("%")}
         # POWER_W joins them even though it is not a percentage: watts are the one
-        # idle signal a duty cycle cannot fake. It is weighted by GPU-time like the
-        # rest of the GPU family, but earns no stats-table row -- ALLOC/USED/IDLE are
-        # resource-time and "used watts" means nothing -- which the %-suffix test
-        # below takes care of.
+        # idle signal a duty cycle cannot fake. Weighted by GPU-time like the rest of
+        # the GPU family, and banded against a watt floor rather than a percentage,
+        # so its IDLE reads "GPU-hours spent under the floor" -- all-or-nothing per
+        # sample, where a percentage's IDLE is a fraction of each.
         if "POWER_W" in self.headers:
             self.tallies["POWER_W"] = EfficiencyTally(
                 "POWER_W", thresholds, *_resource_of("POWER_W", hours),
@@ -992,13 +995,12 @@ class SummaryRenderer:
                 used_row[header] = format_by_header(header, total / n) if n else "-"
 
         # Every graded metric's own summary, in column order, skipping any that no
-        # job reported and any absolute one -- POWER_W has no ALLOC/USED/IDLE, since
-        # those are resource-time and "used watts" means nothing. The pooled row
-        # above shows the same utilization as a percentage; these rows add the
-        # resource-time behind it, and how that time fell across the bands.
+        # job reported. The pooled row above shows the utilization as a percentage;
+        # these rows add the resource-time behind it, and how that time fell across
+        # the bands. POWER_W is here too: its IDLE is resource-time spent under the
+        # watt floor, which is a real quantity even though "used watts" is not.
         stats = [self.tallies[h] for h in self.headers
-                 if h in self.tallies and self.tallies[h].total
-                 and not self.tallies[h].absolute]
+                 if h in self.tallies and self.tallies[h].total]
         # One worst row per named measure, in a fixed order so the block is diffable
         # across runs, skipping any with no red job. Not every graded metric: the
         # DCGM catalog would swamp the footer, and these four are the ones that say
@@ -1120,6 +1122,8 @@ class SummaryRenderer:
     STAT_LEGEND = (
         "red below %(red)g%%, yellow below %(yellow)g%%, green above;"
         " POWER_W red below %(power)g W. Counts are jobs.",
+        "IDLE is resource-time that went unused -- for POWER_W, the time spent under"
+        " that floor.",
         "bands catch pathological jobs, IDLE measures efficiency:"
         " no red with a high IDLE means every job wastes a little",
     )
@@ -1206,7 +1210,12 @@ class SummaryRenderer:
         items = []
         for one in stats:
             used = one.pooled()
-            if used is not None:
+            # POWER_W has a table row but no bar. Its "used" is time above the watt
+            # floor, which is a detector reading rather than a fraction of a resource:
+            # on a partition of GPUs idling at 119 W it fills to 100% beside SM_ACT%
+            # at 2%, reading as the healthiest metric when it is describing the same
+            # idle GPUs and merely failing to flag them.
+            if used is not None and not one.absolute:
                 items.append((one.header, used,
                               one.band_of(used) if self.options.color else ""))
         return bar_lines(items)

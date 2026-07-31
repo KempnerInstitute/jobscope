@@ -331,8 +331,9 @@ One cutoff, `[thresholds] red`, covers every percentage metric: red below it,
 yellow below twice it, green above. Uniform on purpose -- the per-metric values it
 replaced were never calibrated against each other, and carrying a different
 threshold for each row is what made the old cutoff column confusing. `POWER_W` has
-its own knob because watts are not a percentage. A two-line legend above the table
-states both.
+its own knob because watts are not a percentage. A three-line legend above the table
+states the cutoffs, what `IDLE` counts, and why a green band is not the same as an
+efficient one.
 
 ### Three sections
 
@@ -353,8 +354,10 @@ metric, because both derive from `EfficiencyTally.pooled()` -- so a chart and th
 table it sits under cannot disagree.
 
 It reuses the table's metric list, so the set follows `--cpu` / `--gpu` / `--dcgm`
-and omits whatever no job reported; `POWER_W` has no bar for the same reason it has
-no row. A nonzero utilization always draws at least one block, since an empty bar
+and omits whatever no job reported, minus `POWER_W`: it has a row but no bar, since
+its "used" is time above the watt floor rather than a fraction of a resource, and
+drawing that as an efficiency bar makes idle-but-powered GPUs look like the healthy
+ones. A nonzero utilization always draws at least one block, since an empty bar
 beside a "1%" contradicts itself.
 
 Drawn with block characters and the report's own SGR codes rather than `rich`: the
@@ -454,8 +457,12 @@ is not a restatement of them: r(POWER, GPU%) = 0.69 and r(POWER, SM_ACT%) = 0.64
 against r(GPU%, SM_ACT%) = 0.76. It also covers 35 jobs the blob metrics miss (no
 stored blob), though those held only 0.6 of 349.2 GPU-hours.
 
-`POWER_W` gets no stats-table row: `IDLE` is resource-time, and "idle watts" has no
-meaning as a total.
+`POWER_W` does get a stats-table row. "Used watts" has no meaning as a total, but the
+resource-time that drew *less* than the floor does, and that is what its `IDLE` counts
+-- all-or-nothing per sample, where a percentage's `IDLE` takes a fraction of each.
+Grading it as a proportion of the cutoff instead would imply 50 W wastes twice what
+100 W does, and watts are not utilization. The bands still separate the near misses:
+a GPU at 119 W is yellow, not red.
 
 ### The two combined rows
 

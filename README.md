@@ -33,6 +33,7 @@ JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_
 ------------------------------------------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              12     9            80     3       64.9     14.7    0.3      9.5     455
   red below 10%, yellow below 20%, green above; POWER_W red below 100 W. Counts are jobs.
+  IDLE is resource-time that went unused -- for POWER_W, the time spent under that floor.
   bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
 METRIC   IDLE            RED  YELLOW  GREEN
 CPU%     49.3h (88%)     0    17      0
@@ -43,6 +44,7 @@ SM_ACT%  2.5h (35%)      1    0       16
 OCC%     6h (85%)        6    10      1
 TENSOR%  7h (100%)       17   0       0
 DRAM%    6.4h (91%)      14   3       0
+POWER_W  0.4h (6%)       1    2       14
 Worst SM (1/17): 35260825 0.1h@3% bdesinghu
 Jobs:            cpu-jobs=17  gpu-jobs=17  gpus=17
 ```
@@ -277,6 +279,7 @@ After the job listing come three numbered sections:
 ------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              10     6            75   49     66.0  20.6  18.1  14.5
   red below 10%, yellow below 20%, green above; POWER_W red below 100 W. Counts are jobs.
+  IDLE is resource-time that went unused -- for POWER_W, the time spent under that floor.
   bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
 METRIC   IDLE           RED  YELLOW  GREEN
 CPU%     5698.3h (90%)  155  158     2
@@ -287,6 +290,7 @@ SM_ACT%  165.6h (34%)   33   16      372
 OCC%     386.3h (79%)   123  267     31
 TENSOR%  398.6h (82%)   409  10      2
 DRAM%    416.1h (86%)   384  18      19
+POWER_W  36.7h (8%)     41   77      294
 
 2. Average efficiency  (filled = used, grey = idle)
 ---------------------------------------------------
@@ -456,8 +460,13 @@ Bar length is the pooled utilization and the filled run is tinted by its band, s
 this is the `IDLE` column read the other way round: bar percent plus `IDLE` percent
 is always 100. It follows the table's metric set, so `--cpu`, `--gpu` and `--dcgm`
 narrow or widen it too, and it prints for a single job as well -- there it is that
-job's profile across metrics. `POWER_W` has no bar, for the same reason it has no
-table row.
+job's profile across metrics.
+
+`POWER_W` is the one table row with no bar. Its "used" is the time spent *above* the
+watt floor, which is a detector reading rather than a fraction of a resource: on a
+partition of GPUs idling at 119 W it fills to 100% beside `SM_ACT%` at 2%, reading as
+the healthiest metric while describing the same idle GPUs. The table row says the
+same thing without inviting that comparison.
 
 Not emitted with `--csv` or `--ts`. Distinct from `jobscope plot`, which charts the
 per-job CSV; this needs no pipe and no plotting libraries.

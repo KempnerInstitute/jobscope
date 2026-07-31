@@ -2,6 +2,7 @@
 
 import dataclasses
 import io
+import itertools
 import re
 
 import pytest
@@ -753,12 +754,18 @@ def test_the_bars_follow_the_tables_metric_set():
     assert list(_eff_bars(records, view="gpu")) == ["GPU%", "GMEM%"]
 
 
-def test_power_gets_no_bar():
-    """Watts are not a percentage of anything, so there is nothing to fill."""
+def test_power_gets_a_table_row_but_no_bar():
+    """The one metric in the table with no bar, and deliberately.
+
+    Its "used" is time above the watt floor -- a detector reading, not a fraction of
+    a resource. On GPUs idling at 119 W it fills to 100% beside SM_ACT% at 2%, which
+    reads as the healthiest metric while describing the same idle GPUs.
+    """
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
-    dcgm = {j: ({"POWER_W": 73.0, "SM_ACT%": 40.0}, {}) for j in records}
+    dcgm = {j: ({"POWER_W": 300.0, "SM_ACT%": 40.0}, {}) for j in records}
     bars = _eff_bars(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
     assert "SM_ACT%" in bars and "POWER_W" not in bars
+    assert "POWER_W" in _power_stats(300.0)
 
 
 def test_a_nonzero_bar_is_never_drawn_empty():
@@ -1278,22 +1285,52 @@ def test_the_four_metric_row_prints_every_component_share():
     assert "sm" not in rows["Worst both"] and "pw" not in rows["Worst both"]
 
 
-def test_power_gets_no_stats_table_row():
-    """ALLOC / USED / IDLE are resource-time; "used watts" has no meaning."""
+def _power_stats(watts):
+    """The stats table for two GPU jobs drawing `watts`."""
     records = {"a": _power_job("a", 3600, None), "b": _power_job("b", 7200, None)}
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, show_dcgm=True, time_weighted=True),
         out, specs=DEFAULT_SPECS)
     renderer.add(list(records), records,
-                 {j: ({"POWER_W": 73.0, "SM_ACT%": 40.0}, {}) for j in records})
+                 {j: ({"POWER_W": watts, "SM_ACT%": 40.0}, {}) for j in records})
     renderer.finish()
     lines = out.getvalue().splitlines()
     start = next(i for i, ln in enumerate(lines) if ln.startswith("METRIC"))
-    metrics = [ln.split()[0] for ln in lines[start + 1:]
-               if ln and not ln.startswith(("Worst", "Jobs"))]
-    assert "SM_ACT%" in metrics                 # a graded % metric does get a row
-    assert "POWER_W" not in metrics             # an absolute one does not
+    # Stop at the blank line: section 2 repeats the same metric names as bars.
+    table = itertools.takewhile(bool, lines[start + 1:])
+    return {ln.split()[0]: ln for ln in table
+            if not ln.startswith(("Worst", "Jobs"))}
+
+
+def test_power_gets_a_stats_table_row():
+    """Its IDLE is resource-time spent under the watt floor, not an unused fraction.
+
+    "Used watts" means nothing, but "GPU-hours that drew less than the idle floor" is
+    a real quantity -- and the one a floor actually asserts.
+    """
+    under = _power_stats(73.0)
+    assert "POWER_W" in under and "SM_ACT%" in under
+    assert "(100%)" in under["POWER_W"]          # every GPU-hour below the floor
+    assert under["POWER_W"].split()[1] == "3h"   # 1h + 2h of GPU-time
+
+    over = _power_stats(300.0)
+    assert "(0%)" in over["POWER_W"]             # none of it
+
+
+def _power_idle(watts):
+    """The IDLE cell of the POWER_W row, as ``"3h (100%)"``."""
+    return " ".join(_power_stats(watts)["POWER_W"].split()[1:3])
+
+
+def test_powers_idle_is_all_or_nothing_not_proportional():
+    """50 W does not waste twice what 100 W does; watts are not utilization.
+
+    The bands still separate them -- 101 W is yellow where 500 W is green -- but the
+    time under the floor is the same nothing either way.
+    """
+    assert _power_idle(50.0) == _power_idle(99.0) == "3h (100%)"
+    assert _power_idle(101.0) == _power_idle(500.0) == "0h (0%)"
 
 
 def test_a_metric_with_no_red_job_prints_no_worst_row():
