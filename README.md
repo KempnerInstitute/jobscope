@@ -126,6 +126,13 @@ so `jobscope -D 3` still means what it always did.
 **Filters**, every mode: `-p` partition, `-u` user, `-a` all users, `-A` account,
 `-t` state (`finished` only), `--min-elapsed` runtime floor (`running` only).
 
+Reporting on **other users** — `-a`, or `-u` naming someone else — is limited to
+members of a Unix group, `slurm-admin` by default. Set `[defaults] admin_group` in
+the config file to change it, or to `""` to let anyone. Note this is a convenience
+guardrail, not a privilege boundary: `sacct -a` and `squeue -u` show the same jobs
+to whoever runs them directly. Looking up a specific `JOBID` is never gated, since
+a JOBID bypasses the filters anyway.
+
 **Level 3 — granularity** (pick one) and **columns**:
 
 | option | effect |
@@ -163,6 +170,18 @@ JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR% 
 `NODE` is the node count and `#GPU` the allocated GPU count. `CPU%`/`MEM%` sit
 beside `SM_ACT%` deliberately: a GPU job whose `GPU%` is low and `CPU%` is high is
 held up on the host, and no single view used to show both.
+
+With more than one job the table ends in two footers:
+
+```
+Mean:                        11     4            70     3       52.8   11.4 ...
+Jobs:                        18     18     18    17     17      17     17   ...
+```
+
+`Jobs` is the number of jobs behind each mean, **per column**, because the counts
+differ: a CPU-only job contributes to `CPU%` but has no `GPU%` to average. Under
+`#GPU` it is the row total, i.e. how many jobs the table rendered. `jobscope plot`
+skips both footers rather than charting them as jobs.
 
 - `--cpu` narrows to the host columns. For *finished* jobs that needs no Prometheus
   at all; a running job's `CPU%` comes from `cgroup_*`, so it does.

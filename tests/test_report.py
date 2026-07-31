@@ -286,3 +286,39 @@ def test_detail_renderer_empty_message_ignores_header_flag(cpu_record):
     streamed = _render_stream(report.DetailRenderer, CTX, options,
                               [(["200"], {"200": cpu_record}, {})])
     assert "(no GPU jobs in this selection)" in streamed
+
+
+def test_mean_row_is_followed_by_per_column_job_counts(gpu_record, cpu_record):
+    """How many jobs each mean came from -- per column, because they differ.
+
+    A CPU-only job contributes to CPU% but has no GPU% to average, so a single
+    count in the label would overstate the GPU columns.
+    """
+    records = {"100": gpu_record, "200": cpu_record}
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
+    text = _render(summarize, ["100", "200"], records,
+                   {"100": ({"SM_ACT%": 60.0}, {})}, CTX, options)
+    rows = {r.split(",")[0]: r.split(",") for r in text.splitlines()}
+    header = rows["JOBID"]
+    jobs = dict(zip(header, rows["Jobs"]))
+    assert dict(zip(header, rows["Mean"]))["CPU%"]           # a mean was printed
+    assert jobs["CPU%"] == "2"        # both jobs have CPU data
+    assert jobs["GPU%"] == "1"        # only the GPU job has GPU data
+    assert jobs["SM_ACT%"] == "1"     # ... and only it had DCGM metrics
+    assert jobs["#GPU"] == "2"        # the row total: jobs actually rendered
+
+
+def test_footer_rows_are_not_parsed_as_jobs(gpu_record, cpu_record):
+    """Otherwise `jobscope plot` would chart the footers as two extra jobs."""
+    records = {"100": gpu_record, "200": cpu_record}
+    text = _render(summarize, ["100", "200"], records, {}, CTX,
+                   RenderOptions(view="all", show_dcgm=False, csv=True, header=True))
+    _, rows = plot.parse_csv(io.StringIO(text))
+    assert len(rows) == 2
+    assert {r["JOBID"] for r in rows} == {"100", "200"}
+
+
+def test_a_single_row_gets_no_footers(gpu_record):
+    text = _render(summarize, ["100"], {"100": gpu_record}, {}, CTX,
+                   RenderOptions(view="all", show_dcgm=False, csv=False, header=True))
+    assert "Mean:" not in text and "Jobs:" not in text

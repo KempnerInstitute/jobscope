@@ -28,6 +28,9 @@ DEFAULT_SAMPLING_PERIOD = 60
 DEFAULT_WORKERS = 8
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MIN_RUNTIME = 180
+# Unix group whose members may report on other users' jobs. Empty disables the
+# check, letting anyone use -a/-u. Advisory only -- see sacct.in_group.
+DEFAULT_ADMIN_GROUP = "slurm-admin"
 DEFAULT_THRESHOLDS = {"gpu": 25.0, "gmem": 20.0, "cpu": 25.0, "mem": 25.0, "default": 15.0}
 
 
@@ -54,6 +57,8 @@ class Defaults:
     workers: int
     timeout: float
     min_runtime: int
+    # Defaulted so existing constructions keep working; "" disables the gate.
+    admin_group: str = DEFAULT_ADMIN_GROUP
 
 
 @dataclass(frozen=True)
@@ -115,6 +120,7 @@ def load_config(path: Optional[str] = None,
         workers=int(dfl.get("workers", DEFAULT_WORKERS)),
         timeout=float(dfl.get("timeout", DEFAULT_TIMEOUT)),
         min_runtime=int(dfl.get("min_runtime", DEFAULT_MIN_RUNTIME)),
+        admin_group=str(dfl.get("admin_group", DEFAULT_ADMIN_GROUP)),
     )
     return Config(
         prometheus_url=(env.get(PROM_URL_ENV) or prom.get("url")) or None,

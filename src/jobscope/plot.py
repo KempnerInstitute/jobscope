@@ -16,7 +16,10 @@ from . import config
 from .errors import JobscopeError
 
 ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
-           "DUR_S", "RUNTIME", "EPOCH", "TIME"}
+           "#GPU", "DUR_S", "RUNTIME", "EPOCH", "TIME"}
+
+# Summary footers, keyed on the JOBID cell. Not job rows, so parse_csv skips them.
+FOOTER_ROWS = {"Mean", "Jobs"}
 
 HEAT_MAX_ROWS = 40
 PANEL_CAP = 12
@@ -88,9 +91,13 @@ def load_libs():
 def parse_csv(fobj):
     """Return ``(columns, rows)`` from a jobscope CSV.
 
-    Skips the leading context rows (User, Select, ...) up to the header row
-    (first cell 'JOBID') and drops the trailing 'Mean' summary row. Rows are dicts
-    keyed by column.
+    Skips the leading context rows (User, Select, ...) up to the header row (first
+    cell 'JOBID') and drops the trailing footer rows. Rows are dicts keyed by
+    column.
+
+    The footers must be dropped by name, not by position: 'Mean' holds averages and
+    'Jobs' the per-column contributing counts, and charting either as if it were a
+    job would invent a data point.
     """
     columns, rows = None, []
     for record in csv.reader(fobj):
@@ -100,7 +107,7 @@ def parse_csv(fobj):
             if record[0] == "JOBID":
                 columns = record
             continue
-        if record[0] == "Mean":
+        if record[0] in FOOTER_ROWS:
             continue
         rows.append({columns[i]: (record[i] if i < len(record) else "")
                      for i in range(len(columns))})
