@@ -36,7 +36,15 @@ from .live import (
 from .live_blob import fill_running, note_offline_gap
 from .prometheus import PrometheusClient, client_from_config
 from .report import RenderOptions, context_pairs, dcgm_timeseries, live_timeseries
-from .sacct import JobRecord, Selection, fetch, fetch_chunks, select_jobs
+from .sacct import (
+    JobRecord,
+    Selection,
+    days_to_window,
+    end_of_day,
+    fetch,
+    fetch_chunks,
+    select_jobs,
+)
 
 # {jobid: (job-level metrics by header, per-GPU metrics by (node, minor))}
 DcgmData = Dict[str, Tuple[dict, dict]]
@@ -171,11 +179,22 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
 # --- sacct ------------------------------------------------------------------
 
 def sacct_selection(request: Request) -> Selection:
-    """The sacct-side selection for a finished or explicit-ID request."""
+    """The sacct-side selection for a finished or explicit-ID request.
+
+    This is where a scope becomes an actual window, and it must happen: with no
+    ``starttime``, :func:`jobscope.sacct.select_jobs` falls back to ``now-30days``,
+    so a request carrying only ``days`` would scan a month while the header
+    truthfully claimed "last 1 day". ``days`` is kept alongside for that header.
+    """
+    start, end = request.starttime, request.endtime
+    if request.days is not None:
+        start, end = days_to_window(request.days)
+    elif start and not end:
+        end = end_of_day(start)     # -S alone selects that calendar day
     return Selection(user=request.user, jobids=list(request.jobids),
                      account=request.account, partition=request.partition,
                      state=request.state, lastn=request.lastn, days=request.days,
-                     starttime=request.starttime, endtime=request.endtime,
+                     starttime=start, endtime=end,
                      all_users=request.all_users)
 
 

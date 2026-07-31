@@ -1,9 +1,11 @@
 """Tests for the selection layer that hides sacct and squeue behind one interface."""
 
 import dataclasses
+import time
 
 from jobscope import select as select_mod
 from jobscope.dcgm import DEFAULT_SPECS
+from jobscope.sacct import TIMESTAMP_FORMAT
 from jobscope.select import (
     BLOB_SPECS,
     FINISHED,
@@ -23,6 +25,48 @@ def _cfg():
 
 
 # --- the sacct branch -------------------------------------------------------
+
+def test_days_becomes_a_real_window():
+    """-D N must reach the query, not just the header.
+
+    select_jobs falls back to `now-30days` when starttime is unset, so a Selection
+    carrying only `days` scanned a month while the header said "last 1 day" -- slow,
+    and silently wrong. Assert the window, never the intermediate attribute.
+    """
+    selection = sacct_selection(Request(mode=FINISHED, days=1, user="alice"))
+    assert selection.starttime and selection.endtime
+    start = time.mktime(time.strptime(selection.starttime, TIMESTAMP_FORMAT))
+    end = time.mktime(time.strptime(selection.endtime, TIMESTAMP_FORMAT))
+    assert 0.9 * 86400 <= end - start <= 1.1 * 86400
+    # days is kept as well, because the header renders it as "last 1 day".
+    assert selection.days == 1
+
+
+def test_days_window_scales():
+    selection = sacct_selection(Request(mode=FINISHED, days=7, user="alice"))
+    start = time.mktime(time.strptime(selection.starttime, TIMESTAMP_FORMAT))
+    end = time.mktime(time.strptime(selection.endtime, TIMESTAMP_FORMAT))
+    assert 6.9 * 86400 <= end - start <= 7.1 * 86400
+
+
+def test_starttime_alone_closes_at_the_next_midnight():
+    """-S DATE selects that calendar day, not "from then until now"."""
+    selection = sacct_selection(Request(mode=FINISHED, starttime="2026-07-15", user="alice"))
+    assert selection.starttime == "2026-07-15"
+    assert selection.endtime == "2026-07-16T00:00:00"
+
+
+def test_explicit_window_is_left_alone():
+    selection = sacct_selection(Request(mode=FINISHED, starttime="2026-07-15",
+                                        endtime="2026-07-20", user="alice"))
+    assert (selection.starttime, selection.endtime) == ("2026-07-15", "2026-07-20")
+
+
+def test_lastn_needs_no_window():
+    # -N leans on sacct's default range and trims client-side.
+    selection = sacct_selection(Request(mode=FINISHED, lastn=5, user="alice"))
+    assert selection.lastn == 5 and selection.starttime is None
+
 
 def test_sacct_selection_carries_every_filter():
     request = Request(mode=FINISHED, days=3, lastn=None, user="alice",
