@@ -1565,6 +1565,30 @@ def test_in_columns_packs_blocks_side_by_side_in_reading_order():
     assert out == ["a1  b1", "a2  b2", "c1", "c2"]
 
 
+def test_the_column_count_follows_the_available_width():
+    """Four blocks fit a wide terminal and would wrap a narrow one.
+
+    A chart block is about 55 characters, so four columns need ~229 -- nearly twice
+    the width the rest of the report targets. How many fit is a property of the
+    terminal, not of the data.
+    """
+    from jobscope.report import MAX_CHART_COLUMNS, in_columns
+    blocks = [["x" * 55] for _ in range(4)]
+    assert len(in_columns(blocks, available=80)) == 4        # one per line
+    assert len(in_columns(blocks, available=132)) == 2       # two rows of two
+    assert len(in_columns(blocks, available=240)) == 1       # all four abreast
+    # And never more than the cap, however wide the terminal claims to be.
+    many = [["x" * 10] for _ in range(12)]
+    widest = in_columns(many, available=10_000)
+    assert len(widest) == len(many) / MAX_CHART_COLUMNS
+
+
+def test_a_non_terminal_gets_a_fixed_width():
+    """Redirected output must not change shape with whatever $COLUMNS happened to be."""
+    from jobscope.report import PIPED_CHART_WIDTH, terminal_width
+    assert terminal_width(io.StringIO()) == PIPED_CHART_WIDTH
+
+
 def test_in_columns_pads_a_short_block():
     """A metric absent from one group leaves its block a line short of its neighbour."""
     from jobscope.report import in_columns

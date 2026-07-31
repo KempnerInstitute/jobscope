@@ -494,9 +494,11 @@ job block ends with the efficiency chart repeated **per node**:
          GPU%  █████████████████████████████████░   96%            GPU%  █████████████████████████████████░   97%
 ```
 
-Two groups to a row, so a four-node job is eight bars tall rather than thirty-two and
-two nodes can be compared without scrolling between them. The widest line is 124
-characters against the job table's 132.
+Groups are packed side by side, **as many per row as the terminal fits**, up to four.
+A block is about 55 characters, so 132 columns gives two, 171 gives three and 229 or
+more gives four -- a four-node job then reads as a single row of bars. Off a terminal
+the layout is fixed at two, so redirected output does not change shape with whatever
+`$COLUMNS` happened to be.
 
 A node's value is the mean over its GPU rows, which within a node *is* the pooled
 figure. `CPU%` and `CPU-MEM` are already per-node figures repeated on each row, so

@@ -6,6 +6,7 @@ stable: the CSV emitted here is what ``jobscope plot`` parses.
 
 import csv
 import re
+import shutil
 import sys
 import textwrap
 import time
@@ -247,8 +248,30 @@ def bar_lines(items, indent: str = "  ") -> List[str]:
     return out
 
 
-def in_columns(blocks: List[List[str]], columns: int = 2, gap: int = 3) -> List[str]:
+# A chart block is about 55 characters, so four columns need ~229 -- nearly twice the
+# job table's width. How many actually fit is a property of the terminal, not of the
+# data, so it is measured rather than chosen.
+MAX_CHART_COLUMNS = 4
+# Used when the destination is not a terminal, so redirected output does not change
+# shape with whatever $COLUMNS happened to be. Two 55-wide cells and a gap.
+PIPED_CHART_WIDTH = 116
+
+
+def terminal_width(out, default: int = PIPED_CHART_WIDTH) -> int:
+    """The width to lay out for: the terminal's, or a fixed default off a terminal."""
+    if not getattr(out, "isatty", lambda: False)():
+        return default
+    return shutil.get_terminal_size((default, 24)).columns
+
+
+def in_columns(blocks: List[List[str]], columns: Optional[int] = None,
+               gap: int = 3, available: int = PIPED_CHART_WIDTH) -> List[str]:
     """Pack equal-shaped blocks of lines side by side, in reading order.
+
+    ``columns`` defaults to as many as fit in ``available``, capped at
+    :data:`MAX_CHART_COLUMNS`: a wide terminal gets four, the width the rest of the
+    report targets gets two, and an 80-column one gets a single column rather than
+    wrapped nonsense.
 
     Widths are measured with the escapes stripped, or a coloured block would be padded
     by the length of its SGR bytes and push its neighbour out of line. Blocks of unequal
@@ -258,9 +281,11 @@ def in_columns(blocks: List[List[str]], columns: int = 2, gap: int = 3) -> List[
     blocks = [b for b in blocks if b]
     if not blocks:
         return []
+    width = max(len(_ESC_RE.sub("", line)) for block in blocks for line in block)
+    if columns is None:
+        columns = max(1, min(MAX_CHART_COLUMNS, (available + gap) // (width + gap)))
     if columns < 2 or len(blocks) < 2:
         return [line for block in blocks for line in block]
-    width = max(len(_ESC_RE.sub("", line)) for block in blocks for line in block)
     out = []
     for start in range(0, len(blocks), columns):
         row = blocks[start:start + columns]
@@ -1341,7 +1366,8 @@ class DetailRenderer:
             return []
         # Side by side: a four-node job is eight bars tall rather than thirty-two, and
         # two nodes can be compared without scrolling between them.
-        return ["", "  %s  (filled = used, grey = idle)" % title] + in_columns(blocks)
+        return ["", "  %s  (filled = used, grey = idle)" % title] + in_columns(
+            blocks, available=terminal_width(self.out))
 
     def finish(self) -> None:
         self._start()
