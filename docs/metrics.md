@@ -328,9 +328,19 @@ threshold for each row is what made the old cutoff column confusing. `POWER_W` h
 its own knob because watts are not a percentage. A two-line legend above the table
 states both.
 
-### `--plot_avgeff`
+### Three sections
 
-Appends one horizontal bar per graded metric after the footer: length is the pooled
+Everything after the per-job listing is presented as three numbered sections, ruled
+to their own widths: **Summary by metric** (the pooled row and the table),
+**Average efficiency** (the bars), and **Problem jobs** (the `Worst` rows and the
+`Jobs:` counts). Numbering runs over the sections that actually have content, so a
+suppressed or empty one leaves no gap -- a missing number would read as a failure.
+Headings and rules follow `--noheader`; `--csv` and `--ts` carry none of it, `--ts`
+structurally so, since it never constructs a `SummaryRenderer`.
+
+### The efficiency bars
+
+Shown by default, omitted with `--no-plot`. One horizontal bar per graded metric: length is the pooled
 utilization, the filled run tinted by the band that value falls in. It is the `IDLE`
 column read the other way round -- bar percent plus `IDLE` percent is 100 for every
 metric, because both derive from `EfficiencyTally.pooled()` -- so a chart and the

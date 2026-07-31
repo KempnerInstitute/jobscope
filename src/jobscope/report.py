@@ -5,6 +5,7 @@ stable: the CSV emitted here is what ``jobscope plot`` parses.
 """
 
 import csv
+import re
 import sys
 import textwrap
 import time
@@ -151,6 +152,9 @@ SUMMARY_DESCRIPTIONS: List[Tuple[str, str, str]] = [
 # a table; plot pays for rich because it needs it.
 _SGR = {"red": "\033[31m", "yellow": "\033[33m", "green": "\033[32m"}
 _RESET = "\033[0m"
+# Strips the above, so a rule can be measured against the characters a reader sees
+# rather than the escape bytes carrying the colour.
+_ESC_RE = re.compile(r"\033\[[0-9;]*m")
 
 
 @dataclass
@@ -169,8 +173,9 @@ class RenderOptions:
     # running snapshot every value is the same moment, so scaling one by two days
     # of elapsed time would claim that instant represents those two days.
     time_weighted: bool = False
-    # Append horizontal efficiency bars, one per graded metric, after the footer.
-    plot_avgeff: bool = False
+    # Show the efficiency bars section. On by default: it is the fastest read in
+    # the block, and behind a flag it was rarely seen. --no-plot switches it off.
+    plot_avgeff: bool = True
     # Tint %-metric cells by their threshold band. Off unless the caller has
     # established that the destination is a terminal that wants colour.
     color: bool = False
@@ -854,40 +859,40 @@ class SummaryRenderer:
                     for _score, jid, _user, shares in rows]))
             self.writer.writerow(padded("Jobs", counts))
         else:
+            # Three sections, because the block answers three questions: how was each
+            # metric used, how do they compare, and which jobs are the problem.
             used_row["JOBID"] = lead.row if lead else "Used:"
-            if options.header:
-                print("-" * len(self._line({c.header: c.header for c in self.columns},
-                                           color=False)), file=self.out)
+            summary = ([] if alone else [self._line(used_row)]) + self._stat_table(stats)
+
+            problems = []
             if not alone:
-                print(self._line(used_row), file=self.out)
-            for line in self._stat_table(stats):
-                print(line, file=self.out)
-            if alone:
-                self._print_bars(stats)
-                return
-            # Labels now carry counts, so their widths vary; pad them all (and
-            # Jobs:) to one width so the job lists still line up under each other.
-            rows_out = [("Worst %s (%d/%d):" % (_worst_slug(one.header),
-                                                one.bands["red"][0], one.graded()),
-                         one.worst_line()) for one in worst]
-            for name, headers, ranked in combined:
-                # No denominator here: a row spanning metrics with different coverage
-                # has no single honest total, so only the candidate count is shown.
-                # No username here, unlike the per-metric rows: with four component
-                # shares the line runs past the table width, and the same job ids
-                # appear above with their owners.
-                cells = "  ".join(
-                    "%s %s" % (jid, "+".join(
-                        "%d%%%s" % (round(100 * share), _SHARE_TAG[h])
-                        for h, share in shares))
-                    for _score, jid, _user, shares in ranked)
-                rows_out.append(("Worst %s (%d):" % (
-                    name, self._combined_candidates(headers)), cells))
-            rows_out.append(("Jobs:", "  ".join(counts)))
-            width = max(len(label) for label, _ in rows_out)
-            for label, cells in rows_out:
-                print("%-*s %s" % (width, label, cells), file=self.out)
-            self._print_bars(stats)
+                # Labels carry counts, so their widths vary; pad them all (and Jobs:)
+                # to one width so the job lists line up under each other.
+                rows_out = [("Worst %s (%d/%d):" % (_worst_slug(one.header),
+                                                    one.bands["red"][0], one.graded()),
+                             one.worst_line()) for one in worst]
+                for name, headers, ranked in combined:
+                    # No denominator here: a row spanning metrics with different
+                    # coverage has no single honest total, so only the candidate count
+                    # is shown. No username either, unlike the per-metric rows: with
+                    # four component shares the line runs past the table width, and
+                    # the same job ids appear above with their owners.
+                    cells = "  ".join(
+                        "%s %s" % (jid, "+".join(
+                            "%d%%%s" % (round(100 * share), _SHARE_TAG[h])
+                            for h, share in shares))
+                        for _score, jid, _user, shares in ranked)
+                    rows_out.append(("Worst %s (%d):" % (
+                        name, self._combined_candidates(headers)), cells))
+                rows_out.append(("Jobs:", "  ".join(counts)))
+                label_width = max(len(label) for label, _ in rows_out)
+                problems = ["%-*s %s" % (label_width, label, cells)
+                            for label, cells in rows_out]
+
+            self._print_sections([("Summary by metric", summary),
+                                  ("Average efficiency  (filled = used, grey = idle)",
+                                   self._bar_lines(stats)),
+                                  ("Problem jobs", problems)])
 
 
     STAT_HEADERS = ("METRIC", "IDLE", "RED", "YELLOW", "GREEN")
@@ -915,16 +920,39 @@ class SummaryRenderer:
 
     BAR_WIDTH = 34
 
-    def _print_bars(self, stats: List["EfficiencyTally"]) -> None:
-        """Emit the efficiency bars, when asked for and the destination is text.
+    def _print_sections(self, sections: List[Tuple[str, List[str]]]) -> None:
+        """Print ``(title, lines)`` sections, numbered and ruled.
+
+        Numbering runs over the sections that actually have content, so --no-plot
+        leaves "1." and "2." rather than a gap where 2 was -- a missing number reads
+        as something having failed. The rule spans the section's own widest line, so
+        each hugs its content instead of inheriting the job table's width.
+
+        Titles and rules are furniture: --noheader drops them and keeps the data.
+        """
+        number = 0
+        for title, lines in sections:
+            if not lines:
+                continue
+            number += 1
+            print(file=self.out)
+            if self.options.header:
+                heading = "%d. %s" % (number, title)
+                print(heading, file=self.out)
+                width = max([len(_ESC_RE.sub("", ln)) for ln in lines] + [len(heading)])
+                print("-" * width, file=self.out)
+            for line in lines:
+                print(line, file=self.out)
+
+    def _bar_lines(self, stats: List["EfficiencyTally"]) -> List[str]:
+        """The efficiency bars, or nothing when they are switched off or in CSV.
 
         Never in CSV: a bar chart has no place in a machine format, and parse_csv
         would have to be taught to skip it.
         """
         if not self.options.plot_avgeff or self.options.csv:
-            return
-        for line in self._eff_bars(stats):
-            print(line, file=self.out)
+            return []
+        return self._eff_bars(stats)
 
     def _eff_bars(self, stats: List["EfficiencyTally"]) -> List[str]:
         """Horizontal utilization bars, one per graded metric.
@@ -941,8 +969,6 @@ class SummaryRenderer:
             return []
         label = max(len(one.header) for one in stats)
         out = []
-        if self.options.header:
-            out.append("Avg efficiency by metric  (filled = used, grey = idle)")
         for one in stats:
             used = one.pooled()
             if used is None:
@@ -955,10 +981,13 @@ class SummaryRenderer:
                 filled = 1
             band = one.band_of(used) if self.options.color else ""
             run = "\u2588" * filled
-            out.append("  %*s  %s%s  %3d%%" % (
+            # "<1" rather than "0" for a nonzero value, so the number agrees with
+            # the block the bar is obliged to draw.
+            pct = "<1%" if 0 < used < 0.5 else "%d%%" % round(used)
+            out.append("  %*s  %s%s  %4s" % (
                 label, one.header,
                 _SGR[band] + run + _RESET if band and run else run,
-                "\u2591" * (self.BAR_WIDTH - filled), round(used)))
+                "\u2591" * (self.BAR_WIDTH - filled), pct))
         return out
 
     def _stat_table(self, stats: List["EfficiencyTally"]) -> List[str]:

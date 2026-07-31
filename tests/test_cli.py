@@ -627,8 +627,34 @@ def test_running_avg_is_weighted_by_time(monkeypatch):
     assert _options_for(["running", "--avg"], monkeypatch).time_weighted is True
 
 
-def test_both_spellings_of_the_efficiency_plot_flag_reach_the_renderer(monkeypatch):
-    """The underscore form is the one asked for; the hyphen matches every other flag."""
+def test_the_efficiency_bars_are_on_by_default(monkeypatch):
+    assert _options_for(["finished", "-D", "1"], monkeypatch).plot_avgeff
+
+
+def test_no_plot_switches_the_bars_off(monkeypatch):
+    assert not _options_for(["finished", "-D", "1", "--no-plot"], monkeypatch).plot_avgeff
+
+
+def test_the_old_plot_flag_is_accepted_and_notes(monkeypatch, capsys):
+    """It shipped for one commit; a command naming it should still run."""
     for spelling in ("--plot_avgeff", "--plot-avgeff"):
         assert _options_for(["finished", "-D", "1", spelling], monkeypatch).plot_avgeff
-    assert not _options_for(["finished", "-D", "1"], monkeypatch).plot_avgeff
+        assert "is the default now" in capsys.readouterr().err
+
+
+def test_the_timeseries_path_cannot_reach_the_summary_renderer(monkeypatch):
+    """--ts is a per-scrape CSV, so no section furniture can leak into it.
+
+    Guaranteed structurally rather than by a flag check: handle_report routes --ts to
+    select.emit_timeseries, which never constructs a SummaryRenderer. This pins that
+    routing, since a future refactor could quietly reintroduce one.
+    """
+    called = {}
+    monkeypatch.setattr(cli, "emit_timeseries",
+                        lambda *a, **kw: called.setdefault("ts", True))
+    monkeypatch.setattr(cli, "SummaryRenderer",
+                        lambda *a, **kw: pytest.fail("--ts built a SummaryRenderer"))
+    monkeypatch.setattr(cli, "resolve",
+                        lambda *a, **kw: pytest.fail("--ts resolved a summary chunk"))
+    main(["finished", "-D", "1", "--ts", "--csv"])
+    assert called == {"ts": True}

@@ -573,7 +573,8 @@ def _eff_bars(records, **kw):
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view=kw.get("view", "all"), header=kw.get("header", True),
-                           csv=kw.get("csv", False), plot_avgeff=True,
+                           csv=kw.get("csv", False),
+                           plot_avgeff=kw.get("plot_avgeff", True),
                            color=kw.get("color", False),
                            thresholds=kw.get("thresholds"),
                            show_dcgm=kw.get("show_dcgm", False),
@@ -587,6 +588,108 @@ def _eff_bars(records, **kw):
             head, _, tail = line.strip().partition("  ")
             bars[head] = (tail.count("\u2588"), int(tail.strip().rstrip("%").split()[-1]))
     return bars
+
+
+def _sections(records, **kw):
+    """``[(number, title, [line, ...])]`` parsed back out of a rendered report."""
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view=kw.get("view", "all"), header=kw.get("header", True),
+                           csv=kw.get("csv", False),
+                           plot_avgeff=kw.get("plot_avgeff", True)),
+        out, specs=kw.get("specs"))
+    renderer.add(list(records), records, kw.get("dcgm_data") or {})
+    renderer.finish()
+    found, current = [], None
+    for line in out.getvalue().splitlines():
+        head = re.match(r"^(\d+)\. (.*)$", line)
+        if head:
+            current = (int(head.group(1)), head.group(2), [])
+            found.append(current)
+        elif current is not None and not set(line) <= {"-", ""}:
+            current[2].append(line)
+    return found
+
+
+def test_the_report_is_three_numbered_sections():
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
+    got = [(n, t) for n, t, _lines in _sections(records)]
+    assert got == [(1, "Summary by metric"),
+                   (2, "Average efficiency  (filled = used, grey = idle)"),
+                   (3, "Problem jobs")]
+
+
+def test_the_sections_hold_what_their_titles_say():
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
+    one, two, three = _sections(records)
+    assert any(ln.startswith("METRIC") for ln in one[2])
+    assert any(ln.startswith("Used/") for ln in one[2])
+    assert all("\u2588" in ln or "\u2591" in ln for ln in two[2])
+    assert any(ln.startswith("Worst GPU") for ln in three[2])
+    assert any(ln.startswith("Jobs:") for ln in three[2])
+
+
+def test_numbering_is_sequential_over_the_sections_actually_printed():
+    """A gap where a section was would read as something having failed."""
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
+    without = [(n, t) for n, t, _l in _sections(records, plot_avgeff=False)]
+    assert without == [(1, "Summary by metric"), (2, "Problem jobs")]
+
+
+def test_a_single_job_gets_the_first_two_sections_only():
+    """No Worst rows for one job, so there is no third section to number."""
+    got = [(n, t) for n, t, _l in _sections({"1": _gpu_job("1", {"0": 90.0})})]
+    assert [n for n, _t in got] == [1, 2]
+    assert "Problem jobs" not in [t for _n, t in got]
+
+
+def test_each_rule_spans_its_own_sections_widest_visible_line():
+    """Measured on visible characters: colour escapes would inflate len()."""
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="gpu", header=True, color=True,
+                           thresholds=_thresholds()), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    lines = out.getvalue().splitlines()
+    for i, line in enumerate(lines):
+        if not re.match(r"^\d+\. ", line):
+            continue
+        rule = lines[i + 1]
+        assert set(rule) == {"-"}
+        body = []
+        for ln in lines[i + 2:]:
+            if not ln or re.match(r"^\d+\. ", ln):
+                break
+            body.append(len(report._ESC_RE.sub("", ln)))
+        assert len(rule) == max(body + [len(line)])
+
+
+def test_noheader_drops_the_section_furniture_but_keeps_the_data():
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=False), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    text = out.getvalue()
+    assert "1. Summary by metric" not in text and "---" not in text
+    assert "\u2588" in text and "Worst GPU" in text      # the data survives
+
+
+def test_csv_gets_no_section_furniture():
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=True, csv=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    text = out.getvalue()
+    for furniture in ("1. ", "2. ", "3. ", "\u2588", "\u2591", "---"):
+        assert furniture not in text
+    _, parsed = plot.parse_csv(io.StringIO(text))
+    assert [r["JOBID"] for r in parsed] == ["1", "2"]
 
 
 def test_the_bars_complement_the_idle_column():
@@ -640,14 +743,22 @@ def test_the_bars_are_tinted_by_band_and_only_when_colour_is_on():
     assert "\033" not in "".join(_eff_bars(records, view="gpu"))
 
 
-def test_no_bars_in_csv_and_none_without_the_flag():
+def test_no_bars_in_csv_or_under_no_plot():
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
     assert _eff_bars(records, csv=True) == {}
     out = io.StringIO()
-    renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=True, plot_avgeff=False), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    assert "\u2588" not in out.getvalue()      # opt-in only
+    assert "\u2588" not in out.getvalue()
+
+    # And they are there without asking, now that they are the default.
+    shown = io.StringIO()
+    default = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), shown)
+    default.add(list(records), records, {})
+    default.finish()
+    assert "\u2588" in shown.getvalue()
 
 
 def test_a_single_job_gets_bars_too():

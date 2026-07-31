@@ -202,28 +202,45 @@ JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR% 
 beside `SM_ACT%` deliberately: a GPU job whose `GPU%` is low and `CPU%` is high is
 held up on the host, and no single view used to show both.
 
-With more than one job the table ends in a summary block:
+After the job listing come three numbered sections:
 
 ```
-Used/GPU-hr:                              5      4            43   30     37.5  11.4  9.9  8.2  272
+
+1. Summary by metric
+------------------------------------------------------------------------------------------------
+Used/GPU-hr:                              10     6            75   49     66.0  20.6  18.1  14.5
   red below 10%, yellow below 20%, green above; POWER_W red below 100 W. Counts are jobs.
   bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
-METRIC   IDLE            RED  YELLOW  GREEN
-CPU%     10034.5h (95%)  159  158     2
-MEM%     129.6TBh (96%)  307  8       4
-GPU%     408.8h (54%)    5    8       306
-GMEM%    528.9h (70%)    299  9       11
-SM_ACT%  452h (60%)      35   17      373
-OCC%     660.6h (88%)    126  269     30
-TENSOR%  672.3h (89%)    414  9       2
-DRAM%    688.3h (91%)    389  18      18
-Worst GPU (5/319):    35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 47.7h@0% amazloumi
-Worst SM (35/425):    35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 47.7h@0% amazloumi
-Worst POWER (41/425): 35475803 142.9h@73W amazloumi  35476814 142h@73W amazloumi  36337781 47.7h@73W amazloumi
-Worst CPU (159/319):  35475803 2286.6h@0% amazloumi  35476814 2271.9h@0% amazloumi  36337781 763.7h@0% amazloumi
-Worst both (3):       36337781 39%gpu+14%cpu  36358839 9%gpu+3%cpu
-Worst all (2):        36337781 39%gpu+29%sm+65%pw+14%cpu  36358839 9%gpu+7%sm+16%pw+3%cpu
-Jobs:                 cpu-jobs=319  gpu-jobs=319  gpus=381  no-runtime=5
+METRIC   IDLE           RED  YELLOW  GREEN
+CPU%     5698.3h (90%)  155  158     2
+MEM%     92.6TBh (94%)  303  8       4
+GPU%     119.9h (25%)   3    7       305
+GMEM%    245.2h (51%)   294  9       12
+SM_ACT%  165.6h (34%)   33   16      372
+OCC%     386.3h (79%)   123  267     31
+TENSOR%  398.6h (82%)   409  10      2
+DRAM%    416.1h (86%)   384  18      19
+
+2. Average efficiency  (filled = used, grey = idle)
+---------------------------------------------------
+     CPU%  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   10%
+     MEM%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░    6%
+     GPU%  ██████████████████████████░░░░░░░░   75%
+    GMEM%  █████████████████░░░░░░░░░░░░░░░░░   49%
+  SM_ACT%  ███████████████████████░░░░░░░░░░░   66%
+     OCC%  ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░   21%
+  TENSOR%  ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░   18%
+    DRAM%  █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   14%
+
+3. Problem jobs
+--------------------------------------------------------------------------------------------
+Worst GPU (3/318):    36337781 48h@0% amazloumi  36358839 11.8h@0% amazloumi
+Worst SM (33/424):    36337781 48h@0% amazloumi  36358839 11.8h@0% amazloumi
+Worst POWER (39/424): 36337781 48h@73W amazloumi  36358839 11.8h@74W amazloumi
+Worst CPU (155/318):  36337781 768.2h@0% amazloumi  36358839 189.1h@0% amazloumi
+Worst both (3):       36337781 38%gpu+14%cpu  36358839 9%gpu+3%cpu
+Worst all (2):        36337781 38%gpu+28%sm+65%pw+14%cpu  36358839 9%gpu+7%sm+16%pw+3%cpu
+Jobs:                 cpu-jobs=318  gpu-jobs=318  gpus=381  no-runtime=4
 ```
 
 **There is no per-job mean**, on purpose. Utilization is bimodal -- jobs cluster
@@ -336,10 +353,17 @@ than `gpu-jobs=` -- a job with no stored blob still has Prometheus data.
 other a peak -- so they fall back to the plain per-job figure.
 `jobscope plot` skips every footer rather than charting them as jobs.
 
-### `--plot_avgeff`: the same numbers as bars
+The sections answer three different questions -- how was each metric used, how do
+they compare, and which jobs are the problem -- and each is ruled to its own width.
+Numbering runs over the sections actually printed: `--no-plot` leaves `1.` and `2.`
+rather than a gap, and a single job has no problem-jobs section so it gets only the
+first two. `--noheader` drops the headings and rules and keeps the data; `--csv` and
+`--ts` get none of it, staying flat machine formats.
 
-Comparing eight idle percentages by eye is what a bar chart is for. `--plot_avgeff`
-(or `--plot-avgeff`) appends one horizontal bar per metric after the summary:
+### Section 2: average efficiency
+
+Comparing eight idle percentages by eye is what a bar chart is for, so the bars are
+shown by default (`--no-plot` omits them):
 
 ```
 Avg efficiency by metric  (filled = used, grey = idle)
@@ -360,8 +384,8 @@ narrow or widen it too, and it prints for a single job as well -- there it is th
 job's profile across metrics. `POWER_W` has no bar, for the same reason it has no
 table row.
 
-Not emitted with `--csv`. Distinct from `jobscope plot`, which charts the per-job
-CSV; this needs no pipe and no plotting libraries.
+Not emitted with `--csv` or `--ts`. Distinct from `jobscope plot`, which charts the
+per-job CSV; this needs no pipe and no plotting libraries.
 
 ### A single job gets the table too
 

@@ -124,10 +124,12 @@ def build_parser():
     shape.add_argument("--avg", action="store_true",
                        help="running: fold each metric over the job's runtime, making the "
                             "values comparable to jobstats (default: the newest scrape)")
+    shape.add_argument("--no-plot", dest="no_plot", action="store_true",
+                       help="omit the efficiency-bars section (shown by default)")
+    # Superseded: the bars are the default now. Accepted so a command that named it
+    # still runs, with one note, as the deprecated subcommand aliases do.
     shape.add_argument("--plot-avgeff", "--plot_avgeff", dest="plot_avgeff",
-                       action="store_true",
-                       help="append horizontal efficiency bars, one per metric, "
-                            "after the summary")
+                       action="store_true", help=argparse.SUPPRESS)
     shape.add_argument("--diagnose", action="store_true",
                        help="add an advisory DIAG column")
     shape.add_argument("--diag-short", dest="diag_short", type=int, default=None,
@@ -371,6 +373,9 @@ def handle_report(args) -> None:
     timeout = _timeout(args, cfg)
     workers = _workers(args, cfg)
 
+    if args.plot_avgeff:
+        print("note: --plot_avgeff is the default now; use --no-plot to omit the "
+              "efficiency bars", file=sys.stderr)
     view = args.view or "all"
     diagnose = args.diagnose
     if view == "cpu" and diagnose and not args.ts:
@@ -389,7 +394,7 @@ def handle_report(args) -> None:
         header=args.header,
         min_runtime=(args.diag_short if args.diag_short is not None
                      else cfg.defaults.min_runtime),
-        time_weighted=time_weighted, plot_avgeff=args.plot_avgeff,
+        time_weighted=time_weighted, plot_avgeff=not args.no_plot,
         color=_want_color(args), thresholds=cfg.thresholds)
 
     if args.ts:
