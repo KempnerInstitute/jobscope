@@ -44,8 +44,6 @@ DEFAULT_STATE = "completed"
 # How far back a request that names no window reaches. Resolved to real timestamps by
 # select.sacct_selection, so the header can print dates rather than "now-30days".
 DEFAULT_LOOKBACK_DAYS = 30
-# Windows -N tries, narrowest first, stopping as soon as one holds enough jobs.
-LASTN_LADDER = (1, 3, 7, DEFAULT_LOOKBACK_DAYS)
 # Last-resort fallbacks, for a Selection built without going through that resolution.
 DEFAULT_START = "now-%ddays" % DEFAULT_LOOKBACK_DAYS
 DEFAULT_END = "now"
@@ -162,9 +160,18 @@ def format_window(start: str, end: str) -> str:
 
 def days_to_window(days: int) -> Tuple[str, str]:
     """``(start, end)`` sacct timestamps for the last ``days`` days ending now."""
+    return day_slice(days, 0)
+
+
+def day_slice(from_days: int, to_days: int) -> Tuple[str, str]:
+    """``(start, end)`` for the span from ``from_days`` ago to ``to_days`` ago.
+
+    One clock reading for both ends, so a slice cannot straddle the instant between
+    two calls to ``time()`` and leave a gap.
+    """
     now = time.time()
-    return (time.strftime(TIMESTAMP_FORMAT, time.localtime(now - days * 86400)),
-            time.strftime(TIMESTAMP_FORMAT, time.localtime(now)))
+    return (time.strftime(TIMESTAMP_FORMAT, time.localtime(now - from_days * 86400)),
+            time.strftime(TIMESTAMP_FORMAT, time.localtime(now - to_days * 86400)))
 
 
 def end_of_day(start: str) -> Optional[str]:
@@ -314,30 +321,39 @@ def _query_ids(selection: Selection, start: str, end: str,
 
 
 def _query_lastn(selection: Selection, timeout: Optional[float]) -> List[str]:
-    """Widen the window a rung at a time until it holds ``lastn`` jobs.
+    """Walk back a day at a time until ``lastn`` jobs have been found.
 
-    ``-N`` asks for the most recent few jobs, and sacct has no "last N" -- a window
-    has to be scanned and trimmed. Scanning the full default lookback to find one job
-    is the slowest possible way to answer the cheapest question: on one busy partition
-    a day took 1.2s and 30 days did not return inside 60s. So start narrow and only
-    widen when the window genuinely does not hold enough.
+    ``-N`` asks for the most recent few jobs and sacct has no "last N", so a window
+    has to be scanned and trimmed. Two things make the naive version slow: the default
+    lookback is a month, and listing job IDs costs roughly in proportion to the span
+    -- on one busy partition a day took 1.2s and thirty days did not return inside 60.
 
-    The window actually used is written back onto ``selection``, so the header reports
-    the span that was scanned rather than the one that was asked for.
+    So each step queries **one day**, the day before the last one, and accumulates.
+    Reaching five days back costs five one-day queries rather than one-, two-, three-,
+    four- and five-day scans, which would re-list the same jobs five times over.
+
+    The span covered is written back onto ``selection``, so the header reports how far
+    back it actually looked.
     """
     ids: List[str] = []
-    for index, days in enumerate(LASTN_LADDER):
-        start, end = days_to_window(days)
+    seen = set()
+    for day in range(DEFAULT_LOOKBACK_DAYS):
+        start, end = day_slice(day + 1, day)
         try:
             found = _query_ids(selection, start, end, timeout)
         except JobscopeError:
-            # A later rung timing out should not throw away a narrower rung's answer:
-            # some jobs beat an error, and the header will say how far back it looked.
-            if index == 0 or not ids:
+            # A later day timing out should not throw away what earlier days found:
+            # some jobs beat an error, and the header says how far back it managed.
+            if not ids:
                 raise
             break
-        selection.starttime, selection.endtime = start, end
-        ids = found
+        # Walking backwards, so each day is older than the one before: prepend to keep
+        # the list ascending, as the caller's [-lastn:] trim expects. A job that ran
+        # across a boundary matches both days, hence the dedup.
+        ids[:0] = [jid for jid in found if jid not in seen]
+        seen.update(found)
+        selection.starttime = start
+        selection.endtime = selection.endtime or end     # the first slice ends at now
         if len(ids) >= selection.lastn:
             break
     return ids
@@ -348,7 +364,9 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
     if selection.jobids:
         return list(selection.jobids), "%d job ID(s)" % len(selection.jobids)
 
-    if selection.lastn is not None and not selection.starttime:
+    # Only when no window was named at all: with -S or -E given, the user has said
+    # where to look and the day-walk would quietly ignore it.
+    if selection.lastn is not None and not selection.starttime and not selection.endtime:
         ids = _query_lastn(selection, timeout)
     else:
         ids = _query_ids(selection, *selection.window(), timeout=timeout)

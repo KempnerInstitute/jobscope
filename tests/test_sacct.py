@@ -110,9 +110,9 @@ def test_select_jobs_lastn(monkeypatch):
     assert desc == "last 1 job, completed"      # singular
 
 
-def test_lastn_stops_at_the_narrowest_window_that_holds_enough(monkeypatch):
-    """Scanning the full lookback to find one job is the slowest way to answer the
-    cheapest question: measured, one day took 1.2s where 30 days timed out at 60."""
+def test_lastn_stops_after_one_day_when_that_is_enough(monkeypatch):
+    """Scanning the month to find one job is the slowest way to answer the cheapest
+    question: measured, one day of a busy partition took 1.2s where thirty timed out."""
     windows = []
 
     def fake(cmd, *a, **k):
@@ -123,26 +123,83 @@ def test_lastn_stops_at_the_narrowest_window_that_holds_enough(monkeypatch):
     selection = Selection(user="alice", lastn=1)
     ids, _desc = select_jobs(selection, None)
     assert ids == ["101"]
-    assert len(windows) == 1                    # the first rung sufficed
-    # And the span it settled on is reported, not the one that was asked for.
-    assert selection.starttime == windows[0][0]
-    span = time.mktime(time.strptime(selection.endtime, TIMESTAMP_FORMAT)) - \
-        time.mktime(time.strptime(selection.starttime, TIMESTAMP_FORMAT))
-    assert abs(span - sacct.LASTN_LADDER[0] * 86400) < 5
+    assert len(windows) == 1                    # one day sufficed
+    # Each query covers a single day, and the reported window is that day.
+    start, end = windows[0]
+    span = time.mktime(time.strptime(end, TIMESTAMP_FORMAT)) - \
+        time.mktime(time.strptime(start, TIMESTAMP_FORMAT))
+    assert abs(span - 86400) < 5
+    assert (selection.starttime, selection.endtime) == (start, end)
 
 
-def test_lastn_widens_until_it_has_enough(monkeypatch):
+def test_each_step_queries_exactly_one_day_further_back(monkeypatch):
+    """Day by day, and each query covers only the new day.
+
+    Re-scanning from now every step would re-list the same jobs over and over, which
+    is what makes the naive widening expensive: the cost grows with the span.
+    """
+    spans, starts = [], []
+
+    def fake(cmd, *a, **k):
+        start, end = cmd[cmd.index("-S") + 1], cmd[cmd.index("-E") + 1]
+        starts.append(start)
+        spans.append(time.mktime(time.strptime(end, TIMESTAMP_FORMAT)) -
+                     time.mktime(time.strptime(start, TIMESTAMP_FORMAT)))
+        return ""                               # never enough, so it keeps walking
+
+    monkeypatch.setattr(sacct, "run_capture", fake)
+    selection = Selection(user="alice", lastn=1)
+    select_jobs(selection, None)
+    assert len(spans) == sacct.DEFAULT_LOOKBACK_DAYS
+    assert all(abs(span - 86400) < 5 for span in spans)       # one day each, not growing
+    # And walking backwards: every step starts earlier than the one before.
+    assert starts == sorted(starts, reverse=True)
+
+
+def test_lastn_walks_back_until_it_has_enough(monkeypatch):
     calls = []
 
     def fake(cmd, *a, **k):
         calls.append(cmd[cmd.index("-S") + 1])
-        # Nothing until the third rung, then two jobs.
+        # Nothing until the third day back, then two jobs.
         return "100|COMPLETED\n101|COMPLETED\n" if len(calls) >= 3 else ""
 
     monkeypatch.setattr(sacct, "run_capture", fake)
-    ids, _desc = select_jobs(Selection(user="alice", lastn=2), None)
+    selection = Selection(user="alice", lastn=2)
+    ids, _desc = select_jobs(selection, None)
     assert ids == ["100", "101"]
     assert len(calls) == 3
+    # Three days covered, reported as one window ending now.
+    span = time.mktime(time.strptime(selection.endtime, TIMESTAMP_FORMAT)) - \
+        time.mktime(time.strptime(selection.starttime, TIMESTAMP_FORMAT))
+    assert abs(span - 3 * 86400) < 5
+
+
+def test_older_days_are_prepended_so_the_newest_are_kept(monkeypatch):
+    """The trim takes the tail, so the accumulated list has to stay ascending.
+
+    Walking backwards yields older jobs later, so appending would make the trim keep
+    the oldest jobs while claiming to show the newest.
+    """
+    days = []
+
+    def fake(cmd, *a, **k):
+        days.append(1)
+        return {1: "300|COMPLETED\n", 2: "200|COMPLETED\n"}.get(len(days), "100|COMPLETED\n")
+
+    monkeypatch.setattr(sacct, "run_capture", fake)
+    ids, _desc = select_jobs(Selection(user="alice", lastn=2), None)
+    assert ids == ["200", "300"]                # the two newest, oldest-first
+
+
+def test_a_job_spanning_two_days_is_not_counted_twice(monkeypatch):
+    """sacct matches a job in every window it ran through, so slices overlap."""
+    def fake(cmd, *a, **k):
+        return "100|COMPLETED\n"               # the same job every day
+
+    monkeypatch.setattr(sacct, "run_capture", fake)
+    ids, _desc = select_jobs(Selection(user="alice", lastn=3), None)
+    assert ids == ["100"]
 
 
 def test_lastn_keeps_a_narrow_answer_when_a_wider_query_times_out(monkeypatch):
