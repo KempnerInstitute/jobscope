@@ -235,9 +235,18 @@ Two levels of averaging apply, and they answer different questions.
 summed total, which is capacity-weighted -- the difference only shows on cards of
 unequal size.
 
-**Across jobs**, the `Mean:` footer averages one value per job, whatever its GPU
-count: a 4-GPU job at 100% and a 1-GPU job at 0% give 50%, not the GPU-weighted
-80%. The table is one row per job, so the footer matches the rows above it.
+**Across jobs**, both are printed. `Mean:` averages one value per job, whatever its
+GPU count. `Mean/GPU:` weights each job by its GPU count, recovering the mean per
+GPU: a 4-GPU job at 100% and a 1-GPU job at 0% give 50% per job and 80% per GPU.
+The first describes the typical job, the second how the hardware was used, and the
+gap between them is a fleet of large idle jobs or small busy ones.
+
+`Mean/GPU:` is omitted when every contributing job has the same GPU count, because
+weighting is then a no-op. It covers only metrics whose cross-GPU aggregation is
+itself a mean (`MetricSpec.agg`): `ENERGY_kWh` sums over a job's GPUs and
+`PWRmax_W` takes the max, so scaling either by GPU count would yield a number with
+no meaning, and those cells stay blank. The weight is the job's *allocated* GPU
+count, the same figure the `#GPU` column shows, so a reader can check it.
 
 Which jobs contribute is the part worth being exact about:
 

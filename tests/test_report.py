@@ -298,7 +298,7 @@ def test_mean_row_is_followed_by_the_two_job_counts(gpu_record, cpu_record):
     mean, counts = _mean_row({"100": gpu_record, "200": cpu_record}, show_dcgm=True,
                              dcgm_data={"100": ({"SM_ACT%": 60.0}, {})})
     assert mean["CPU%"]                            # a mean was printed
-    assert counts == {"cpu-jobs": 2, "gpu-jobs": 1}
+    assert counts == {"cpu-jobs": 2, "gpu-jobs": 1, "gpus": 2}
 
 
 def test_footer_rows_are_not_parsed_as_jobs(gpu_record, cpu_record):
@@ -348,7 +348,7 @@ def test_a_job_with_no_gpu_is_left_out_of_the_gpu_mean():
     mean, counts = _mean_row(records)
     assert mean["GPU%"] == "80"        # not 40 -- the CPU-only job is excluded
     # ... and the footer says so, while both jobs contributed CPU%.
-    assert counts == {"cpu-jobs": 2, "gpu-jobs": 1}
+    assert counts == {"cpu-jobs": 2, "gpu-jobs": 1, "gpus": 1}
 
 
 def test_an_idle_gpu_job_is_counted_as_zero():
@@ -392,7 +392,8 @@ def test_a_gpu_job_with_no_samples_shows_a_dash_and_is_excluded():
     mean, counts = _mean_row(records)
     assert mean["GPU%"] == "60"
     # The sample-less job cannot contribute, though it is still a rendered row.
-    assert counts == {"cpu-jobs": 2, "gpu-jobs": 1}
+    # gpus counts only the GPUs behind a measured value, so its 2 are absent too.
+    assert counts == {"cpu-jobs": 2, "gpu-jobs": 1, "gpus": 1}
 
 
 def test_the_gpu_mean_is_per_job_not_per_gpu():
@@ -406,3 +407,86 @@ def test_the_gpu_mean_is_per_job_not_per_gpu():
     mean, counts = _mean_row(records)
     assert mean["GPU%"] == "50"
     assert counts["gpu-jobs"] == 2
+
+
+# --- the GPU-weighted mean --------------------------------------------------
+
+def _footers(records, show_dcgm=False, dcgm_data=None, specs=None):
+    """``{label: {column: cell}}`` for the Mean / MeanPerGPU / Jobs footers."""
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", show_dcgm=show_dcgm, csv=True, header=True),
+        out, specs=specs)
+    renderer.add(list(records), records, dcgm_data or {})
+    renderer.finish()
+    rows = {r.split(",")[0]: r.split(",") for r in out.getvalue().splitlines()}
+    header = rows["JOBID"]
+    return {label: dict(zip(header, cells)) for label, cells in rows.items()}
+
+
+def test_the_weighted_mean_is_per_gpu_not_per_job():
+    """A big idle job should not be outvoted by a small busy one.
+
+    2 idle GPUs and 16 busy ones average to 50% per job but 89% per GPU, and it is
+    the second that describes how the allocation was used.
+    """
+    records = {"1": _gpu_job("1", {str(i): 0.0 for i in range(2)}),
+               "2": _gpu_job("2", {str(i): 100.0 for i in range(16)})}
+    footers = _footers(records)
+    assert footers["Mean"]["GPU%"] == "50"                  # mean(0, 100)
+    assert footers["MeanPerGPU"]["GPU%"] == "89"            # (0*2 + 100*16)/18
+    assert footers["Jobs"]["USER"] == "cpu-jobs=2"          # the labelled counts
+    assert "gpus=18" in footers["Jobs"].values()
+
+
+def test_the_weighted_row_is_omitted_when_it_would_repeat_the_mean():
+    """Uniform GPU counts make weighting a no-op, so the row would be noise."""
+    records = {"1": _gpu_job("1", {"0": 20.0}), "2": _gpu_job("2", {"0": 80.0})}
+    assert "MeanPerGPU" not in _footers(records)
+
+
+def test_the_weighted_row_leaves_host_columns_blank():
+    """Weighting CPU% by GPU count would be meaningless."""
+    records = {"1": _gpu_job("1", {"0": 0.0}),
+               "2": _gpu_job("2", {"0": 100.0, "1": 100.0})}
+    weighted = _footers(records)["MeanPerGPU"]
+    assert weighted["CPU%"] == "" and weighted["MEM%"] == ""
+    assert weighted["GPU%"] == "67"                         # (0*1 + 100*2)/3
+
+
+def test_a_job_with_no_gpu_does_not_reach_the_weighted_mean():
+    records = {"1": _gpu_job("1", None),
+               "2": _gpu_job("2", {"0": 50.0}),
+               "3": _gpu_job("3", {"0": 100.0, "1": 100.0})}
+    footers = _footers(records)
+    assert footers["MeanPerGPU"]["GPU%"] == "83"            # (50*1 + 100*2)/3
+    assert footers["Jobs"]["STATE"] == "gpu-jobs=2"
+
+
+def test_sum_and_max_metrics_are_not_gpu_weighted():
+    """ENERGY_kWh sums over a job's GPUs and PWRmax_W takes the max.
+
+    Scaling either by GPU count would produce a figure that means nothing, so those
+    cells stay blank while the mean-aggregated ones are weighted.
+    """
+    from jobscope.dcgm import ALL_SPECS
+    records = {"1": _gpu_job("1", {"0": 0.0}),
+               "2": _gpu_job("2", {"0": 100.0, "1": 100.0})}
+    dcgm = {"1": ({"SM_ACT%": 10.0, "ENERGY_kWh": 1.0, "PWRmax_W": 300.0}, {}),
+            "2": ({"SM_ACT%": 90.0, "ENERGY_kWh": 8.0, "PWRmax_W": 500.0}, {})}
+    footers = _footers(records, show_dcgm=True, dcgm_data=dcgm, specs=ALL_SPECS)
+    weighted = footers["MeanPerGPU"]
+    assert weighted["SM_ACT%"] == "63.3"        # (10*1 + 90*2)/3, a mean of means
+    assert weighted["ENERGY_kWh"] == ""         # a per-job total: not divisible by GPU
+    assert weighted["PWRmax_W"] == ""           # a peak: weighting it says nothing
+    # The unweighted footer still reports all three.
+    assert footers["Mean"]["ENERGY_kWh"] and footers["Mean"]["PWRmax_W"]
+
+
+def test_plot_skips_the_weighted_footer_too():
+    records = {"1": _gpu_job("1", {"0": 0.0}),
+               "2": _gpu_job("2", {"0": 100.0, "1": 100.0})}
+    text = _render(summarize, list(records), records, {}, CTX,
+                   RenderOptions(view="all", show_dcgm=False, csv=True, header=True))
+    _, rows = plot.parse_csv(io.StringIO(text))
+    assert {r["JOBID"] for r in rows} == {"1", "2"}

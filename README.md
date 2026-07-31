@@ -166,17 +166,33 @@ JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR% 
 beside `SM_ACT%` deliberately: a GPU job whose `GPU%` is low and `CPU%` is high is
 held up on the host, and no single view used to show both.
 
-With more than one job the table ends in two footers:
+With more than one job the table ends in footers:
 
 ```
-Mean:                        11     4            70     3       52.8   11.4 ...
-Jobs:        cpu-jobs=18  gpu-jobs=17
+36337781   amazloumi  RUNNING  1   0   1   2    0   0    0.0  ...   <- 2 GPUs, idle
+36441613   tngotiaoco RUNNING  4  11   4  16   79  89   87.4  ...   <- 16 GPUs, busy
+--------------------------------------------------------------------
+Mean:                            6   2       40  44   43.7  ...
+Mean/GPU:                                    70  79   77.7  ...
+Jobs:        cpu-jobs=2  gpu-jobs=2  gpus=18
 ```
 
-The two counts differ whenever the selection mixes CPU-only and GPU work: a
+`Mean:` averages one value per job. `Mean/GPU:` weights each by the job's GPU
+count, so it is the mean *per GPU* -- above, per job the partition looks 40% used,
+but 70% of the allocated GPUs were actually busy, because the idle job holds 2
+cards and the busy one 16. Use `Mean/GPU:` to judge how the hardware was used and
+`Mean:` to judge the typical job.
+
+`Mean/GPU:` appears only when GPU counts vary, since otherwise it repeats `Mean:`
+exactly. It is blank for `CPU%`/`MEM%` (weighting host metrics by GPU count means
+nothing) and for `ENERGY_kWh`/`PWRmax_W`, which are a per-job total and a peak
+rather than an average over GPUs.
+
+The two job counts differ whenever the selection mixes CPU-only and GPU work: a
 CPU-only job has no `GPU%` to average, so it is absent from the GPU means rather
-than counted as zero. A GPU job that sat idle *is* counted, as 0%. `jobscope plot`
-skips both footers rather than charting them as jobs.
+than counted as zero. A GPU job that sat idle *is* counted, as 0%. `gpus=` is the
+total behind `Mean/GPU:`. `jobscope plot` skips every footer rather than charting
+them as jobs.
 
 - `--cpu` narrows to the host columns. For *finished* jobs that needs no Prometheus
   at all; a running job's `CPU%` comes from `cgroup_*`, so it does.

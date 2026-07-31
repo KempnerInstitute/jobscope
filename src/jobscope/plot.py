@@ -19,7 +19,7 @@ ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
            "#GPU", "DUR_S", "RUNTIME", "EPOCH", "TIME"}
 
 # Summary footers, keyed on the JOBID cell. Not job rows, so parse_csv skips them.
-FOOTER_ROWS = {"Mean", "Jobs"}
+FOOTER_ROWS = {"Mean", "MeanPerGPU", "Jobs"}
 
 HEAT_MAX_ROWS = 40
 PANEL_CAP = 12
