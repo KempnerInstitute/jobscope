@@ -250,6 +250,39 @@ def test_selection_describe_mentions_the_runtime_floor():
     assert LiveSelection(jobids=["1", "2"]).describe() == "2 job ID(s)"
 
 
+def test_describe_omits_user_and_partition_but_describe_filters_names_them():
+    """The context block prints those on their own lines; the error message cannot.
+
+    `jobscope -p kempner` reporting only "running, longer than 10m" reads as an
+    idle partition, when in practice the default user filter excluded the 20
+    people who were on it.
+    """
+    sel = LiveSelection(partition="kempner", user="bdesinghu", min_elapsed=600)
+    assert sel.describe() == "running, longer than 10m"
+    assert sel.describe_filters() == (
+        "user bdesinghu, partition kempner, running, longer than 10m")
+
+
+def test_describe_filters_says_all_users_when_unfiltered():
+    sel = LiveSelection(partition="kempner", user=None, min_elapsed=600)
+    assert sel.describe_filters().startswith("all users, partition kempner")
+
+
+def test_widening_hints_cover_only_the_active_filters():
+    """Suggesting -a when every user is already included would be noise."""
+    assert LiveSelection(user="alice", partition="p", min_elapsed=600).widening_hints() == [
+        "add -a to include every user",
+        "set --min-elapsed 0s to include jobs that just started",
+        "drop -p to search every partition"]
+    assert LiveSelection(user=None, partition=None, min_elapsed=0).widening_hints() == []
+
+
+def test_explicit_job_ids_keep_the_plain_description():
+    """Job IDs bypass the filters, so naming them would be misleading."""
+    sel = LiveSelection(jobids=["1"], user="alice", partition="p")
+    assert sel.describe_filters() == "1 job ID(s)"
+
+
 # --- blob synthesis for running jobs ---------------------------------------
 
 class BlobClient:

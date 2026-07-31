@@ -138,6 +138,20 @@ def _live_context(selection: LiveSelection, jobs: dict, gpus: dict
     return pairs
 
 
+def _report_no_running(selection) -> None:
+    """Explain an empty running selection, naming every filter and how to widen it.
+
+    The filters are worth spelling out here because the context block that would
+    normally show them is not printed when there is nothing to report: the bare
+    message reads as "this partition is idle" when it usually means the default
+    user filter excluded whoever is on it.
+    """
+    print("No running jobs match (%s)." % selection.describe_filters(), file=sys.stderr)
+    hints = selection.widening_hints()
+    if hints:
+        print("Widen it: %s." % "; or ".join(hints), file=sys.stderr)
+
+
 def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[float],
                      workers: int, specs: Optional[List[MetricSpec]]) -> Optional[Resolved]:
     """One chunk from squeue plus Prometheus, shaped like a sacct chunk.
@@ -148,7 +162,7 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
     selection = _live_selection(request)
     jobs = fetch_jobs(selection, timeout)
     if not jobs:
-        print("No running jobs match (%s)." % selection.describe(), file=sys.stderr)
+        _report_no_running(selection)
         return None
 
     client = client_from_config(cfg, timeout)
@@ -282,7 +296,7 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
         selection = _live_selection(request)
         jobs = fetch_jobs(selection, timeout)
         if not jobs:
-            print("No running jobs match (%s)." % selection.describe(), file=sys.stderr)
+            _report_no_running(selection)
             return
         client = client_from_config(cfg, timeout)
         gpus = discover_gpus(client, jobs, timeout)

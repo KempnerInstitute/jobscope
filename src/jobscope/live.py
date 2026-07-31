@@ -87,13 +87,43 @@ class LiveSelection:
     min_elapsed: int = 600
 
     def describe(self) -> str:
-        """Human-readable summary for the context block."""
+        """Human-readable summary for the context block.
+
+        Omits the user and partition, which the context block prints on their own
+        lines. :meth:`describe_filters` is the form to use where those lines are
+        not shown.
+        """
         if self.jobids:
             return "%d job ID(s)" % len(self.jobids)
         parts = ["running"]
         if self.min_elapsed > 0:
             parts.append("longer than %s" % format_duration(self.min_elapsed))
         return ", ".join(parts)
+
+    def describe_filters(self) -> str:
+        """:meth:`describe` plus the user and partition, for the empty-result message.
+
+        An empty result is exactly when every filter has to be named: "no running
+        jobs (running, longer than 10m)" reads as an idle partition, when usually
+        it means the default user filter excluded everyone who is actually on it.
+        """
+        if self.jobids:
+            return self.describe()
+        parts = ["user %s" % self.user if self.user else "all users"]
+        if self.partition:
+            parts.append("partition %s" % self.partition)
+        return ", ".join(parts + [self.describe()])
+
+    def widening_hints(self) -> List[str]:
+        """Flags that would loosen this selection, most likely first."""
+        hints = []
+        if self.user:
+            hints.append("add -a to include every user")
+        if self.min_elapsed > 0:
+            hints.append("set --min-elapsed 0s to include jobs that just started")
+        if self.partition:
+            hints.append("drop -p to search every partition")
+        return hints
 
 
 # The live catalogs. Deliberately the same specs the dcgm view uses, so a running

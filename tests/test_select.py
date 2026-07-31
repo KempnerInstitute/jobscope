@@ -238,6 +238,21 @@ def test_running_no_jobs_returns_none(monkeypatch, capsys):
     assert "No running jobs match" in capsys.readouterr().err
 
 
+def test_the_empty_running_message_names_the_filters_and_how_to_widen(monkeypatch, capsys):
+    """An empty result is when the filters matter most, and the context block is gone.
+
+    Reported from the field: `jobscope -p kempner` printed only "running, longer
+    than 10m", which reads as an idle partition. Twenty jobs were running there;
+    none were the caller's.
+    """
+    monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, t: {})
+    resolve(Request(mode=RUNNING, user="alice", partition="kempner"),
+            _cfg(), None, 1, None)
+    err = capsys.readouterr().err
+    assert "user alice" in err and "partition kempner" in err
+    assert "add -a to include every user" in err
+
+
 def test_both_branches_yield_the_same_chunk_shape(monkeypatch, gpu_record):
     """The contract that lets one renderer serve both sources."""
     _patch_live(monkeypatch)
