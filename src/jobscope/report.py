@@ -20,7 +20,6 @@ from .dcgm import (
     DEFAULT_SPECS,
     DERIVED_COLUMNS,
     DESCRIPTIONS,
-    LIVE_DESCRIPTIONS,
     MetricSpec,
     applicable_derived,
     columns_for,
@@ -584,85 +583,6 @@ def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]
                  gpu.host, gpu.csv_id]
                 + [format_number(values.get(key), dec, missing="")
                    for key, _h, dec in columns])
-
-
-# The non-metric columns of the live table. Described separately from the metrics
-# because they identify the row rather than measure it -- and because the GPU
-# column's MIG notation is easy to misread as a decimal.
-LIVE_ROW_DESCRIPTIONS: List[Tuple[str, str]] = [
-    ("JOBID", "squeue's display ID (%i), so array elements keep their 12345_6 notation. "
-              "Prometheus keys GPU data on the raw per-element ID (%A) instead, which the view "
-              "resolves for you."),
-    ("USER", "the job's owner."),
-    ("NODE", "the host of THIS row's GPU, since there is one row per GPU. It is the job's whole "
-             "nodelist only when no GPU data was found."),
-    ("NAME", "the job name."),
-    ("GPU", "\"GPU n\" is Slurm's GPU number (NVML's minor_number). \"MIG n\" / \"MIG n.i\" is a "
-            "MIG instance on card n: sibling slices share their parent's minor number, so they "
-            "are enumerated by UUID. DCGM columns are always \"-\" on a MIG row (see below)."),
-]
-
-LIVE_DESCRIBE_FOOTER = """\
-A "-" cell means Prometheus held no sample for that GPU and metric. Every
-DCGM_FI_* column reads "-" on a MIG row: NVML identifies an instance by a
-MIG-... UUID where DCGM reports the physical GPU-... UUID, and nothing in the
-metrics maps one to the other, so attributing the whole card's DCGM values to
-a single slice would be wrong.
-
-An instantaneous reading will not agree with jobstats on a bursty job: one that
-alternates compute with gaps is genuinely bimodal, and a single scrape can read
-GPU% 0 on a GPU averaging ~88%. Use --avg for a jobstats-comparable number, or
---ts to see the phases themselves."""
-
-
-def describe_live(specs: List[MetricSpec], average: bool = False, n_all: int = 0,
-                  out=None) -> None:
-    """Plain-English reference for the columns the live view would show.
-
-    Mirrors :func:`describe_dcgm` -- header, source metric, how the window is
-    collapsed, then wrapped prose -- but reflects the ``--gpu``/``--all`` selection
-    actually in force, so the reference always matches what was printed.
-    """
-    out = out or sys.stdout
-    columns = build_columns(specs)
-    source = {spec.header: (spec.metric, _REDUCER_NAME.get(spec.reducer, spec.reducer))
-              for spec in specs if spec.show}
-    for derived in DERIVED_COLUMNS:
-        # Recomputed from already-reduced inputs, so it has no reducer of its own.
-        source[derived.header] = (derived.source, "-")
-
-    print("jobscope live columns. One row per GPU. GPU%%/MEM_GB/MEM%% come from the NVML\n"
-          "exporter (nvidia_gpu_*), every other metric from dcgm-exporter (DCGM_FI_*).\n"
-          "Showing %d of %d columns (%s)."
-          % (len(columns), n_all or len(columns),
-             "all" if not n_all or len(columns) >= n_all else "--all describes the rest"),
-          file=out)
-    print(file=out)
-    if average:
-        print("Values are folded over each job's own runtime by [fold] below --\n"
-              "utilization averaged, memory peaked, exactly as jobstats does.", file=out)
-    else:
-        print("Values are the newest single scrape. [fold] is how --avg would instead\n"
-              "collapse each metric over the job's own runtime -- utilization averaged,\n"
-              "memory peaked, exactly as jobstats does.", file=out)
-    print(file=out)
-
-    for header, text in LIVE_ROW_DESCRIPTIONS:
-        body = textwrap.wrap(text, width=74, initial_indent=" " * 15,
-                             subsequent_indent=" " * 15)
-        body[0] = "  %-12s %s" % (header, body[0].lstrip())
-        print("\n".join(body), file=out)
-    print(file=out)
-
-    for _key, header, _dec in columns:
-        metric, fold = source.get(header, ("(unknown)", "-"))
-        print("  %-12s %-38s [fold: %s]" % (header, metric, fold), file=out)
-        text = LIVE_DESCRIPTIONS.get(header) or DESCRIPTIONS.get(header, "(no description)")
-        for wrapped in textwrap.wrap(text, width=74):
-            print("      " + wrapped, file=out)
-        print(file=out)
-
-    print(LIVE_DESCRIBE_FOOTER, file=out)
 
 
 def describe(diagnose_on: bool = False, out=None) -> None:

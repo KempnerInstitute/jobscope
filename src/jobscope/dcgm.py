@@ -160,10 +160,13 @@ DESCRIPTIONS: Dict[str, str] = {
     "GPU%": "NVML's duty cycle: the fraction of the run during which at least one kernel was "
             "executing on the GPU -- the same number jobstats reports. Says the GPU was occupied "
             "in time, NOT how intensely: a 1-thread kernel and a full-GPU kernel both read ~100%. "
-            "For a finished job this comes from the stored blob, so every view agrees.",
-    "SM_ACT%": "Fraction of time at least one warp was resident on an SM, averaged across all SMs. "
-               "Distinguishes 'one SM busy' from 'all SMs busy' -- low while GPU% is high means the "
-               "GPU was barely loaded (parked / underfed).",
+            "For a finished job this comes from the stored blob, so every view agrees. NVML stops "
+            "reporting it once MIG is enabled, so it is \"-\" on a MIG node.",
+    "SM_ACT%": "Fraction of time at least one warp was resident on an SM, averaged across all "
+               "SMs. Distinguishes 'one SM busy' from 'all SMs busy' -- low while GPU% is high "
+               "means the GPU was barely loaded (parked / underfed). Measured cluster-wide it runs "
+               "~20 points BELOW GPU% on 93% of active GPUs, so do not read it as "
+               "\"GPU utilization\"; the gap between the two is the diagnostic signal.",
     "OCC%": "SM occupancy: the fraction of warp slots that were filled, averaged over SMs and "
             "time (active warps / the hardware max per SM). Low occupancy means kernels under-fill "
             "the GPU -- small launches, or register / shared-memory limits.",
@@ -175,8 +178,10 @@ DESCRIPTIONS: Dict[str, str] = {
              "memory-bound, not compute-bound.",
     "POWER_W": "Mean board power draw over the run, in watts. Compare to the GPU's TDP (~700 W for "
                "H100/H200, ~400 W for A100); near-idle watts mean the GPU was not really working.",
-    "ENGINE%": "Fraction of time the graphics/compute engine had work in flight -- a finer-grained "
-               "successor to the GPU% duty cycle.",
+    "ENGINE%": "Fraction of time the graphics/compute engine had work in flight -- DCGM's "
+               "finer-grained analogue of GPU%. Tracks it closely over a job-length window "
+               "(median |delta| 1.2, r=0.99 at 1h), so it is a usable stand-in; the two disagree "
+               "far more on a single scrape, as they are scraped independently.",
     "HMMA%": "Tensor-core activity for half-precision matrix ops (fp16/bf16). A precision breakdown "
              "of TENSOR%.",
     "IMMA%": "Tensor-core activity for integer matrix ops (int8). Precision breakdown of TENSOR% -- "
@@ -221,32 +226,6 @@ DESCRIPTIONS: Dict[str, str] = {
              "view's GMEM%. Named GMEM% rather than MEM% because a bare MEM% means HOST memory "
              "elsewhere. On a MIG row the total is the slice's, so the percentage is per slice.",
 }
-
-# Overlay applied on top of DESCRIPTIONS for the live view only. The live table is
-# an instantaneous per-GPU snapshot rather than a job-length average, so a few
-# metrics need extra warnings there; keeping them separate leaves the wording of
-# `describe --dcgm` unchanged.
-LIVE_DESCRIPTIONS: Dict[str, str] = {
-    "GPU%": "NVML's duty cycle -- jobstats' \"GPU utilization\": the fraction of time at least "
-            "one kernel was executing. Says the GPU was occupied in time, NOT how intensely: a "
-            "1-thread kernel and a full-GPU kernel both read ~100%. Here it is read live from "
-            "Prometheus (a running job has no stored blob), and NVML stops reporting it once MIG "
-            "is enabled, so it is \"-\" on MIG nodes.",
-    "SM_ACT%": "Fraction of time at least one warp was resident on an SM, averaged across all "
-               "SMs. Distinguishes 'one SM busy' from 'all SMs busy' -- low while GPU% is high "
-               "means the GPU was barely loaded (parked / underfed). Measured cluster-wide it "
-               "runs ~20 points BELOW GPU% on 93% of active GPUs, so do not read it as "
-               "\"GPU utilization\"; the gap between the two is the diagnostic signal.",
-    "ENGINE%": "Fraction of time the graphics/compute engine had work in flight -- DCGM's "
-               "finer-grained analogue of GPU%. Tracks it closely over a job-length window "
-               "(median |delta| 1.2, r=0.99 at 1h), so it is a usable stand-in for GPU%; the "
-               "two disagree far more on a single scrape, as they are scraped independently.",
-    "FB_USED_GB": "dcgm-exporter's own framebuffer reading -- the same quantity as GMEM_GB from "
-                  "the other exporter, so the two disagree by a few tenths of a GiB. GMEM_GB is "
-                  "the jobstats-comparable one.",
-
-}
-
 
 def format_number(value: Optional[float], decimals: int, missing: str = "-") -> str:
     """Format one metric cell to ``decimals`` places; ``missing`` when value is None."""
