@@ -34,7 +34,7 @@ from .dcgm import (
 from .diagnose import LEGEND, diagnose_dcgm
 from .live import Gpu, LiveJob, build_columns, job_sort_key, timeseries_step
 from .prometheus import PrometheusClient
-from .sacct import JobRecord, Selection
+from .sacct import JobRecord, Selection, format_window
 
 
 @dataclass(frozen=True)
@@ -228,6 +228,12 @@ def context_pairs(selection: Selection, desc: str,
     if selection.partition:
         pairs.append(("Partition", selection.partition))
     pairs.append(("Select", desc))
+    if selection.days is not None or selection.lastn is not None:
+        # The dates behind "last 1 day" or "last 20 jobs", which the Select line does
+        # not show: a -D window is computed from the clock, and a bare -N reaches back
+        # the default lookback, so a reader could not otherwise tell what was scanned.
+        # Not for an explicit -S/-E, where the Select line already is the window.
+        pairs.append(("Window", format_window(*selection.window())))
     return pairs
 
 

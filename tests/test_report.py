@@ -70,6 +70,42 @@ def test_context_pairs_explicit_ids(gpu_record):
     assert pairs == [("User", "alice"), ("Select", "1 job ID(s)")]
 
 
+def test_the_window_line_names_the_dates_behind_a_day_count():
+    """"last 1 day" does not say which day, and a -D window moves with the clock."""
+    from jobscope.select import FINISHED, Request, sacct_selection
+    selection = sacct_selection(Request(mode=FINISHED, days=1, user="alice"))
+    pairs = dict(context_pairs(selection, "last 1 day, completed", {}))
+    assert pairs["Select"] == "last 1 day, completed"
+    window = pairs["Window"]
+    assert " .. " in window and "now" not in window
+    # Real dates, to the minute, in the order queried.
+    start, end = window.split(" .. ")
+    assert start < end
+    assert len(start) == len("2026-07-30 11:25")
+
+
+def test_a_bare_lastn_also_reports_its_window():
+    from jobscope.select import FINISHED, Request, sacct_selection
+    selection = sacct_selection(Request(mode=FINISHED, lastn=3, user="alice"))
+    pairs = dict(context_pairs(selection, "last 3 jobs, completed", {}))
+    assert " .. " in pairs["Window"]
+
+
+def test_an_explicit_window_is_not_repeated():
+    """The Select line already is the window there; a second copy says nothing."""
+    from jobscope.select import FINISHED, Request, sacct_selection
+    selection = sacct_selection(Request(mode=FINISHED, starttime="2026-07-15",
+                                        endtime="2026-07-20", user="alice"))
+    pairs = dict(context_pairs(selection, "2026-07-15 00:00 .. 2026-07-20 00:00", {}))
+    assert "Window" not in pairs
+
+
+def test_explicit_job_ids_have_no_window():
+    from jobscope.sacct import Selection
+    pairs = dict(context_pairs(Selection(user="alice", jobids=["1"]), "1 job ID(s)", {}))
+    assert "Window" not in pairs
+
+
 def test_context_pairs_selection():
     pairs = context_pairs(Selection(user="bob", account="kempner", partition="gpu"), "last 1 day", {})
     assert [p[0] for p in pairs] == ["User", "Account", "Partition", "Select"]

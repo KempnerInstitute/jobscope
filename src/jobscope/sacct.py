@@ -41,6 +41,13 @@ LIVE_STATES = ("running", "pending", "suspended", "requeued")
 
 DEFAULT_STATE = "completed"
 
+# How far back a request that names no window reaches. Resolved to real timestamps by
+# select.sacct_selection, so the header can print dates rather than "now-30days".
+DEFAULT_LOOKBACK_DAYS = 30
+# Last-resort fallbacks, for a Selection built without going through that resolution.
+DEFAULT_START = "now-%ddays" % DEFAULT_LOOKBACK_DAYS
+DEFAULT_END = "now"
+
 
 def states_for(spec: Optional[str]) -> Tuple[str, ...]:
     """The sacct states a ``-t`` value selects, e.g. ``failed,timeout``.
@@ -94,6 +101,14 @@ class Selection:
     endtime: Optional[str] = None
     all_users: bool = False   # sacct -a; `user` is then unset
 
+    def window(self) -> Tuple[str, str]:
+        """The ``(start, end)`` actually queried, defaults filled in.
+
+        The header reports this, so it is the same pair the sacct call receives: a
+        window shown but not used is worse than none.
+        """
+        return (self.starttime or DEFAULT_START, self.endtime or DEFAULT_END)
+
 
 @dataclass
 class JobRecord:
@@ -123,6 +138,24 @@ def default_user() -> Optional[str]:
         except Exception:
             user = None
     return user
+
+
+def format_window(start: str, end: str) -> str:
+    """``2026-07-30 14:33 .. 2026-07-31 14:33`` for display.
+
+    Seconds are dropped -- nobody selects a window to the second -- and anything that
+    is not a timestamp (sacct's relative forms, a bare date) passes through as given
+    rather than being guessed at.
+    """
+    def show(value):
+        for fmt in (TIMESTAMP_FORMAT, "%Y-%m-%d"):
+            try:
+                return time.strftime("%Y-%m-%d %H:%M", time.strptime(value, fmt))
+            except (ValueError, TypeError):
+                continue
+        return str(value)
+
+    return "%s .. %s" % (show(start), show(end))
 
 
 def days_to_window(days: int) -> Tuple[str, str]:
@@ -251,8 +284,7 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
     if selection.jobids:
         return list(selection.jobids), "%d job ID(s)" % len(selection.jobids)
 
-    start = selection.starttime or "now-30days"
-    end = selection.endtime or "now"
+    start, end = selection.window()
     cmd = ["sacct", "-X", "-S", start, "-E", end,
            "--noheader", "-P", "-o", "JobID,State"]
     # -a spans every user; otherwise scope to one. Mutually exclusive by
@@ -282,7 +314,7 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
     elif selection.days is not None:
         desc = "last %d day%s" % (selection.days, "s" if selection.days != 1 else "")
     else:
-        desc = "%s .. %s" % (start, end)
+        desc = format_window(start, end)
     if selection.state != "all":
         desc += ", %s" % selection.state
     return ids, desc

@@ -159,6 +159,19 @@ jobscope [MODE] [scope] [filters] [granularity] [columns] [--diagnose] [output]
 an explicit window. Passing one of these without a mode word implies `finished`,
 so `jobscope -D 3` still means what it always did.
 
+The header states the window it actually scanned, since `last 1 day` does not say
+*which* day and a `-D` window moves with the clock:
+
+```
+  Select:    last 1 day, completed
+  Window:    2026-07-30 11:25 .. 2026-07-31 11:25
+```
+
+A bare `-N` gets one too -- it reaches back 30 days by default, which is worth
+knowing. For an explicit `-S`/`-E` the `Select` line already *is* the window, so it
+is not repeated; that also shows how `-S DATE` alone was widened to the whole
+calendar day.
+
 **Filters**, every mode: `-p` partition, `-u` user, `-a` all users, `-A` account,
 `-t` how the job ended (`finished` only, see below), `--min-elapsed` runtime floor
 (`running` only, default 10m -- a job still loading data reads as idle;
