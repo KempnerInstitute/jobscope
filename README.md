@@ -134,7 +134,7 @@ jobscope                          # your running jobs, right now (the default)
 jobscope -p kempner -a            # everyone on a partition, right now
 jobscope finished -D 3            # your finished jobs over the last 3 days
 jobscope 30012345                 # one job, running or finished
-jobscope running --hwdetail       # per-GPU rows instead of per-job
+jobscope running --per-gpu        # one row per GPU instead of per job
 jobscope finished -D 7 --dcgm     # the full DCGM metric catalog
 jobscope 30012345 --ts | jobscope plot --compact    # time-series chart
 ```
@@ -211,7 +211,7 @@ job that is running right now.
 | option | effect |
 |---|---|
 | *(default)* | one row per job |
-| `--hwdetail` | one row per GPU, with node name and GPU number (see below) |
+| `--per-gpu` | one row per GPU, with node name and GPU number (see below). `--hwdetail` is the old name and still works |
 | `--ts` | the per-scrape time series as CSV |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--dcgm` | the full DCGM metric catalog |
@@ -475,10 +475,10 @@ On a terminal, every `%` cell is tinted by how efficient it is -- **red** below 
 threshold, **yellow** below twice it, **green** above -- so an idle job is a red row
 and a healthy one is green. The pooled footer row is tinted too, and the same
 cutoffs define the band tallies, so a wasteful selection is obvious at a glance
-and quantified one line below. `--hwdetail`'s per-GPU rows are graded by the same
+and quantified one line below. `--per-gpu`'s rows are graded by the same
 helper, so one GPU cannot read green in one table and red in the other.
 
-### `--hwdetail`: per-node charts and `--nodename`
+### `--per-gpu`: per-node charts and `--nodename`
 
 Sixteen rows of twelve columns do not answer "which node is the slow one", so each
 job block ends with the efficiency chart repeated **per node**:
@@ -509,13 +509,13 @@ thing distinguishing the rows -- either because the job ran on one node, or beca
 `--nodename` selected one:
 
 ```bash
-jobscope -j 36441613 --hwdetail --nodename=holygpu8a10401   # 4 per-GPU charts
+jobscope -j 36441613 --per-gpu --nodename=holygpu8a10401   # 4 per-GPU charts
 ```
 
 `--nodename` (or `--node`) filters the rows to that node and drops jobs that never
 touched it. A name matching nothing is an error listing the nodes the selection *did*
 touch -- an empty report would read as an idle node rather than a typo. It needs
-`--hwdetail`: the per-job table's `NODE` column is a count, so there is no name there
+`--per-gpu`: the per-job table's `NODE` column is a count, so there is no name there
 to match.
 
 The charts follow the view, so `--cpu` narrows them to `CPU%` and `--dcgm` widens
@@ -565,7 +565,7 @@ jobscope -j 12345_6               # one running job or array element
 jobscope -p kempner -a            # every user in a partition
 jobscope --min-elapsed 0s         # no runtime floor at all
 jobscope --avg                    # fold over each job's runtime (= jobstats)
-jobscope --hwdetail               # per-GPU rows
+jobscope --per-gpu                # one row per GPU
 jobscope --ts -j 12345 | jobscope plot
 ```
 
@@ -578,7 +578,7 @@ bimodal, and a single scrape can read `GPU% 0` on a GPU averaging ~88%. Use
 peak RSS -- so they read the same in both modes; only the GPU columns follow the
 instant-versus-`--avg` choice.
 
-On a MIG node `--hwdetail` and `--ts` show the instances; the DCGM columns read
+On a MIG node `--per-gpu` and `--ts` show the instances; the DCGM columns read
 `-` there, because NVML identifies an instance by a `MIG-…` UUID where DCGM
 reports the physical `GPU-…` one and nothing in the metrics maps between them.
 
@@ -589,7 +589,7 @@ The old positional subcommands are deprecated and print a note, but still work:
 | was | now |
 |---|---|
 | `jobscope summary -D 3` | `jobscope finished -D 3` |
-| `jobscope detail JOBID` | `jobscope JOBID --hwdetail` |
+| `jobscope detail JOBID` | `jobscope JOBID --per-gpu` |
 | `jobscope dcgm --ext JOBID` | `jobscope JOBID --dcgm` |
 | `jobscope dcgm --ts JOBID` | `jobscope JOBID --ts` |
 | `jobscope live -a` | `jobscope -a` |

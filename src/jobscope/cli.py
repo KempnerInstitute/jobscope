@@ -47,7 +47,7 @@ _WINDOW_FLAGS = ("-D", "--days", "-N", "--lastn", "-S", "--starttime",
 # contrib/jobscope_live.py shells out to `live`.
 DEPRECATED = {
     "summary": ([], "the default"),
-    "detail": (["--hwdetail"], "--hwdetail"),
+    "detail": (["--per-gpu"], "--per-gpu"),
     "dcgm": (["--dcgm"], "--dcgm"),
     "live": ([], "running"),
 }
@@ -65,7 +65,7 @@ _EPILOG = (
     "  jobscope -p kempner -a            everyone on a partition, now\n"
     "  jobscope finished -D 3            your last 3 days\n"
     "  jobscope 30012345                 one job, running or finished\n"
-    "  jobscope running --hwdetail       per-GPU rows\n"
+    "  jobscope running --per-gpu        one row per GPU\n"
     "  jobscope finished -D 7 --dcgm     the full metric catalog\n"
     "  jobscope 30012345 --ts | jobscope plot\n"
     "\n"
@@ -115,13 +115,14 @@ def build_parser():
 
     shape = report.add_argument_group("granularity and columns")
     grain = shape.add_mutually_exclusive_group()
-    grain.add_argument("--hwdetail", action="store_true",
-                       help="one row per GPU, with node name and GPU number")
+    grain.add_argument("--per-gpu", "--hwdetail", dest="per_gpu", action="store_true",
+                       help="one row per GPU, with node name and GPU number "
+                            "(--hwdetail is the old name for it)")
     grain.add_argument("--ts", "--timeseries", dest="ts", action="store_true",
                        help="the per-scrape time series as CSV (pipes to 'jobscope plot')")
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
-                       help="--hwdetail: report only this node's GPUs")
+                       help="--per-gpu: report only this node's GPUs")
     block = shape.add_mutually_exclusive_group()
     block.add_argument("--cpu", action="store_const", const="cpu", dest="view",
                        help="CPU columns only")
@@ -384,11 +385,11 @@ def handle_report(args) -> None:
     if args.plot_avgeff:
         print("note: --plot_avgeff is the default now; use --no-plot to omit the "
               "efficiency bars", file=sys.stderr)
-    if args.nodename and not args.hwdetail:
+    if args.nodename and not args.per_gpu:
         # The per-job table's NODE column is a count of nodes, not a name, so there is
         # nothing there to match; say so rather than filtering nothing.
-        raise JobscopeError("--nodename needs --hwdetail, which is the view with "
-                            "per-node rows")
+        raise JobscopeError("--nodename needs --per-gpu, which is the view whose rows "
+                            "carry a node name")
     view = args.view or "all"
     diagnose = args.diagnose
     if view == "cpu" and diagnose and not args.ts:
@@ -427,7 +428,7 @@ def handle_report(args) -> None:
     selected = resolve(request, cfg, timeout, workers, specs if show_dcgm else None)
     if selected is None:
         return
-    renderer = (DetailRenderer(selected.context, options) if args.hwdetail
+    renderer = (DetailRenderer(selected.context, options) if args.per_gpu
                 else SummaryRenderer(selected.context, options, specs=specs))
     for chunk_ids, records, dcgm_data in selected.chunks:
         renderer.add(chunk_ids, records, dcgm_data)

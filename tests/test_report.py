@@ -1531,7 +1531,7 @@ _BAR_RE = re.compile(r"(\S+)\s+[\u2588\u2591]+\s+(<?\d+)%")
 
 
 def _charts(records, **kw):
-    """``{unit: {metric: percent}}`` parsed back out of the --hwdetail charts.
+    """``{unit: {metric: percent}}`` parsed back out of the --per-gpu charts.
 
     The charts are laid out in columns, so a heading line names several units and a
     bar line carries one bar per unit in the same order. Parsed positionally rather
@@ -1605,7 +1605,7 @@ def test_in_columns_measures_width_without_the_escapes():
     assert _ESC.sub("", out[0]) == "ab cd"
 
 
-def test_the_hwdetail_charts_are_two_columns():
+def test_the_per_gpu_charts_are_two_columns():
     """Four nodes read as two rows of two, not thirty-two stacked lines."""
     charts, text = _charts({"1": _multinode_job()})
     # Only the chart region: the table above it also mentions the node names.
@@ -1624,7 +1624,7 @@ def test_a_single_group_is_not_columnised():
         assert line.count("GPU%") <= 1             # nothing to pair it with
 
 
-def test_hwdetail_charts_one_group_per_node():
+def test_per_gpu_charts_one_group_per_node():
     charts, text = _charts({"1": _multinode_job()})
     assert "Efficiency by node" in text
     assert list(charts) == ["nodeA", "nodeB"]       # in row order
@@ -1671,7 +1671,7 @@ def test_the_chart_metrics_follow_the_view():
     assert list(charts["nodeA"]) == ["CPU%"]        # --cpu narrows it too
 
 
-def test_power_gets_no_bar_in_the_hwdetail_chart():
+def test_power_gets_no_bar_in_the_per_gpu_chart():
     records = {"1": _gpu_job("1", {"0": 90.0})}
     options = RenderOptions(view="all", show_dcgm=True, header=True,
                             thresholds=_thresholds())
@@ -1681,14 +1681,14 @@ def test_power_gets_no_bar_in_the_hwdetail_chart():
     assert "SM_ACT%" in chart and "POWER_W" not in chart
 
 
-def test_no_hwdetail_charts_in_csv_or_under_no_plot():
+def test_no_per_gpu_charts_in_csv_or_under_no_plot():
     records = {"1": _multinode_job()}
     for kw in ({"csv": True}, {"plot_avgeff": False}):
         _charts_out, text = _charts(records, **kw)
         assert "\u2588" not in text and "Efficiency" not in text
 
 
-def test_the_hwdetail_charts_are_tinted_and_alignment_holds():
+def test_the_per_gpu_charts_are_tinted_and_alignment_holds():
     # One idle card and one busy one, so both ends of the scale appear.
     records = {"1": _gpu_job("1", {"0": 5.0, "1": 95.0})}
     _c, colored = _charts(records, color=True)
@@ -1697,7 +1697,7 @@ def test_the_hwdetail_charts_are_tinted_and_alignment_holds():
     assert _ESC.sub("", colored) == plain
 
 
-def test_hwdetail_grades_its_cells_like_the_per_job_table():
+def test_per_gpu_grades_its_cells_like_the_per_job_table():
     """One band helper serves both, so a GPU cannot be green in one and red in the
     other. The per-GPU rows were the only untinted table left."""
     records = {"1": _gpu_job("1", {"0": 5.0, "1": 95.0})}
@@ -1705,7 +1705,7 @@ def test_hwdetail_grades_its_cells_like_the_per_job_table():
     assert report._SGR["red"] in text and report._SGR["green"] in text
 
 
-def test_hwdetail_grades_percent_suffixed_cells():
+def test_per_gpu_grades_percent_suffixed_cells():
     """Its cells read "5%" where the summary writes "5".
 
     A bare float() rejects the trailing sign, which is exactly why these columns were
@@ -1721,7 +1721,7 @@ def test_hwdetail_grades_percent_suffixed_cells():
         assert cell_band(options, "CPU-MEM", cell) == ""
 
 
-def test_hwdetail_leaves_the_identity_and_paired_columns_plain():
+def test_per_gpu_leaves_the_identity_and_paired_columns_plain():
     records = {"1": _gpu_job("1", {"0": 5.0})}
     for line in _render_detail(records).splitlines():
         if not line.startswith("  node"):
@@ -1732,13 +1732,13 @@ def test_hwdetail_leaves_the_identity_and_paired_columns_plain():
             assert report._SGR["red"] + plain not in line
 
 
-def test_color_does_not_shift_the_hwdetail_columns():
+def test_color_does_not_shift_the_per_gpu_columns():
     """Same rule as the per-job table: wrap the padded cell, never the value."""
     records = {"1": _gpu_job("1", {"0": 5.0, "1": 95.0})}
     assert _ESC.sub("", _render_detail(records)) == _render_detail(records, color=False)
 
 
-def test_hwdetail_csv_is_never_tinted():
+def test_per_gpu_csv_is_never_tinted():
     records = {"1": _gpu_job("1", {"0": 5.0})}
     options = RenderOptions(view="all", csv=True, header=True, color=True,
                             thresholds=_thresholds())

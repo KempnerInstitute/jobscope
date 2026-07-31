@@ -556,7 +556,7 @@ def aggregate_by_job(metrics: LiveMetrics, specs: List[MetricSpec],
 def per_gpu_by_node_minor(metrics: LiveMetrics, gpus: Dict[str, Gpu],
                           specs: List[MetricSpec],
                           ) -> Dict[int, Dict[Tuple[str, str], Dict[str, Optional[float]]]]:
-    """Re-key per-GPU values to ``(node, minor)`` and headers, for ``--hwdetail``.
+    """Re-key per-GPU values to ``(node, minor)`` and headers, for ``--per-gpu``.
 
     The live collectors key by UUID, which is the only unique GPU identity; the
     detail renderer keys by ``(node, minor)``, which is what the blob uses. MIG

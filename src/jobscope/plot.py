@@ -130,7 +130,7 @@ def parse_csv(fobj):
 def to_float(value):
     """'-'/'' -> None; otherwise float, or None if unparseable.
 
-    Delegates to report.cell_value, which tolerates the trailing "%" that --hwdetail
+    Delegates to report.cell_value, which tolerates the trailing "%" that --per-gpu
     writes into its cells. Without that, charting a detail CSV failed with "no numeric
     values for GPU%" -- every cell in it looks like "94.2%".
     """

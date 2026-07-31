@@ -38,7 +38,7 @@ def test_option_values_are_not_mistaken_for_jobids():
 
 
 def test_explicit_mode_words_pass_through():
-    assert resolve_argv(["running", "--hwdetail"]) == [RUNNING, "--hwdetail"]
+    assert resolve_argv(["running", "--per-gpu"]) == [RUNNING, "--per-gpu"]
     assert resolve_argv(["finished", "-D", "3"]) == [FINISHED, "-D", "3"]
 
 
@@ -57,7 +57,7 @@ def test_a_jobid_needs_no_mode_word():
 
 @pytest.mark.parametrize("old,expected,spelling", [
     ("summary", [FINISHED], "the default"),
-    ("detail", [RUNNING, "--hwdetail"], "--hwdetail"),
+    ("detail", [RUNNING, "--per-gpu"], "--per-gpu"),
     ("dcgm", [FINISHED, "--dcgm"], "--dcgm"),
     ("live", [RUNNING], "running"),
 ])
@@ -82,7 +82,7 @@ def _args(**kw):
     base = dict(mode=RUNNING, jobids=[], jobids_opt=None, days=None, lastn=None,
                 starttime=None, endtime=None, min_elapsed=None, partition=None,
                 user="alice", all_users=False, account=None, state=None,
-                hwdetail=False, ts=False, view=None, dcgm=False, avg=False,
+                per_gpu=False, ts=False, view=None, dcgm=False, avg=False,
                 diagnose=False, diag_short=None, header=True, csv=False, step=None,
                 timeout=None, workers=None, config_path=None, explicit_mode=False)
     base.update(kw)
@@ -179,10 +179,18 @@ def test_partition_survives_in_both_modes():
 
 # --- granularity and columns compose ---------------------------------------
 
-def test_hwdetail_and_ts_are_mutually_exclusive():
+@pytest.mark.parametrize("flag", ["--per-gpu", "--hwdetail"])
+def test_hwdetail_is_still_accepted_as_the_old_spelling(flag):
+    """The rename must not break a script, alias or shell history line."""
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args([flag])
+    assert args.per_gpu is True
+
+
+def test_per_gpu_and_ts_are_mutually_exclusive():
     _, subparsers = build_parser()
     with pytest.raises(SystemExit):
-        subparsers.choices[RUNNING].parse_intermixed_args(["--hwdetail", "--ts"])
+        subparsers.choices[RUNNING].parse_intermixed_args(["--per-gpu", "--ts"])
 
 
 def test_cpu_and_gpu_are_mutually_exclusive():
@@ -193,8 +201,8 @@ def test_cpu_and_gpu_are_mutually_exclusive():
 
 @pytest.mark.parametrize("mode", [RUNNING, FINISHED])
 @pytest.mark.parametrize("argv", [
-    [], ["--hwdetail"], ["--ts"], ["--cpu"], ["--gpu"], ["--dcgm"], ["--diagnose"],
-    ["--hwdetail", "--dcgm"], ["--ts", "--dcgm"], ["--gpu", "--dcgm", "--diagnose"],
+    [], ["--per-gpu"], ["--ts"], ["--cpu"], ["--gpu"], ["--dcgm"], ["--diagnose"],
+    ["--per-gpu", "--dcgm"], ["--ts", "--dcgm"], ["--gpu", "--dcgm", "--diagnose"],
     ["-p", "kempner"], ["-a"], ["--csv"], ["-n"],
 ])
 def test_every_option_parses_in_every_mode(mode, argv):
@@ -309,12 +317,12 @@ def test_explicit_jobids_do_not_stream(monkeypatch, capsys, cpu_record):
     assert "111" in capsys.readouterr().out
 
 
-def test_hwdetail_renders_per_gpu_rows(monkeypatch, capsys, gpu_record):
+def test_per_gpu_renders_one_row_per_gpu(monkeypatch, capsys, gpu_record):
     _patch_sacct(monkeypatch, {"100": gpu_record})
     monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: object())
     monkeypatch.setattr(select_mod, "compute_dcgm",
                         lambda *a, **k: {"100": ({}, {("node01", "0"): {"SM_ACT%": 80.0}})})
-    main(["finished", "--hwdetail", "-D", "1", "-u", "alice"])
+    main(["finished", "--per-gpu", "-D", "1", "-u", "alice"])
     out = capsys.readouterr().out
     assert "Job 100" in out and "NODE" in out and "node01" in out
 
@@ -355,7 +363,7 @@ class _LiveClient:
 
     Serves the NVML and cgroup series as well as a DCGM one, because the live path
     reconstructs the utilization blob from them -- without those, a running job has
-    no per-GPU rows to show under --hwdetail.
+    no per-GPU rows to show under --per-gpu.
     """
 
     sampling_period = 60
@@ -417,10 +425,10 @@ def test_running_is_the_default_mode(monkeypatch, capsys):
     assert "RUNNING" in capsys.readouterr().out
 
 
-def test_running_hwdetail(monkeypatch, capsys):
+def test_running_per_gpu(monkeypatch, capsys):
     """The per-GPU granularity for a running job, off the reconstructed blob."""
     _patch_squeue(monkeypatch)
-    main(["running", "--hwdetail", "-j", "100_6"])
+    main(["running", "--per-gpu", "-j", "100_6"])
     out = capsys.readouterr().out
     assert "Job 100_6" in out and "node01" in out
     assert "NODE" in out and "GPU" in out
@@ -602,7 +610,7 @@ def _options_for(argv, monkeypatch):
             pass
 
     monkeypatch.setattr(cli, "SummaryRenderer", FakeRenderer)
-    # --hwdetail routes to the other renderer, whose finish() would otherwise object
+    # --per-gpu routes to the other renderer, whose finish() would otherwise object
     # to a --nodename that matched nothing in an empty fake selection.
     monkeypatch.setattr(cli, "DetailRenderer", FakeRenderer)
     monkeypatch.setattr(cli, "resolve",
@@ -701,17 +709,17 @@ def test_an_explicit_running_plus_state_is_rejected(capsys):
 
 
 def test_nodename_reaches_the_renderer(monkeypatch):
-    got = _options_for(["-j", "1", "--hwdetail", "--nodename=holygpu8a10401"], monkeypatch)
+    got = _options_for(["-j", "1", "--per-gpu", "--nodename=holygpu8a10401"], monkeypatch)
     assert got.nodename == "holygpu8a10401"
 
 
 def test_node_is_accepted_as_an_alias(monkeypatch):
-    assert _options_for(["-j", "1", "--hwdetail", "--node", "n1"],
+    assert _options_for(["-j", "1", "--per-gpu", "--node", "n1"],
                         monkeypatch).nodename == "n1"
 
 
-def test_nodename_without_hwdetail_is_rejected(capsys):
+def test_nodename_without_per_gpu_is_rejected(capsys):
     """The per-job table's NODE column is a count, so there is no name to match."""
     with pytest.raises(SystemExit):
         main(["-j", "1", "--nodename=n1"])
-    assert "needs --hwdetail" in capsys.readouterr().err
+    assert "needs --per-gpu" in capsys.readouterr().err

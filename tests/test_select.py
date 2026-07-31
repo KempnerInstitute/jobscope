@@ -203,7 +203,7 @@ def test_running_yields_records_that_look_finished(monkeypatch):
     assert dcgm_data["7"][0]["SM_ACT%"] == 80.0
 
 
-def test_running_provides_per_gpu_metrics_for_hwdetail(monkeypatch):
+def test_running_provides_the_per_gpu_metrics(monkeypatch):
     _patch_live(monkeypatch)
     selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS)
     (_ids, _records, dcgm_data), = list(selected.chunks)

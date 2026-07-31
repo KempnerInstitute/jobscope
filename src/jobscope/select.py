@@ -101,7 +101,7 @@ def resolve(request: Request, cfg: config.Config, timeout: Optional[float],
     needs no Prometheus at all.
 
     Both halves of ``dcgm_data`` are otherwise populated: the job-level metrics the
-    default granularity renders, and the per-GPU ones ``--hwdetail`` needs. Neither
+    default granularity renders, and the per-GPU ones ``--per-gpu`` needs. Neither
     branch pays extra for the second -- ``compute_dcgm`` returns it anyway, and the
     live equivalent is pure dict work over values already collected.
     """

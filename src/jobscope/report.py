@@ -179,7 +179,7 @@ class RenderOptions:
     # running snapshot every value is the same moment, so scaling one by two days
     # of elapsed time would claim that instant represents those two days.
     time_weighted: bool = False
-    # --hwdetail only: report just this node's GPUs. The per-job table's NODE column
+    # --per-gpu only: report just this node's GPUs. The per-job table's NODE column
     # is a count, so there is no name there to match against.
     nodename: Optional[str] = None
     # Show the efficiency bars section. On by default: it is the fastest read in
@@ -207,7 +207,7 @@ def cell_value(cell) -> Optional[float]:
 def cell_band(options: "RenderOptions", header: str, cell) -> str:
     """The grade for a rendered cell, or ``""`` when it is not a graded metric.
 
-    Shared by the per-job table and ``--hwdetail`` so the two cannot disagree about a
+    Shared by the per-job table and ``--per-gpu`` so the two cannot disagree about a
     colour, the same reason ``plot`` calls ``Thresholds.grade`` rather than keeping its
     own copy.
 

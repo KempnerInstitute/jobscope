@@ -19,7 +19,7 @@ jobscope, because the package requires Python >= 3.9 -- see the message below if
 you are on an older interpreter.
 
 Note the granularity changed with the argument tree: ``jobscope running`` prints
-one row per job. For the per-GPU rows this script used to show, add ``--hwdetail``.
+one row per job. For the per-GPU rows this script used to show, add ``--per-gpu``.
 
 Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner Institute, Harvard
 """
