@@ -14,6 +14,7 @@ import sys
 
 from . import config
 from .errors import JobscopeError
+from .report import cell_value
 
 ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
            "#GPU", "DUR_S", "RUNTIME", "EPOCH", "TIME"}
@@ -127,13 +128,13 @@ def parse_csv(fobj):
 
 
 def to_float(value):
-    """'-'/'' -> None; otherwise float, or None if unparseable."""
-    if value is None or value in ("-", ""):
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
+    """'-'/'' -> None; otherwise float, or None if unparseable.
+
+    Delegates to report.cell_value, which tolerates the trailing "%" that --hwdetail
+    writes into its cells. Without that, charting a detail CSV failed with "no numeric
+    values for GPU%" -- every cell in it looks like "94.2%".
+    """
+    return cell_value(value)
 
 
 def metric_cols(columns):

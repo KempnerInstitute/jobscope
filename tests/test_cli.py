@@ -602,6 +602,9 @@ def _options_for(argv, monkeypatch):
             pass
 
     monkeypatch.setattr(cli, "SummaryRenderer", FakeRenderer)
+    # --hwdetail routes to the other renderer, whose finish() would otherwise object
+    # to a --nodename that matched nothing in an empty fake selection.
+    monkeypatch.setattr(cli, "DetailRenderer", FakeRenderer)
     monkeypatch.setattr(cli, "resolve",
                         lambda *a, **kw: select_mod.Resolved(context=[], chunks=[]))
     main(argv)
@@ -695,3 +698,20 @@ def test_an_explicit_running_plus_state_is_rejected(capsys):
     with pytest.raises(SystemExit):
         main(["running", "-t", "completed"])
     assert "does not apply to running jobs" in capsys.readouterr().err
+
+
+def test_nodename_reaches_the_renderer(monkeypatch):
+    got = _options_for(["-j", "1", "--hwdetail", "--nodename=holygpu8a10401"], monkeypatch)
+    assert got.nodename == "holygpu8a10401"
+
+
+def test_node_is_accepted_as_an_alias(monkeypatch):
+    assert _options_for(["-j", "1", "--hwdetail", "--node", "n1"],
+                        monkeypatch).nodename == "n1"
+
+
+def test_nodename_without_hwdetail_is_rejected(capsys):
+    """The per-job table's NODE column is a count, so there is no name to match."""
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--nodename=n1"])
+    assert "needs --hwdetail" in capsys.readouterr().err

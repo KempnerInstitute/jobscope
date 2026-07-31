@@ -32,6 +32,7 @@ from .dcgm import (
     values_by_key,
 )
 from .diagnose import LEGEND, diagnose_dcgm
+from .errors import JobscopeError
 from .live import Gpu, LiveJob, build_columns, job_sort_key, timeseries_step
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, Selection, format_window
@@ -115,6 +116,10 @@ DETAIL_COLUMNS: List[Column] = [
     Column("DIAG", "{:<22}", "diag", 12),
 ]
 
+# Positions in a detail row, named rather than repeated as literals.
+_NODE_INDEX = 0
+_GPU_INDEX = 1
+
 DETAIL_HEADER: Tuple[str, ...] = (
     "NODE", "GPU", "CPU%", "CPU-MEM", "GPU%", "GPU-MEM", "GMEM%",
     "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "DIAG")
@@ -173,6 +178,9 @@ class RenderOptions:
     # running snapshot every value is the same moment, so scaling one by two days
     # of elapsed time would claim that instant represents those two days.
     time_weighted: bool = False
+    # --hwdetail only: report just this node's GPUs. The per-job table's NODE column
+    # is a count, so there is no name there to match against.
+    nodename: Optional[str] = None
     # Show the efficiency bars section. On by default: it is the fastest read in
     # the block, and behind a flag it was rarely seen. --no-plot switches it off.
     plot_avgeff: bool = True
@@ -180,6 +188,19 @@ class RenderOptions:
     # established that the destination is a terminal that wants colour.
     color: bool = False
     thresholds: Optional["Thresholds"] = None
+
+
+def cell_value(cell) -> Optional[float]:
+    """The number in a rendered cell, or None when there is not one.
+
+    The trailing ``%`` matters: the detail view writes "11.4%" where the summary writes
+    "11", and a bare ``float()`` rejects the former. One parser for grading and for
+    charting, so a cell that gets a colour is a cell that gets a bar.
+    """
+    try:
+        return float(str(cell).rstrip("%"))
+    except (TypeError, ValueError):      # "-", "", a hostname, "76.1GB/1400GB"
+        return None
 
 
 def cell_band(options: "RenderOptions", header: str, cell) -> str:
@@ -195,11 +216,35 @@ def cell_band(options: "RenderOptions", header: str, cell) -> str:
     """
     if not options.color or options.thresholds is None:
         return ""
-    try:
-        value = float(str(cell).rstrip("%"))
-    except (TypeError, ValueError):      # "-", "", a hostname, "76.1GB/1400GB"
-        return ""
-    return options.thresholds.grade(header, value)
+    value = cell_value(cell)
+    return "" if value is None else options.thresholds.grade(header, value)
+
+
+BAR_WIDTH = 34
+
+
+def bar_lines(items, indent: str = "  ") -> List[str]:
+    """Horizontal bars from ``(label, percent, band)`` triples.
+
+    One primitive for the per-job summary and the per-GPU detail charts, so they look
+    identical rather than merely similar. A nonzero value always draws at least one
+    block and reads "<1%" rather than "0%", because an empty bar beside a "0%" and a
+    filled one beside it are each self-contradictory.
+    """
+    if not items:
+        return []
+    label_width = max(len(label) for label, _v, _b in items)
+    out = []
+    for label, value, band in items:
+        filled = max(0, min(BAR_WIDTH, int(round(value / 100.0 * BAR_WIDTH))))
+        if value > 0 and filled == 0:
+            filled = 1
+        run = "\u2588" * filled
+        out.append("%s%*s  %s%s  %4s" % (
+            indent, label_width, label, tint(run, band) if run else run,
+            "\u2591" * (BAR_WIDTH - filled),
+            "<1%" if 0 < value < 0.5 else "%d%%" % round(value)))
+    return out
 
 
 def tint(text: str, band: str) -> str:
@@ -1023,7 +1068,6 @@ class SummaryRenderer:
                   "power": thresholds.power_w}
         return [line % values for line in self.STAT_LEGEND]
 
-    BAR_WIDTH = 34
     WORST_WIDTH = 132
 
     def _worst_rows(self, label: str, entries, label_width: int,
@@ -1089,37 +1133,21 @@ class SummaryRenderer:
         """Horizontal utilization bars, one per graded metric.
 
         The same data as the table's IDLE column, in the form that answers "which
-        resource was wasted" without arithmetic: bar length is the pooled
-        utilization, so bar percent and IDLE percent always sum to 100.
+        resource was wasted" without arithmetic: bar length is the pooled utilization,
+        so bar percent and IDLE percent always sum to 100.
 
-        Drawn with block characters and this module's own SGR codes rather than
-        rich, for the reason recorded beside :data:`_SGR` -- the report path is the
-        common one and should not import a rendering library to print a table.
+        Drawn through :func:`bar_lines`, which the per-GPU charts also use, and with
+        this module's own SGR codes rather than rich -- the report path is the common
+        one and should not import a rendering library to print a table.
         """
-        if not stats:
-            return []
-        label = max(len(one.header) for one in stats)
-        out = []
+        items = []
         for one in stats:
             used = one.pooled()
-            if used is None:
-                continue
-            filled = max(0, min(self.BAR_WIDTH,
-                                int(round(used / 100.0 * self.BAR_WIDTH))))
-            if used > 0 and filled == 0:
-                # An empty bar beside a "1%" contradicts itself; show the smallest
-                # mark instead. Same reason sub-0.1 amounts read "<0.1" not "0".
-                filled = 1
-            band = one.band_of(used) if self.options.color else ""
-            run = "\u2588" * filled
-            # "<1" rather than "0" for a nonzero value, so the number agrees with
-            # the block the bar is obliged to draw.
-            pct = "<1%" if 0 < used < 0.5 else "%d%%" % round(used)
-            out.append("  %*s  %s%s  %4s" % (
-                label, one.header,
-                _SGR[band] + run + _RESET if band and run else run,
-                "\u2591" * (self.BAR_WIDTH - filled), pct))
-        return out
+            if used is not None:
+                items.append((one.header, used,
+                              one.band_of(used) if self.options.color else ""))
+        return bar_lines(items)
+
 
     def _stat_table(self, stats: List["EfficiencyTally"]) -> List[str]:
         """The per-metric table: one row per graded metric, tinted by band.
@@ -1171,6 +1199,10 @@ class DetailRenderer:
         self.columns = cols_for(DETAIL_COLUMNS, options.view, options.show_dcgm, options.diagnose)
         self.writer = csv.writer(self.out, lineterminator="\n") if options.csv else None
         self.count = 0
+        # Every node seen *before* filtering, so an unmatched --nodename can say what
+        # was actually there, and whether anything matched at all.
+        self.nodes_seen = set()
+        self.matched = 0
         self._started = False
 
     def _line(self, cells) -> str:
@@ -1203,6 +1235,10 @@ class DetailRenderer:
             rows = [extend_detail_row(r, per_gpu, record.duration if record else None,
                                       self.options.min_runtime, self.options.diagnose)
                     for r in rows]
+        self.nodes_seen.update(row[_NODE_INDEX] for row in rows)
+        if self.options.nodename:
+            rows = [row for row in rows if row[_NODE_INDEX] == self.options.nodename]
+        self.matched += len(rows)
         return rows
 
     def add(self, jobids: List[str], records: Dict[str, JobRecord],
@@ -1231,11 +1267,59 @@ class DetailRenderer:
                 print("  " + "-" * len(header_line), file=self.out)
                 for row in rows:
                     print("  " + self._line(row), file=self.out)
+                for line in self._unit_charts(rows):
+                    print(line, file=self.out)
                 print(file=self.out)
         self.out.flush()
 
+    def _unit_charts(self, rows) -> List[str]:
+        """Efficiency bars grouped by node, or by GPU when there is only one node.
+
+        The rows already carry every number; what they do not give is a comparison.
+        Grouping by whatever distinguishes them -- the node normally, the card once a
+        single node is in play -- is what turns sixteen rows of twelve columns into
+        "this node is the slow one".
+        """
+        if not self.options.plot_avgeff or self.options.csv or not rows:
+            return []
+        metrics = [c for c in self.columns
+                   if c.header.endswith("%") and c.header not in ("GPU",)]
+        if not metrics:
+            return []
+        nodes = list(dict.fromkeys(row[_NODE_INDEX] for row in rows))
+        by_gpu = len(nodes) == 1
+        if by_gpu:
+            groups = [("GPU %s" % row[_GPU_INDEX], [row]) for row in rows]
+            title = "Efficiency by GPU on %s" % nodes[0]
+        else:
+            groups = [(node, [r for r in rows if r[_NODE_INDEX] == node])
+                      for node in nodes]
+            title = "Efficiency by node"
+        out = ["", "  %s  (filled = used, grey = idle)" % title]
+        for label, members in groups:
+            items = []
+            for col in metrics:
+                # The mean over the group's rows. Within a node the GPUs are equal, so
+                # that is the pooled figure; CPU% is already per-node, repeated on
+                # every row, so averaging identical values returns them unchanged.
+                values = [v for v in (cell_value(r[col.index]) for r in members)
+                          if v is not None]
+                if not values:
+                    continue
+                mean = sum(values) / len(values)
+                items.append((col.header, mean,
+                              cell_band(self.options, col.header, mean)))
+            if items:
+                out.append("    " + label)
+                out.extend(bar_lines(items, indent="      "))
+        return out
+
     def finish(self) -> None:
         self._start()
+        if self.options.nodename and not self.matched:
+            raise JobscopeError(
+                "no rows for node %r in this selection; it ran on: %s"
+                % (self.options.nodename, ", ".join(sorted(self.nodes_seen)) or "(none)"))
         if self.count == 0 and not self.options.csv:
             print("(no GPU jobs in this selection)", file=self.out)
 

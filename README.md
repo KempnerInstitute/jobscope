@@ -211,7 +211,7 @@ job that is running right now.
 | option | effect |
 |---|---|
 | *(default)* | one row per job |
-| `--hwdetail` | one row per GPU, with node name and GPU number |
+| `--hwdetail` | one row per GPU, with node name and GPU number (see below) |
 | `--ts` | the per-scrape time series as CSV |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--dcgm` | the full DCGM metric catalog |
@@ -477,6 +477,43 @@ and a healthy one is green. The pooled footer row is tinted too, and the same
 cutoffs define the band tallies, so a wasteful selection is obvious at a glance
 and quantified one line below. `--hwdetail`'s per-GPU rows are graded by the same
 helper, so one GPU cannot read green in one table and red in the other.
+
+### `--hwdetail`: per-node charts and `--nodename`
+
+Sixteen rows of twelve columns do not answer "which node is the slow one", so each
+job block ends with the efficiency chart repeated **per node**:
+
+```
+  Efficiency by node  (filled = used, grey = idle)
+    holygpu8a10302
+         CPU%  ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   11%
+         GPU%  █████████████████████████████████░   96%
+      SM_ACT%  █████████████████████████████░░░░░   84%
+      ... one bar per graded column
+    holygpu8a10401
+         GPU%  ████████████████████████████████░░   94%
+```
+
+A node's value is the mean over its GPU rows, which within a node *is* the pooled
+figure. `CPU%` and `CPU-MEM` are already per-node figures repeated on each row, so
+averaging leaves them unchanged.
+
+**With one node in play the unit drops to the GPU**, since the card is then the only
+thing distinguishing the rows -- either because the job ran on one node, or because
+`--nodename` selected one:
+
+```bash
+jobscope -j 36441613 --hwdetail --nodename=holygpu8a10401   # 4 per-GPU charts
+```
+
+`--nodename` (or `--node`) filters the rows to that node and drops jobs that never
+touched it. A name matching nothing is an error listing the nodes the selection *did*
+touch -- an empty report would read as an idle node rather than a typo. It needs
+`--hwdetail`: the per-job table's `NODE` column is a count, so there is no name there
+to match.
+
+The charts follow the view, so `--cpu` narrows them to `CPU%` and `--dcgm` widens
+them, and `--no-plot` omits them.
 
 One cutoff covers every `%` metric, site-tunable in `[thresholds]`, and it is the
 same one `jobscope plot` grades with, so a job red in a chart is red in the table:

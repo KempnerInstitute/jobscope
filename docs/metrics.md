@@ -80,7 +80,11 @@ instantaneous form -- while the GPU columns follow the instant-versus-`--avg`
 choice.
 
 **Per-GPU output** is `--hwdetail` and the `--ts` time series, which stay one row
-per GPU. `--ts` keys by UUID throughout, so it is the accurate view on a MIG node;
+per GPU. `--hwdetail` closes each job block with the efficiency chart repeated per
+node -- or per GPU once a single node is in play, that being the only thing left that
+distinguishes the rows. A node's value is the mean over its GPU rows, which within a
+node is the pooled figure; `CPU%` is already a per-node number repeated on each row,
+so averaging returns it unchanged. `--nodename=NODE` narrows the rows to one node. `--ts` keys by UUID throughout, so it is the accurate view on a MIG node;
 `--hwdetail` keys by `(node, minor)` like the blob does, which MIG siblings share.
 
 `GMEM%` is derived (`GMEM_GB / GMEM_TOTAL_GB`) rather than queried, and

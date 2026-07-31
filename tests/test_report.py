@@ -4,9 +4,12 @@ import dataclasses
 import io
 import re
 
+import pytest
+
 from jobscope import plot, report
 from jobscope.blob import GIB
 from jobscope.dcgm import DEFAULT_SPECS, GPU_SUMMARY_SPECS
+from jobscope.errors import JobscopeError
 from jobscope.report import (
     SUMMARY_COLUMNS,
     RenderOptions,
@@ -1505,6 +1508,114 @@ def _render_detail(records, color=True, dcgm_data=None):
     options = RenderOptions(view="all", show_dcgm=bool(dcgm_data), csv=False,
                             header=True, color=color, thresholds=_thresholds())
     return _render(detail, list(records), records, dcgm_data or {}, CTX, options)
+
+
+def _multinode_job(jid="1"):
+    """A record whose blob spans two nodes, two GPUs each."""
+    def node(cpu_seconds, utils):
+        return {"total_time": cpu_seconds, "cpus": 4,
+                "used_memory": 8 * GIB, "total_memory": 16 * GIB,
+                "gpu_utilization": utils,
+                "gpu_used_memory": {k: 40 * GIB for k in utils},
+                "gpu_total_memory": {k: 80 * GIB for k in utils}}
+    return JobRecord(
+        jobid=jid, state="COMPLETED", name="j", runtime="01:00:00", nodes="2", gpus=4,
+        stats={"total_time": 100,
+               "nodes": {"nodeA": node(200, {"0": 90.0, "1": 80.0}),
+                         "nodeB": node(100, {"0": 10.0, "1": 20.0})}},
+        start=0, end=100, duration=100, jobid_raw=jid, cluster="c", user="alice")
+
+
+def _charts(records, **kw):
+    """``{unit: {metric: percent}}`` parsed back out of the --hwdetail charts."""
+    options = RenderOptions(view=kw.get("view", "all"), show_dcgm=False, csv=kw.get("csv", False),
+                            header=True, color=kw.get("color", False),
+                            thresholds=_thresholds(), nodename=kw.get("nodename"),
+                            plot_avgeff=kw.get("plot_avgeff", True))
+    text = _render(detail, list(records), records, {}, CTX, options)
+    charts, unit = {}, None
+    for line in text.splitlines():
+        stripped = _ESC.sub("", line)
+        if "\u2588" in stripped or "\u2591" in stripped:
+            metric, _, tail = stripped.strip().partition("  ")
+            charts[unit][metric] = int(tail.strip().rstrip("%").split()[-1].lstrip("<"))
+        elif stripped.startswith("    ") and stripped.strip() and "Efficiency" not in line:
+            unit = stripped.strip()
+            charts[unit] = {}
+    return charts, text
+
+
+def test_hwdetail_charts_one_group_per_node():
+    charts, text = _charts({"1": _multinode_job()})
+    assert "Efficiency by node" in text
+    assert list(charts) == ["nodeA", "nodeB"]       # in row order
+
+
+def test_a_nodes_value_is_the_mean_of_its_gpus():
+    """Within a node the GPUs are equal, so the mean is the pooled figure."""
+    charts, _text = _charts({"1": _multinode_job()})
+    assert charts["nodeA"]["GPU%"] == 85            # mean(90, 80)
+    assert charts["nodeB"]["GPU%"] == 15            # mean(10, 20)
+
+
+def test_per_node_cpu_survives_the_averaging_unchanged():
+    """CPU% is a node figure repeated on each GPU row, so averaging must not move it."""
+    charts, _text = _charts({"1": _multinode_job()})
+    # nodeA used 200 cpu-seconds of 100s x 4 cores; nodeB half that.
+    assert charts["nodeA"]["CPU%"] == 50 and charts["nodeB"]["CPU%"] == 25
+
+
+def test_one_node_charts_each_gpu_instead():
+    """With a single node the card is the only thing left that distinguishes rows."""
+    records = {"1": _gpu_job("1", {"0": 90.0, "1": 10.0})}
+    charts, text = _charts(records)
+    assert "Efficiency by GPU on n1" in text
+    assert list(charts) == ["GPU 0", "GPU 1"]
+    assert charts["GPU 0"]["GPU%"] == 90 and charts["GPU 1"]["GPU%"] == 10
+
+
+def test_nodename_filters_the_rows_and_switches_to_per_gpu():
+    charts, text = _charts({"1": _multinode_job()}, nodename="nodeB")
+    assert "nodeA" not in text                      # rows dropped entirely
+    assert "Efficiency by GPU on nodeB" in text
+    assert list(charts) == ["GPU 0", "GPU 1"]
+
+
+def test_an_unmatched_nodename_names_the_nodes_that_were_there():
+    """A silent empty report would read as an idle node rather than a typo."""
+    with pytest.raises(JobscopeError, match="nodeA, nodeB"):
+        _charts({"1": _multinode_job()}, nodename="typo")
+
+
+def test_the_chart_metrics_follow_the_view():
+    charts, _text = _charts({"1": _multinode_job()}, view="cpu")
+    assert list(charts["nodeA"]) == ["CPU%"]        # --cpu narrows it too
+
+
+def test_power_gets_no_bar_in_the_hwdetail_chart():
+    records = {"1": _gpu_job("1", {"0": 90.0})}
+    options = RenderOptions(view="all", show_dcgm=True, header=True,
+                            thresholds=_thresholds())
+    text = _render(detail, ["1"], records, {"1": ({}, {("n1", "0"): {
+        "SM_ACT%": 40.0, "POWER_W": 300.0}})}, CTX, options)
+    chart = text[text.index("Efficiency by"):]
+    assert "SM_ACT%" in chart and "POWER_W" not in chart
+
+
+def test_no_hwdetail_charts_in_csv_or_under_no_plot():
+    records = {"1": _multinode_job()}
+    for kw in ({"csv": True}, {"plot_avgeff": False}):
+        _charts_out, text = _charts(records, **kw)
+        assert "\u2588" not in text and "Efficiency" not in text
+
+
+def test_the_hwdetail_charts_are_tinted_and_alignment_holds():
+    # One idle card and one busy one, so both ends of the scale appear.
+    records = {"1": _gpu_job("1", {"0": 5.0, "1": 95.0})}
+    _c, colored = _charts(records, color=True)
+    assert report._SGR["red"] in colored and report._SGR["green"] in colored
+    _c2, plain = _charts(records, color=False)
+    assert _ESC.sub("", colored) == plain
 
 
 def test_hwdetail_grades_its_cells_like_the_per_job_table():

@@ -119,6 +119,9 @@ def build_parser():
                        help="one row per GPU, with node name and GPU number")
     grain.add_argument("--ts", "--timeseries", dest="ts", action="store_true",
                        help="the per-scrape time series as CSV (pipes to 'jobscope plot')")
+    shape.add_argument("--nodename", "--node", dest="nodename", default=None,
+                       metavar="NODE",
+                       help="--hwdetail: report only this node's GPUs")
     block = shape.add_mutually_exclusive_group()
     block.add_argument("--cpu", action="store_const", const="cpu", dest="view",
                        help="CPU columns only")
@@ -381,6 +384,11 @@ def handle_report(args) -> None:
     if args.plot_avgeff:
         print("note: --plot_avgeff is the default now; use --no-plot to omit the "
               "efficiency bars", file=sys.stderr)
+    if args.nodename and not args.hwdetail:
+        # The per-job table's NODE column is a count of nodes, not a name, so there is
+        # nothing there to match; say so rather than filtering nothing.
+        raise JobscopeError("--nodename needs --hwdetail, which is the view with "
+                            "per-node rows")
     view = args.view or "all"
     diagnose = args.diagnose
     if view == "cpu" and diagnose and not args.ts:
@@ -400,6 +408,7 @@ def handle_report(args) -> None:
         min_runtime=(args.diag_short if args.diag_short is not None
                      else cfg.defaults.min_runtime),
         time_weighted=time_weighted, plot_avgeff=not args.no_plot,
+        nodename=args.nodename,
         color=_want_color(args), thresholds=cfg.thresholds)
 
     if args.ts:
