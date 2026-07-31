@@ -43,6 +43,10 @@ workers = 8
 timeout = 60
 # Jobs shorter than this many seconds are tagged DIAG=short (sampling noise).
 min_runtime = 180
+# Runtime floor for the running view: jobs younger than this are hidden, because a
+# job still loading data or compiling kernels reads as idle. --min-elapsed overrides
+# it per invocation; "0s" shows everything.
+min_elapsed = "10m"
 # Unix group whose members may report on other users' jobs (-a/--all-users, or
 # -u naming someone else). Set to "" to let anyone do so.
 #

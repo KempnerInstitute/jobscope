@@ -80,7 +80,7 @@ def test_deprecated_live_is_always_running():
 
 def _args(**kw):
     base = dict(mode=RUNNING, jobids=[], jobids_opt=None, days=None, lastn=None,
-                starttime=None, endtime=None, min_elapsed="1h", partition=None,
+                starttime=None, endtime=None, min_elapsed=None, partition=None,
                 user="alice", all_users=False, account=None, state="all",
                 hwdetail=False, ts=False, view=None, dcgm=False, avg=False,
                 diagnose=False, diag_short=None, header=True, csv=False, step=None,
@@ -575,3 +575,46 @@ def test_explicit_jobids_are_not_gated(monkeypatch):
     monkeypatch.setattr(cli, "default_user", lambda: "alice")
     request = build_request(_args(jobids=["12345"], user=None), _cfg_with_group("slurm-admin"))
     assert request.jobids == ["12345"]
+
+
+# --- the runtime floor ------------------------------------------------------
+
+def test_min_elapsed_defaults_to_ten_minutes():
+    """A job still loading data reads as idle, so the floor hides the youngest."""
+    from jobscope.config import DEFAULT_MIN_ELAPSED
+    assert DEFAULT_MIN_ELAPSED == "10m"
+    assert _request(min_elapsed=None).min_elapsed == 600
+
+
+def test_min_elapsed_comes_from_config_when_unset():
+    import dataclasses as dc
+
+    from jobscope import config
+    base = config.get_config()
+    cfg = dc.replace(base, defaults=dc.replace(base.defaults, min_elapsed="45m"))
+    assert build_request(_args(min_elapsed=None), cfg).min_elapsed == 45 * 60
+
+
+def test_the_flag_overrides_the_configured_floor():
+    import dataclasses as dc
+
+    from jobscope import config
+    base = config.get_config()
+    cfg = dc.replace(base, defaults=dc.replace(base.defaults, min_elapsed="45m"))
+    assert build_request(_args(min_elapsed="30s"), cfg).min_elapsed == 30
+
+
+def test_zero_disables_the_floor():
+    assert _request(min_elapsed="0s").min_elapsed == 0
+
+
+def test_a_bad_configured_floor_blames_the_config():
+    import dataclasses as dc
+
+    from jobscope import config
+    base = config.get_config()
+    cfg = dc.replace(base, defaults=dc.replace(base.defaults, min_elapsed="1 hour"))
+    with pytest.raises(JobscopeError) as exc:
+        build_request(_args(min_elapsed=None), cfg)
+    # Not phrased as a bad command line, since the command line was fine.
+    assert "config file" in str(exc.value) and "min_elapsed" in str(exc.value)

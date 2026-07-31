@@ -28,6 +28,9 @@ DEFAULT_SAMPLING_PERIOD = 60
 DEFAULT_WORKERS = 8
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MIN_RUNTIME = 180
+# Runtime floor for the running view: jobs younger than this are hidden, since a
+# job still ramping up reads as idle. A duration string, as --min-elapsed takes.
+DEFAULT_MIN_ELAPSED = "10m"
 # Unix group whose members may report on other users' jobs. Empty disables the
 # check, letting anyone use -a/-u. Advisory only -- see sacct.in_group.
 DEFAULT_ADMIN_GROUP = "slurm-admin"
@@ -59,6 +62,7 @@ class Defaults:
     min_runtime: int
     # Defaulted so existing constructions keep working; "" disables the gate.
     admin_group: str = DEFAULT_ADMIN_GROUP
+    min_elapsed: str = DEFAULT_MIN_ELAPSED
 
 
 @dataclass(frozen=True)
@@ -121,6 +125,7 @@ def load_config(path: Optional[str] = None,
         timeout=float(dfl.get("timeout", DEFAULT_TIMEOUT)),
         min_runtime=int(dfl.get("min_runtime", DEFAULT_MIN_RUNTIME)),
         admin_group=str(dfl.get("admin_group", DEFAULT_ADMIN_GROUP)),
+        min_elapsed=str(dfl.get("min_elapsed", DEFAULT_MIN_ELAPSED)),
     )
     return Config(
         prometheus_url=(env.get(PROM_URL_ENV) or prom.get("url")) or None,

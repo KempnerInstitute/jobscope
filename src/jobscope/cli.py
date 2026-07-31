@@ -24,7 +24,7 @@ from typing import Optional
 from . import __version__, config, plot
 from .dcgm import ALL_SPECS, DEFAULT_SPECS
 from .errors import JobscopeError
-from .live import DEFAULT_MIN_ELAPSED, parse_duration
+from .live import parse_duration
 from .report import (
     DetailRenderer,
     RenderOptions,
@@ -94,10 +94,10 @@ def build_parser():
     scope.add_argument("-E", "--endtime", metavar="TIME",
                        help="finished: window end, same format as -S")
     scope.add_argument("--min-elapsed", "--min-runtime", dest="min_elapsed",
-                       metavar="DURATION", default=DEFAULT_MIN_ELAPSED,
-                       help="running: only jobs running longer than this "
-                            "(default: %s; e.g. '5m', '2h', '0s' for no floor)"
-                            % DEFAULT_MIN_ELAPSED)
+                       metavar="DURATION", default=None,
+                       help="running: only jobs running longer than this (default from "
+                            "config: %s; e.g. '5m', '2h', '0s' for no floor)"
+                            % config.DEFAULT_MIN_ELAPSED)
 
     filters = report.add_argument_group("filters")
     filters.add_argument("-p", "--partition", help="narrow to this partition")
@@ -291,6 +291,20 @@ def _check_other_users_allowed(args, cfg: config.Config, me: Optional[str]) -> N
            "" if args.all_users or not me else ", or pass -u %s" % me))
 
 
+def _min_elapsed(args, cfg: config.Config) -> int:
+    """The runtime floor in seconds: the flag if given, else the configured default.
+
+    A bad value is reported against whichever supplied it, so a typo in the config
+    file does not read as a bad command line.
+    """
+    if args.min_elapsed is not None:
+        return parse_duration(args.min_elapsed)
+    try:
+        return parse_duration(cfg.defaults.min_elapsed)
+    except JobscopeError as exc:
+        raise JobscopeError("[defaults] min_elapsed in the config file is invalid: %s" % exc)
+
+
 def build_request(args, cfg: Optional[config.Config] = None) -> Request:
     """Validate the flag combination and build the :class:`Request`."""
     cfg = cfg or config.get_config()
@@ -357,7 +371,7 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
         days=days, lastn=args.lastn, starttime=args.starttime, endtime=args.endtime,
         state=args.state, user=user, all_users=args.all_users,
         account=args.account, partition=args.partition,
-        min_elapsed=parse_duration(args.min_elapsed), average=args.avg,
+        min_elapsed=_min_elapsed(args, cfg), average=args.avg,
     )
 
 

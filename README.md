@@ -124,7 +124,9 @@ an explicit window. Passing one of these without a mode word implies `finished`,
 so `jobscope -D 3` still means what it always did.
 
 **Filters**, every mode: `-p` partition, `-u` user, `-a` all users, `-A` account,
-`-t` state (`finished` only), `--min-elapsed` runtime floor (`running` only).
+`-t` state (`finished` only), `--min-elapsed` runtime floor (`running` only,
+default 10m -- a job still loading data reads as idle; `[defaults] min_elapsed`
+changes it, `0s` disables it).
 
 Reporting on **other users** — `-a`, or `-u` naming someone else — is limited to
 members of a Unix group, `slurm-admin` by default. Set `[defaults] admin_group` in
@@ -207,7 +209,7 @@ unlike the historical modes it is a snapshot, not a job-length average.
 jobscope                          # your running jobs over 1h
 jobscope -j 12345_6               # one running job or array element
 jobscope -p kempner -a            # every user in a partition
-jobscope --min-elapsed 5m         # include jobs only 5 minutes in
+jobscope --min-elapsed 0s         # no runtime floor at all
 jobscope --avg                    # fold over each job's runtime (= jobstats)
 jobscope --hwdetail               # per-GPU rows
 jobscope --ts -j 12345 | jobscope plot

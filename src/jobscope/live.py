@@ -58,9 +58,6 @@ LiveMetrics = Dict[int, Dict[str, Dict[str, Optional[float]]]]
 # only the job's allocation as Slurm records it.
 SQUEUE_FORMAT = "%A|%i|%u|%N|%g|%j|%b|%C|%S"
 
-DEFAULT_MIN_ELAPSED = "1h"
-
-
 class Gpu(NamedTuple):
     """Identity of one schedulable GPU: a whole card, or a single MIG instance."""
 
@@ -87,7 +84,7 @@ class LiveSelection:
     jobids: List[str] = field(default_factory=list)
     partition: Optional[str] = None
     user: Optional[str] = None      # None = every user
-    min_elapsed: int = 3600
+    min_elapsed: int = 600
 
     def describe(self) -> str:
         """Human-readable summary for the context block."""
