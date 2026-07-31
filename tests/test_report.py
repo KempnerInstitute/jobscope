@@ -739,53 +739,61 @@ def _worst_lines(records, view="all", time_weighted=True):
             for ln in out.getvalue().splitlines() if ln.startswith("Worst")}
 
 
-def test_the_combined_worst_normalizes_each_resource():
-    """The combined order can differ from both single-resource orders.
+def test_the_combined_worst_requires_red_in_every_metric():
+    """AND, not OR: a job idle by one measure does not reach a combined row.
 
-    GPU-hours and core-hours are not addable, so each job's waste is expressed as a
-    share of the selection's total waste in that resource and the two shares summed.
-    Here A wastes almost all the GPU-time, B almost all the core-time, and C a
-    little under a third of each -- so B edges out A, and C trails both, an order
-    neither single list produces.
+    gpuhog wastes nearly all the GPU-time but keeps 90% of its cores; cpuhog is the
+    mirror. Neither belongs on a row that claims "idle by both measures", and under
+    an OR both appeared -- alongside jobs showing a 0% component, which is what gave
+    the OR away.
     """
     records = {
-        # 10 GPU-hours idle, but 90% of its 2 cores used.
         "gpuhog": _timed_job("gpuhog", 3600, gpu_util=0.0, gpus=10, cores=2,
-                             cpu_seconds=6480),
-        # GPU busy, but 100 core-hours idle.
+                             cpu_seconds=6480),          # CPU% 90, green
         "cpuhog": _timed_job("cpuhog", 3600, gpu_util=95.0, gpus=1, cores=100,
-                             cpu_seconds=0),
-        # Red in both, moderately.
-        "middle": _timed_job("middle", 3600, gpu_util=0.0, gpus=4, cores=40,
-                             cpu_seconds=0),
+                             cpu_seconds=0),             # GPU% 95, green
+        "both": _timed_job("both", 3600, gpu_util=0.0, gpus=4, cores=40,
+                           cpu_seconds=0),               # red in both
     }
     lines = _worst_lines(records)
-    # Each single-resource list only holds jobs red in *that* resource.
-    assert lines["Worst GPU"].index("gpuhog") < lines["Worst GPU"].index("middle")
-    assert "cpuhog" not in lines["Worst GPU"]
-    assert lines["Worst CPU"].index("cpuhog") < lines["Worst CPU"].index("middle")
-    assert "gpuhog" not in lines["Worst CPU"]
-    both = lines["Worst both"]
-    assert both.index("cpuhog") < both.index("gpuhog") < both.index("middle")
-    # The shares say which resource put each job there.
-    assert "gpuhog 71%gpu+0%cpu" in both and "cpuhog 0%gpu+71%cpu" in both
+    # The single-metric rows still list whoever is red in that one metric.
+    assert "gpuhog" in lines["Worst GPU"] and "cpuhog" in lines["Worst CPU"]
+    combined = lines["Worst both"]
+    assert "both" in combined
+    assert "gpuhog" not in combined and "cpuhog" not in combined
 
 
-def test_the_combined_worst_counts_waste_from_a_resource_a_job_is_green_in():
-    """A job red in one resource still has its other-resource waste counted.
+def test_the_combined_worst_normalizes_each_metric():
+    """Shares, not raw amounts: GPU-hours and core-hours cannot be added.
 
-    It is real waste; only the red filter decides who is a candidate at all.
+    Two jobs red in both, one wasting twice the resource of the other, so the
+    normalized shares are 2:1 and the order follows.
+    """
+    records = {"big": _timed_job("big", 3600, gpu_util=0.0, gpus=8, cores=8,
+                                 cpu_seconds=0),
+               "small": _timed_job("small", 3600, gpu_util=0.0, gpus=4, cores=4,
+                                   cpu_seconds=0)}
+    combined = _worst_lines(records)["Worst both"]
+    assert combined.index("big") < combined.index("small")
+    assert "big 67%gpu+67%cpu" in combined and "small 33%gpu+33%cpu" in combined
+
+
+def test_a_job_green_in_one_metric_is_absent_from_the_combined_rows():
+    """The inverse of the conjunction, stated directly.
+
+    Its waste in the other metric is still real -- and still counted in that
+    metric's own total and its own Worst row -- it just does not qualify here.
     """
     records = {
         "red_gpu": _timed_job("red_gpu", 3600, gpu_util=0.0, gpus=1,
                               cores=10, cpu_seconds=18000),   # CPU% 50, green
-        "red_cpu": _timed_job("red_cpu", 3600, gpu_util=90.0, gpus=1,
-                              cores=10, cpu_seconds=0),       # CPU% 0, red
+        "red_both": _timed_job("red_both", 3600, gpu_util=5.0, gpus=1,
+                               cores=10, cpu_seconds=0),      # red in both
     }
-    both = _worst_lines(records)["Worst both"]
-    # red_gpu is green on CPU yet still shows a nonzero CPU share (5 core-hours
-    # idle of 15 total).
-    assert "red_gpu 91%gpu+33%cpu" in both
+    lines = _worst_lines(records)
+    assert "red_gpu" in lines["Worst GPU"]          # its own row still names it
+    assert "red_gpu" not in lines["Worst both"]     # but not the conjunction
+    assert "red_both" in lines["Worst both"]
 
 
 def test_no_combined_line_when_only_one_resource_wasted_anything():
@@ -856,8 +864,9 @@ def test_a_worst_row_per_named_metric_in_a_fixed_order():
 
 
 def test_the_four_metric_row_prints_every_component_share():
-    records = {"a": _power_job("a", 3600, None, gpu_util=0.0),
-               "b": _power_job("b", 7200, None, gpu_util=0.0)}
+    # Red in all four, which the conjunction requires.
+    records = {"a": _power_job("a", 3600, None, gpu_util=0.0, cpu_seconds=0),
+               "b": _power_job("b", 7200, None, gpu_util=0.0, cpu_seconds=0)}
     rows = _worst_with_power(records, {"a": 73.0, "b": 73.0}, sm={"a": 0.0, "b": 0.0})
     # Four terms, tagged so the reader sees which measure drove the ranking.
     assert "%gpu+" in rows["Worst all"] and "%sm+" in rows["Worst all"]

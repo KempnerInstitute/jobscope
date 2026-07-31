@@ -221,8 +221,8 @@ Worst GPU (5/319):    35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  
 Worst SM (35/425):    35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 47.7h@0% amazloumi
 Worst POWER (41/425): 35475803 142.9h@73W amazloumi  35476814 142h@73W amazloumi  36337781 47.7h@73W amazloumi
 Worst CPU (159/319):  35475803 2286.6h@0% amazloumi  35476814 2271.9h@0% amazloumi  36337781 763.7h@0% amazloumi
-Worst both (159):     35475803 35%gpu+23%cpu  35476814 35%gpu+23%cpu  36337781 12%gpu+8%cpu
-Worst all (210):      35475803 35%gpu+32%sm+40%pw+23%cpu  35476814 35%gpu+31%sm+40%pw+23%cpu
+Worst both (3):       36337781 39%gpu+14%cpu  36358839 9%gpu+3%cpu
+Worst all (2):        36337781 39%gpu+29%sm+65%pw+14%cpu  36358839 9%gpu+7%sm+16%pw+3%cpu
 Jobs:                 cpu-jobs=319  gpu-jobs=319  gpus=381  no-runtime=5
 ```
 
@@ -303,9 +303,18 @@ units and cannot simply be added -- any exchange rate would be invented, and a
 wrong one decides the ranking by itself -- so each job's waste is expressed as a
 share of the selection's total waste in that measure and the shares are summed.
 Every component is printed (`35%gpu+32%sm+40%pw+23%cpu`), so you can see which
-measure put a job on the list. Only jobs red in at least one measure are
-candidates: a 95%-efficient job can idle 50 GPU-hours just by being enormous, and
-there is nothing to act on there.
+measure put a job on the list.
+
+**A combined row lists only jobs red in *every* measure it names.** `Worst both:`
+means idle by GPU *and* CPU; `Worst all:` means idle by all four. That is what makes
+them unarguable -- and it means they are often absent, which is itself the answer:
+nothing was bad by every measure at once. A job that wastes GPU-time while keeping
+its cores busy stays on `Worst GPU:` alone, where it belongs. The give-away for the
+older behaviour was a `0%pw` term appearing in `Worst all:` -- a job on a
+power-inclusive list that was not drawing idle power.
+
+Only red jobs are candidates at all: a 95%-efficient job can idle 50 GPU-hours just
+by being enormous, and there is nothing to act on there.
 
 The cutoffs come from `[thresholds]` in your config -- the same ones that tint
 the cells and colour `jobscope plot`, so the block is a tally of what you can

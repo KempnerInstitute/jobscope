@@ -421,9 +421,18 @@ in that measure and the shares summed:
 score = sum over measures of  waste(job, measure) / total_waste(measure)
 ```
 
-Every component is printed (`35%gpu+32%sm+40%pw+23%cpu`), so the reader sees which
-measure drove the ranking. A row is omitted when any of its measures wasted
-nothing, since a share of a zero total is undefined.
+Every component is printed (`39%gpu+29%sm+65%pw+14%cpu`), so the reader sees which
+measure drove the ranking. A row is omitted when any of its measures wasted nothing,
+since a share of a zero total is undefined.
+
+**Candidacy is a conjunction**: a job appears only if it is red in *every* metric the
+row names. `Worst both:` is therefore "idle by GPU and by CPU", and `Worst all:`
+"idle by all four". A disjunction put jobs on the four-metric row that were drawing
+full power, recognisable by a `0%pw` component -- the row claimed more than it meant.
+The cost is that a combined row is frequently absent, which is the honest answer when
+no job is bad by every measure at once. Waste in a metric a job is *green* in is
+still counted in that metric's own total and its own `Worst` row; it simply does not
+earn a place in the conjunction.
 
 Note what `Worst all:` costs: three of its four terms describe the same GPUs, so it
 weights GPU idleness roughly 3:1 against CPU idleness. `Worst both:` is the fair

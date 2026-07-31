@@ -632,7 +632,12 @@ class SummaryRenderer:
 
     def _combined_worst(self, headers: Tuple[str, ...]
                         ) -> List[Tuple[float, str, str, List[Tuple[str, float]]]]:
-        """Worst jobs across ``headers``, as shares of each metric's total waste.
+        """Worst jobs red in *every* one of ``headers``, by summed waste share.
+
+        The conjunction is the point: a job on this row is idle by all of the
+        measures it names, so there is nothing to argue about. It also means the row
+        is often absent, which is itself the answer -- nothing was bad by every
+        measure at once.
 
         The metrics are in different units -- GPU-hours, core-hours, GPU-hours below
         a watt floor -- and cannot be added. Any exchange rate between them would be
@@ -649,9 +654,11 @@ class SummaryRenderer:
             return []
         scored = []
         for jid, (wasted, user, red) in self.waste.items():
-            if not red & set(headers):
-                # Candidacy is per row: a job red only in TENSOR% has no business in
-                # a GPU%-plus-CPU% ranking, even though its waste in those is real.
+            if not set(headers) <= red:
+                # Red in *every* metric of the row, not any of them. An OR let a job
+                # that merely wasted some GPU-time onto the four-metric list while
+                # drawing full power; requiring all of them means the row answers
+                # "idle by every measure we have", which is the unambiguous case.
                 continue
             shares = [(h, wasted.get(h, 0.0) / t.waste_total) for h, t in tallies]
             scored.append((sum(v for _h, v in shares), jid, user, shares))
@@ -659,8 +666,8 @@ class SummaryRenderer:
         return scored[:EfficiencyTally.WORST]
 
     def _combined_candidates(self, headers: Tuple[str, ...]) -> int:
-        """How many jobs are red in at least one of ``headers``."""
-        return sum(1 for _w, _u, red in self.waste.values() if red & set(headers))
+        """How many jobs are red in *all* of ``headers``."""
+        return sum(1 for _w, _u, red in self.waste.values() if set(headers) <= red)
 
     def add(self, jobids: List[str], records: Dict[str, JobRecord],
             dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
