@@ -39,7 +39,7 @@ from .dcgm import (
     window_query,
 )
 from .errors import JobscopeError
-from .live_blob import host_stats, stats_dict
+from .live_blob import host_stats_many, stats_dict
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, run_capture
 
@@ -526,10 +526,32 @@ def aggregate_by_job(metrics: LiveMetrics, specs: List[MetricSpec],
     return per_job
 
 
+def per_gpu_by_node_minor(metrics: LiveMetrics, gpus: Dict[str, Gpu],
+                          specs: List[MetricSpec],
+                          ) -> Dict[int, Dict[Tuple[str, str], Dict[str, Optional[float]]]]:
+    """Re-key per-GPU values to ``(node, minor)`` and headers, for ``--hwdetail``.
+
+    The live collectors key by UUID, which is the only unique GPU identity; the
+    detail renderer keys by ``(node, minor)``, which is what the blob uses. MIG
+    siblings share a minor, so they collapse here exactly as they do in the blob --
+    the honest per-instance view is ``--ts``, which keys by UUID throughout.
+    """
+    derived = applicable_derived(specs)
+    out: Dict[int, Dict[Tuple[str, str], Dict[str, Optional[float]]]] = defaultdict(dict)
+    for uuid, gpu in gpus.items():
+        keyed = metrics.get(gpu.jobid, {}).get(uuid)
+        if not keyed:
+            continue
+        by_header = {spec.header: keyed[spec.key] for spec in specs if spec.key in keyed}
+        by_header.update({d.header: keyed[d.key] for d in derived if d.key in keyed})
+        out[gpu.jobid][(gpu.host, str(gpu.minor))] = by_header
+    return out
+
+
 def live_records(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu],
                  metrics: LiveMetrics, specs: List[MetricSpec],
-                 client: PrometheusClient, timeout: Optional[float],
-                 workers: int = 1) -> Dict[str, JobRecord]:
+                 client: PrometheusClient,
+                 timeout: Optional[float] = None) -> Dict[str, JobRecord]:
     """Turn squeue jobs into :class:`~jobscope.sacct.JobRecord`s, keyed by display ID.
 
     This is what lets the live view render through the same code as the historical
@@ -544,30 +566,22 @@ def live_records(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu],
     for gpu in gpus.values():
         gpus_per_job[gpu.jobid].append(gpu)
 
-    def build(item):
-        raw_jobid, job = item
-        elapsed = job.get("elapsed_seconds") or 0
-        at = int(time.time())
-        nodes = host_stats(str(raw_jobid), elapsed, at, client, timeout) if elapsed > 0 else {}
-        stats = stats_dict(elapsed, nodes, _gpu_node_map(gpus_per_job[raw_jobid],
-                                                        metrics.get(raw_jobid, {})))
-        return raw_jobid, stats
-
-    stats_by_job: Dict[int, dict] = {}
-    items = list(jobs.items())
-    if workers > 1 and len(items) > 1:
-        with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
-            for raw_jobid, stats in pool.map(build, items):
-                stats_by_job[raw_jobid] = stats
-    else:
-        for item in items:
-            raw_jobid, stats = build(item)
-            stats_by_job[raw_jobid] = stats
+    # One batched set of cgroup queries for every job, rather than four per job:
+    # a partition-wide selection is hundreds of jobs, and per-job round trips made
+    # that unusable. The GPU half needs no queries at all -- it is assembled from
+    # values already collected, so it honours the instant-versus---avg choice.
+    at = int(time.time())
+    elapsed_by_job = {raw: job["elapsed_seconds"] for raw, job in jobs.items()
+                      if (job.get("elapsed_seconds") or 0) > 0}
+    hosts = host_stats_many(elapsed_by_job, at, client, timeout)
 
     records: Dict[str, JobRecord] = {}
     for raw_jobid, job in jobs.items():
         elapsed = job.get("elapsed_seconds")
         start = job.get("start_epoch")
+        stats = stats_dict(elapsed or 0, hosts.get(raw_jobid, {}),
+                           _gpu_node_map(gpus_per_job[raw_jobid],
+                                         metrics.get(raw_jobid, {})))
         records[job["jobid"]] = JobRecord(
             jobid=job["jobid"],
             state="RUNNING",
@@ -577,7 +591,7 @@ def live_records(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu],
             # so count the hosts the job's GPUs are on, falling back to 1.
             nodes=str(len({g.host for g in gpus_per_job[raw_jobid]}) or 1),
             gpus=len(gpus_per_job[raw_jobid]),
-            stats=stats_by_job.get(raw_jobid, {}),
+            stats=stats,
             start=start,
             end=(start + elapsed) if start and elapsed else int(time.time()),
             duration=elapsed,

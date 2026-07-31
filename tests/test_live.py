@@ -26,7 +26,7 @@ from jobscope.live import (
     specs_for,
     timeseries_step,
 )
-from jobscope.live_blob import synthesize_stats
+from jobscope.live_blob import host_stats_many, synthesize_stats
 from jobscope.report import RenderOptions, live_timeseries
 from jobscope.sacct import JobRecord
 
@@ -406,3 +406,50 @@ def test_collect_instant_stores_by_uuid_and_derives_mem_percent():
     values = metrics[7]["GPU-a"]
     assert values["mem"] == 40.0 and values["memtot"] == 80.0
     assert values["gmempct"] == 50.0
+
+
+# --- batched cgroup queries -------------------------------------------------
+
+def test_host_stats_are_batched_across_jobs():
+    """Four queries in total, not four per job.
+
+    Per-job round trips made a partition-wide live view unusable: 8000 running
+    jobs meant 32000 queries. These series are per-job, so one shared window
+    cannot pull another job's samples in.
+    """
+    class Counting:
+        sampling_period = 60
+
+        def __init__(self):
+            self.queries = []
+
+        def query(self, query, at, timeout=None):
+            self.queries.append(query)
+            return [{"metric": {"host": "node%02d:9306" % j, "jobid": str(j)},
+                     "value": [at, "1"]} for j in (1, 2, 3)]
+
+    client = Counting()
+    out = host_stats_many({1: 100, 2: 200, 3: 300}, 1000, client)
+    assert len(client.queries) == 4          # one per host field, not 4 x 3 jobs
+    assert set(out) == {1, 2, 3}             # demultiplexed on the jobid label
+    # The shared window is the longest job's.
+    assert all("[300s]" in q for q in client.queries)
+
+
+def test_host_stats_many_ignores_unrequested_jobs():
+    class Noisy:
+        sampling_period = 60
+
+        def query(self, query, at, timeout=None):
+            return [{"metric": {"host": "node01:9306", "jobid": "999"},
+                     "value": [at, "1"]}]
+
+    assert host_stats_many({1: 100}, 1000, Noisy()) == {}
+
+
+def test_host_stats_many_is_empty_without_jobs():
+    class Boom:
+        def query(self, *a, **kw):
+            raise AssertionError("no jobs means no queries")
+
+    assert host_stats_many({}, 1000, Boom()) == {}

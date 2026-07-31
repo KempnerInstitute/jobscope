@@ -52,6 +52,19 @@ def _host_query(metric: str, reducer: str, raw_jobid: str, duration: int) -> str
         reducer, metric, raw_jobid, duration)
 
 
+def _host_query_many(metric: str, reducer: str, raw_jobids, duration: int) -> str:
+    """One query covering many jobs, for the live view's partition-wide case.
+
+    Per-job queries cost four round trips each, which is minutes once a selection
+    reaches a few hundred running jobs. Batching is safe because ``cgroup_*`` series
+    are per-job: they do not exist outside their job's lifetime, so sharing one
+    window (the longest job's) cannot pull another job's samples into the result.
+    Values are demultiplexed client-side on the ``jobid`` label.
+    """
+    return "%s_over_time(%s{jobid=~\"^(%s)$\",step='',task=''}[%ds])" % (
+        reducer, metric, "|".join(str(j) for j in raw_jobids), duration)
+
+
 def _gpu_query(metric: str, reducer: str, raw_jobid: str, duration: int) -> str:
     """As above, but GPUs have no jobid label -- the job ID is a *value*.
 
@@ -104,6 +117,34 @@ def host_stats(raw_jobid: str, duration: int, at, client: PrometheusClient,
             if value is not None:
                 nodes.setdefault(_host_of(series), {})[field] = _store_as(field, value)
     return nodes
+
+
+def host_stats_many(jobs: Dict[int, int], at, client: PrometheusClient,
+                    timeout: Optional[float] = None) -> Dict[int, Dict[str, dict]]:
+    """Per-node host fields for many jobs at once, keyed ``{raw_jobid: {node: ...}}``.
+
+    ``jobs`` maps raw job ID to elapsed seconds. Four queries in total rather than
+    four per job -- see :func:`_host_query_many` for why one shared window is safe.
+    """
+    if not jobs:
+        return {}
+    window = max(jobs.values())
+    out: Dict[int, Dict[str, dict]] = {}
+    for field, metric, reducer in _HOST_FIELDS:
+        for series in _query(client, _host_query_many(metric, reducer, jobs, window),
+                             at, timeout):
+            value = _value(series)
+            if value is None:
+                continue
+            try:
+                raw_jobid = int(series["metric"].get("jobid"))
+            except (TypeError, ValueError):
+                continue
+            if raw_jobid not in jobs:
+                continue
+            out.setdefault(raw_jobid, {}).setdefault(
+                _host_of(series), {})[field] = _store_as(field, value)
+    return out
 
 
 def gpu_stats(raw_jobid: str, duration: int, at, client: PrometheusClient,

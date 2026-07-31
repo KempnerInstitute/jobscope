@@ -40,7 +40,7 @@ NOTE_EVERY = 4096
 class Selection:
     """Inputs that determine which jobs to report on."""
 
-    user: str
+    user: Optional[str]
     jobids: List[str] = field(default_factory=list)
     account: Optional[str] = None
     partition: Optional[str] = None
@@ -49,6 +49,7 @@ class Selection:
     days: Optional[int] = None
     starttime: Optional[str] = None
     endtime: Optional[str] = None
+    all_users: bool = False   # sacct -a; `user` is then unset
 
 
 @dataclass
@@ -209,8 +210,11 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
 
     start = selection.starttime or "now-30days"
     end = selection.endtime or "now"
-    cmd = ["sacct", "-u", selection.user, "-X", "-S", start, "-E", end,
+    cmd = ["sacct", "-X", "-S", start, "-E", end,
            "--noheader", "-P", "-o", "JobID,State"]
+    # -a spans every user; otherwise scope to one. Mutually exclusive by
+    # construction -- the CLI rejects -a together with -u.
+    cmd += ["-a"] if selection.all_users else ["-u", selection.user]
     if selection.account:
         cmd += ["-A", selection.account]
     if selection.partition:

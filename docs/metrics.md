@@ -5,8 +5,8 @@ from, how it is reduced over time and across GPUs, and which source wins when tw
 could answer. Read this when a number looks wrong, when two views disagree, or
 before adding a metric.
 
-Companion documents: `jobscope describe` (column reference), `jobscope describe
---dcgm --ext` (full metric catalog), `jobscope live --describe` (live columns).
+Companion documents: `jobscope describe` (column reference) and `jobscope describe
+--dcgm --ext` (the full metric catalog). `--hwdetail` and `--ts` give per-GPU rows.
 
 ---
 
@@ -47,27 +47,41 @@ The rule is one source of truth per number, chosen by job state:
 | finished, blob absent or `JS1:Short` | blank | Prometheus |
 | running | **Prometheus, shaped as a blob** (§5) | Prometheus |
 
-### One column set, three views
+### One column set, one renderer
 
-`summary`, `dcgm` and `live` all render through `SummaryRenderer`, one row per job,
-so a job reads the same either side of its end:
+Every per-job report renders through `SummaryRenderer`, one row per job, so a job
+reads the same either side of its end:
 
 ```
 JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  RUNTIME
 ```
 
-They differ only in how jobs are selected (`sacct` versus `squeue`) and how wide the
-profiling block is (`dcgm --ext`). Because the columns are a pure function of the
-spec list the renderer is handed, the three cannot drift apart.
+Reports differ only in how jobs are selected (`sacct` versus `squeue`, behind
+`jobscope/select.py`) and how wide the profiling block is (`--dcgm`). Because the
+columns are a pure function of the spec list the renderer is handed, the modes
+cannot drift apart.
 
-`NODE` is the node count and `#GPU` the allocated GPU count. For the live view
+`select.resolve` is what makes that true: it yields the same
+`(jobids, records, dcgm_data)` chunks from either source, so no renderer knows
+which it got. Two details let the squeue side pass for the sacct side:
+
+- `live.live_records` synthesizes the blob Slurm has not written yet (§5), so a
+  running job looks like a record with stored stats.
+- `live_blob.host_stats_many` batches the `cgroup_*` queries across every selected
+  job -- four queries in total rather than four per job. Those series are per-job
+  and do not exist outside their job's lifetime, so one shared window (the longest
+  job's) cannot pull another job's samples in. Per-job round trips made a
+  cluster-wide live view unusable: 8000 running jobs meant 32000 queries.
+
+`NODE` is the node count and `#GPU` the allocated GPU count. Under `running`,
 `STATE` is always `RUNNING`, and `CPU%`/`MEM%` are cumulative in both modes --
 CPU-seconds over elapsed x cores, and peak RSS, neither of which has an
 instantaneous form -- while the GPU columns follow the instant-versus-`--avg`
 choice.
 
-**Per-GPU output** is `jobscope detail` and the `--ts` time series, which stay one
-row per GPU (and per MIG instance).
+**Per-GPU output** is `--hwdetail` and the `--ts` time series, which stay one row
+per GPU. `--ts` keys by UUID throughout, so it is the accurate view on a MIG node;
+`--hwdetail` keys by `(node, minor)` like the blob does, which MIG siblings share.
 
 `GMEM%` is derived (`GMEM_GB / GMEM_TOTAL_GB`) rather than queried, and
 `GMEM_TOTAL_GB` is fetched only to feed it, so it is not a column of its own. The
@@ -131,7 +145,7 @@ Two strategies follow from that, and the difference matters:
 - **Historical** (`jobscope/dcgm.py`) filters server-side per job:
   `max_over_time((nvidia_gpu_jobId{slurm_cluster=...} == <raw>)[<duration>s:])`
   evaluated at the job's end. Correct for a job whose window is known.
-- **Live** (`jobscope/live.py`) issues one *unwindowed* instant query for all of
+- **Running** (`jobscope/live.py`) issues one *unwindowed* instant query for all of
   `nvidia_gpu_jobId` and filters client-side by value. This is not an
   optimization — a single GPU can host a dozen jobs in a day, so any windowed
   lookup would hand the same GPU to every job that touched it. One query returns
@@ -223,9 +237,9 @@ siblings are not silently dropped from a job-level mean.
 
 ### Instant versus windowed
 
-`jobscope live` defaults to the newest single scrape — no time reduction at all.
-This is the only view that does, and it is why live numbers need not match
-jobstats. `live --avg` applies the reductions above and does match.
+`jobscope running` defaults to the newest single scrape — no time reduction at
+all. It is the only mode that does, and it is why live numbers need not match
+jobstats. `running --avg` applies the reductions above and does match.
 
 ---
 
@@ -259,8 +273,8 @@ Details that matter:
   endpoint is configured at all, the views say so rather than printing dashes that
   look like idleness.
 
-Because the GPU part uses exactly the query behind `live --avg`, a running job's
-`GPU%` equals the mean of its `live --avg` `GPU%` values by construction.
+Because the GPU part uses exactly the query behind `running --avg`, a running
+job's `GPU%` equals the mean of its `running --avg` values by construction.
 
 ---
 
@@ -348,7 +362,7 @@ On a partitioned node the two exporters disagree about what a GPU *is*:
 
 What follows:
 
-- **`jobscope live` is MIG-correct**: keyed by UUID, one row per instance, labelled
+- **`--ts` is MIG-correct**: keyed by UUID, one row per instance, labelled
   `MIG n.i`. A slice's `memory_total` is the *slice* (e.g. 19.6 GB of a 40 GB
   card), so its `GMEM%` is per-slice.
 - **DCGM columns read `-` on a MIG row.** A `MIG-…` UUID never equals a `GPU-…`
@@ -362,7 +376,7 @@ What follows:
 - **The historical views still collapse MIG rows.** `dcgm` and `detail` key per-GPU
   data by `(node, minor)`, which siblings share, so a four-instance job renders
   three rows. The blob has the same limitation, since it is keyed by minor number.
-  `live` is the accurate view for MIG.
+  `--ts` is the accurate view for MIG.
 
 ---
 
@@ -393,7 +407,7 @@ avg_over_time((nvidia_gpu_duty_cycle and nvidia_gpu_jobId == 34843629)[7200s:])
 nvidia_gpu_duty_cycle{uuid="GPU-..."}
 ```
 
-`jobscope live --ts` emits exactly that last view as CSV, and pipes into
+`jobscope --ts` emits exactly that last view as CSV, and pipes into
 `jobscope plot`.
 
 The endpoint is resolved from configuration (see the README) and commonly embeds a
@@ -410,9 +424,9 @@ are masked.
 - DCGM columns cannot be clipped to GPU ownership (§4), so on a GPU that changed
   hands mid-window they may include a neighbouring job's samples. `nvidia_*`
   columns are clipped and do not have this problem.
-- The live view's ownership query is not scoped to a cluster, so a Prometheus
+- The running view's ownership query is not scoped to a cluster, so a Prometheus
   serving several clusters could in principle collide on job ID.
 - MIG: no DCGM columns, no `GPU%`, and collapsed rows in the historical views (§8).
-- `live --avg` without a filter fans out to roughly one query per job per metric.
+- `running --avg` without a filter fans out to roughly one query per job per metric.
   With a partition or user filter this is a few seconds; unfiltered across a busy
   cluster it is thousands of queries and there is no guard.

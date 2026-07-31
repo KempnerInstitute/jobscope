@@ -1,4 +1,4 @@
-"""Tests for CLI argument handling, validation, and dispatch."""
+"""Tests for the argument tree: mode resolution, validation, and dispatch."""
 
 import argparse
 import dataclasses
@@ -6,114 +6,232 @@ import dataclasses
 import pytest
 
 from jobscope import cli
-from jobscope.cli import _inject_default_subcommand, _prepare_selection, build_parser, main
+from jobscope import select as select_mod
+from jobscope.cli import build_parser, build_request, default_mode, main, resolve_argv
 from jobscope.errors import JobscopeError
+from jobscope.select import FINISHED, JOBIDS, RUNNING
+
+# --- level 1: which jobs ----------------------------------------------------
+
+def test_bare_invocation_is_running():
+    assert resolve_argv([]) == [RUNNING]
 
 
-def test_inject_default_subcommand():
-    assert _inject_default_subcommand([]) == ["summary"]
-    assert _inject_default_subcommand(["-D", "3"]) == ["summary", "-D", "3"]
-    assert _inject_default_subcommand(["12345"]) == ["summary", "12345"]
-    assert _inject_default_subcommand(["summary", "-D", "3"]) == ["summary", "-D", "3"]
-    assert _inject_default_subcommand(["plot"]) == ["plot"]
-    assert _inject_default_subcommand(["--version"]) == ["--version"]
-    assert _inject_default_subcommand(["-h"]) == ["-h"]
+def test_a_window_flag_selects_finished():
+    assert resolve_argv(["-D", "3"]) == [FINISHED, "-D", "3"]
+    assert resolve_argv(["-N", "20"]) == [FINISHED, "-N", "20"]
+    assert resolve_argv(["-S", "2026-07-15"]) == [FINISHED, "-S", "2026-07-15"]
+    assert resolve_argv(["-t", "failed"]) == [FINISHED, "-t", "failed"]
+    assert resolve_argv(["--days=3"]) == [FINISHED, "--days=3"]
 
 
-def _sel_args(**kw):
-    base = dict(user="alice", jobids=[], jobids_opt=None, account=None, partition=None,
-                state="all", lastn=None, days=None, starttime=None, endtime=None)
+def test_option_values_are_not_mistaken_for_jobids():
+    """The bug this replaced: a bare word can be an option's value.
+
+    Scanning argv for non-dash words to spot a JOBID sent `-p kempner_eng` to
+    sacct, because "kempner_eng" looks exactly like a job ID from the outside.
+    Only argparse knows which flags take an argument, so the mode is keyed on flag
+    names alone and JOBIDs are recognised after parsing.
+    """
+    assert default_mode(["-p", "kempner_eng", "--min-elapsed", "0s"]) == RUNNING
+    assert resolve_argv(["-a", "-p", "kempner_eng"]) == [RUNNING, "-a", "-p", "kempner_eng"]
+
+
+def test_explicit_mode_words_pass_through():
+    assert resolve_argv(["running", "--hwdetail"]) == [RUNNING, "--hwdetail"]
+    assert resolve_argv(["finished", "-D", "3"]) == [FINISHED, "-D", "3"]
+
+
+def test_utilities_and_help_pass_through():
+    for argv in (["plot"], ["describe", "--dcgm"], ["config"], ["-h"], ["--version"]):
+        assert resolve_argv(list(argv)) == argv
+
+
+def test_a_jobid_needs_no_mode_word():
+    # Parsed under `running`; build_request switches to JOBIDS once it sees one.
+    assert resolve_argv(["35244230"]) == [RUNNING, "35244230"]
+    assert _request(jobids=["35244230"]).mode == JOBIDS
+
+
+# --- deprecated aliases -----------------------------------------------------
+
+@pytest.mark.parametrize("old,expected,spelling", [
+    ("summary", [FINISHED], "the default"),
+    ("detail", [RUNNING, "--hwdetail"], "--hwdetail"),
+    ("dcgm", [FINISHED, "--dcgm"], "--dcgm"),
+    ("live", [RUNNING], "running"),
+])
+def test_deprecated_subcommands_still_resolve(old, expected, spelling, capsys):
+    argv = resolve_argv([old] + (["-D", "1"] if old in ("summary", "dcgm") else []))
+    assert argv[0] == expected[0]
+    assert spelling in capsys.readouterr().err
+
+
+def test_deprecated_dcgm_keeps_its_extended_catalog():
+    assert "--dcgm" in resolve_argv(["dcgm", "-N", "2"])
+
+
+def test_deprecated_live_is_always_running():
+    # Even though `live` never accepted window flags, be explicit about the mode.
+    assert resolve_argv(["live", "-a"])[0] == RUNNING
+
+
+# --- level 2/3: validation --------------------------------------------------
+
+def _args(**kw):
+    base = dict(mode=RUNNING, jobids=[], jobids_opt=None, days=None, lastn=None,
+                starttime=None, endtime=None, min_elapsed="1h", partition=None,
+                user="alice", all_users=False, account=None, state="all",
+                hwdetail=False, ts=False, view=None, dcgm=False, avg=False,
+                diagnose=False, diag_short=None, header=True, csv=False, step=None,
+                timeout=None, workers=None, config_path=None, explicit_mode=False)
     base.update(kw)
     return argparse.Namespace(**base)
 
 
-def test_default_scope_is_one_day():
-    assert _prepare_selection(_sel_args()).days == 1
+def _request(**kw):
+    return build_request(_args(**kw))
 
 
-def test_jobids_skip_default_scope():
-    assert _prepare_selection(_sel_args(jobids=["1"])).days is None
+def test_finished_defaults_to_one_day():
+    assert _request(mode=FINISHED).days == 1
+
+
+def test_running_needs_no_window():
+    request = _request(mode=RUNNING)
+    assert request.days is None and request.live
+
+
+def test_explicit_jobids_take_no_default_window():
+    assert _request(jobids=["1"]).days is None
+
+
+@pytest.mark.parametrize("flag,kw", [
+    ("-D/--days", {"days": 3}), ("-N/--lastn", {"lastn": 5}),
+    ("-S/--starttime", {"starttime": "2026-07-15"}), ("-E/--endtime", {"endtime": "2026-07-16"}),
+])
+def test_window_flags_are_rejected_for_running(flag, kw):
+    with pytest.raises(JobscopeError) as exc:
+        _request(mode=RUNNING, **kw)
+    # The message must name the flag and offer the fix, not just refuse.
+    assert flag in str(exc.value) and "finished" in str(exc.value)
+
+
+def test_state_is_rejected_for_running():
+    with pytest.raises(JobscopeError) as exc:
+        _request(mode=RUNNING, state="failed")
+    assert "-t/--state" in str(exc.value)
+
+
+def test_avg_is_rejected_for_finished():
+    with pytest.raises(JobscopeError) as exc:
+        _request(mode=FINISHED, avg=True)
+    assert "--avg" in str(exc.value)
+
+
+def test_avg_is_accepted_for_running():
+    assert _request(mode=RUNNING, avg=True).average is True
 
 
 def test_days_must_be_positive():
     with pytest.raises(JobscopeError):
-        _prepare_selection(_sel_args(days=0))
+        _request(mode=FINISHED, days=0)
 
 
-def test_days_conflicts_with_lastn():
+def test_days_conflicts_with_lastn_and_window():
     with pytest.raises(JobscopeError):
-        _prepare_selection(_sel_args(days=3, lastn=5))
-
-
-def test_days_conflicts_with_window():
+        _request(mode=FINISHED, days=3, lastn=5)
     with pytest.raises(JobscopeError):
-        _prepare_selection(_sel_args(days=3, starttime="2026-01-01T00:00:00"))
+        _request(mode=FINISHED, days=3, starttime="2026-01-01")
 
 
 def test_lastn_must_be_positive():
     with pytest.raises(JobscopeError):
-        _prepare_selection(_sel_args(lastn=-1))
+        _request(mode=FINISHED, lastn=-1)
 
 
-def test_starttime_alone_selects_single_day():
-    sel = _prepare_selection(_sel_args(starttime="2026-07-15"))
-    assert sel.starttime == "2026-07-15"
-    assert sel.endtime == "2026-07-16T00:00:00"
+def test_all_users_conflicts_with_user():
+    with pytest.raises(JobscopeError):
+        _request(all_users=True, user="alice")
 
 
-def test_starttime_with_endtime_left_alone():
-    sel = _prepare_selection(_sel_args(starttime="2026-07-15", endtime="2026-07-20"))
-    assert sel.endtime == "2026-07-20"
+def test_all_users_clears_the_user():
+    request = _request(all_users=True, user=None)
+    assert request.all_users and request.user is None
 
 
-def test_starttime_relative_leaves_window_open():
-    sel = _prepare_selection(_sel_args(starttime="now-2days"))
-    assert sel.endtime is None
+def test_bad_min_elapsed_is_rejected():
+    with pytest.raises(JobscopeError):
+        _request(min_elapsed="1 hour")
+
+
+def test_jobids_warn_about_ignored_filters(capsys):
+    request = _request(jobids=["1"], days=3, partition="kempner")
+    err = capsys.readouterr().err
+    assert "explicit JOBIDs" in err and "-D/--days" in err and "-p/--partition" in err
+    assert request.mode == JOBIDS
+
+
+def test_partition_survives_in_both_modes():
+    assert _request(mode=RUNNING, partition="kempner").partition == "kempner"
+    assert _request(mode=FINISHED, partition="kempner").partition == "kempner"
+
+
+# --- granularity and columns compose ---------------------------------------
+
+def test_hwdetail_and_ts_are_mutually_exclusive():
+    _, subparsers = build_parser()
+    with pytest.raises(SystemExit):
+        subparsers.choices[RUNNING].parse_intermixed_args(["--hwdetail", "--ts"])
+
+
+def test_cpu_and_gpu_are_mutually_exclusive():
+    _, subparsers = build_parser()
+    with pytest.raises(SystemExit):
+        subparsers.choices[RUNNING].parse_intermixed_args(["--cpu", "--gpu"])
+
+
+@pytest.mark.parametrize("mode", [RUNNING, FINISHED])
+@pytest.mark.parametrize("argv", [
+    [], ["--hwdetail"], ["--ts"], ["--cpu"], ["--gpu"], ["--dcgm"], ["--diagnose"],
+    ["--hwdetail", "--dcgm"], ["--ts", "--dcgm"], ["--gpu", "--dcgm", "--diagnose"],
+    ["-p", "kempner"], ["-a"], ["--csv"], ["-n"],
+])
+def test_every_option_parses_in_every_mode(mode, argv):
+    """The point of the restructure: no option is stranded on one mode."""
+    _, subparsers = build_parser()
+    args = subparsers.choices[mode].parse_intermixed_args(argv)
+    assert args.mode == mode
 
 
 def test_args_order_independent():
     _, subparsers = build_parser()
-    summary = subparsers.choices["summary"]
-    a1 = summary.parse_intermixed_args(["-D", "3", "111", "222"])
-    a2 = summary.parse_intermixed_args(["111", "-D", "3", "222"])
-    a3 = summary.parse_intermixed_args(["111", "222", "-D", "3"])
+    finished = subparsers.choices[FINISHED]
+    a1 = finished.parse_intermixed_args(["-D", "3", "111", "222"])
+    a2 = finished.parse_intermixed_args(["111", "-D", "3", "222"])
+    a3 = finished.parse_intermixed_args(["111", "222", "-D", "3"])
     assert a1.jobids == a2.jobids == a3.jobids == ["111", "222"]
     assert a1.days == a2.days == a3.days == 3
 
 
 def test_jobid_flag_merges_with_positional():
     _, subparsers = build_parser()
-    summary = subparsers.choices["summary"]
-    for argv in (["111", "222"], ["-j", "111", "-j", "222"]):
-        args = summary.parse_intermixed_args(argv)
-        args.user = "alice"
-        assert _prepare_selection(args).jobids == ["111", "222"]
-    # Mixing the positional and -j still collects both IDs.
-    mixed = summary.parse_intermixed_args(["-j", "111", "222"])
-    mixed.user = "alice"
-    assert set(_prepare_selection(mixed).jobids) == {"111", "222"}
+    for argv in (["111", "222"], ["-j", "111", "-j", "222"], ["-j", "111", "222"]):
+        args = subparsers.choices[FINISHED].parse_intermixed_args(argv)
+        args.mode, args.user = FINISHED, "alice"
+        assert set(build_request(args).jobids) == {"111", "222"}
 
 
-def test_jobids_warn_on_ignored_selectors(capsys):
-    sel = _prepare_selection(_sel_args(jobids=["1"], days=3))
-    err = capsys.readouterr().err
-    assert "ignoring time selectors" in err and "-D/--days" in err
-    assert sel.jobids == ["1"] and sel.days is None
+def test_diag_short_replaces_the_old_min_runtime():
+    _, subparsers = build_parser()
+    args = subparsers.choices[FINISHED].parse_intermixed_args(["--diag-short", "300"])
+    assert args.diag_short == 300
+    # --min-runtime now means the runtime floor, not the DIAG threshold.
+    args = subparsers.choices[RUNNING].parse_intermixed_args(["--min-runtime", "5m"])
+    assert args.min_elapsed == "5m"
 
 
-def test_main_jobid_intermixed_with_flags(monkeypatch, cpu_record):
-    seen = {}
-
-    def fake_select(selection, timeout):
-        seen["jobids"] = list(selection.jobids)
-        return (list(selection.jobids), "1 job ID(s)")
-
-    monkeypatch.setattr(cli, "select_jobs", fake_select)
-    monkeypatch.setattr(cli, "fetch", lambda ids, timeout: {i: cpu_record for i in ids})
-    # JOBID before a flag, and no subcommand -> exercises injection + intermixed parse.
-    main(["--cpu", "111", "-u", "bob"])
-    assert seen["jobids"] == ["111"]
-
+# --- dispatch ---------------------------------------------------------------
 
 def test_describe_command(capsys):
     main(["describe"])
@@ -124,7 +242,6 @@ def test_describe_dcgm_ext(capsys):
     main(["describe", "--dcgm", "--ext"])
     out = capsys.readouterr().out
     assert "DCGM GPU metrics" in out
-    # The count is derived from the catalog, so it cannot drift out of date.
     from jobscope.dcgm import ALL_SPECS
     assert "%d metrics" % len(ALL_SPECS) in out
 
@@ -140,126 +257,76 @@ def test_version(capsys):
     assert "jobscope" in capsys.readouterr().out
 
 
-def test_summary_cpu_offline(monkeypatch, capsys, cpu_record):
-    monkeypatch.setattr(cli, "select_jobs", lambda selection, timeout: (["200"], "last 1 day"))
-    monkeypatch.setattr(cli, "fetch_chunks",
-                        lambda ids, timeout: iter([(list(ids), {"200": cpu_record})]))
-    main(["summary", "--cpu", "-D", "1", "-u", "bob"])
+def _patch_sacct(monkeypatch, records, chunks=None, ids=None):
+    """Stub the sacct side of the selection layer."""
+    ids = ids if ids is not None else list(records)
+    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, timeout: (ids, "last 1 day"))
+    monkeypatch.setattr(select_mod, "fetch", lambda i, timeout: records)
+    monkeypatch.setattr(select_mod, "fetch_chunks",
+                        lambda i, timeout: iter(chunks if chunks is not None
+                                                else [(list(i), records)]))
+
+
+def test_finished_cpu_view(monkeypatch, capsys, cpu_record):
+    _patch_sacct(monkeypatch, {"200": cpu_record})
+    main(["finished", "--cpu", "-D", "1", "-u", "bob"])
     out = capsys.readouterr().out
-    assert "200" in out and "CPU%" in out
+    assert "200" in out and "CPU%" in out and "SM_ACT%" not in out
 
 
-def test_summary_streams_chunks_per_batch(monkeypatch, capsys, gpu_record):
+def test_finished_streams_chunks_per_batch(monkeypatch, capsys, gpu_record):
     rec2 = dataclasses.replace(gpu_record, jobid="101", name="eval")
     records = {"100": gpu_record, "101": rec2}
-    monkeypatch.setattr(cli, "select_jobs",
-                        lambda selection, timeout: (["100", "101"], "last 1 day"))
-    monkeypatch.setattr(cli, "fetch_chunks",
-                        lambda ids, timeout: iter([(["100"], records), (["101"], records)]))
+    _patch_sacct(monkeypatch, records, chunks=[(["100"], records), (["101"], records)],
+                 ids=["100", "101"])
     clients = []
-    monkeypatch.setattr(cli, "client_from_config",
+    monkeypatch.setattr(select_mod, "client_from_config",
                         lambda cfg, timeout: clients.append(1) or object())
     overall = {"SM_ACT%": 60.0, "OCC%": 20.0, "TENSOR%": 5.0, "DRAM%": 10.0, "POWER_W": 400.0}
-    seen_chunks = []
+    seen = []
 
     def fake_compute(records_arg, chunk_ids, *a, **k):
-        seen_chunks.append(list(chunk_ids))
+        seen.append(list(chunk_ids))
         return {j: (overall, {}) for j in chunk_ids}
 
-    monkeypatch.setattr(cli, "compute_dcgm", fake_compute)
-    main(["summary", "--gpu", "-D", "1", "-u", "alice"])
+    monkeypatch.setattr(select_mod, "compute_dcgm", fake_compute)
+    main(["finished", "-D", "1", "-u", "alice"])
     out = capsys.readouterr().out
-    assert seen_chunks == [["100"], ["101"]]  # DCGM computed per chunk
-    assert len(clients) == 1                  # Prometheus client created once
-    assert "100" in out and "101" in out
-    assert out.count("Mean:") == 1
-    assert out.index("Mean:") > out.index("101")
-
-
-def test_summary_gpu_chunk_without_gpu_defers_client(monkeypatch, capsys, gpu_record, cpu_record):
-    monkeypatch.setattr(cli, "select_jobs",
-                        lambda selection, timeout: (["200", "100"], "last 1 day"))
-    monkeypatch.setattr(cli, "fetch_chunks",
-                        lambda ids, timeout: iter([
-                            (["200"], {"200": cpu_record}),
-                            (["100"], {"200": cpu_record, "100": gpu_record})]))
-    clients = []
-    monkeypatch.setattr(cli, "client_from_config",
-                        lambda cfg, timeout: clients.append(1) or object())
-    monkeypatch.setattr(cli, "compute_dcgm", lambda *a, **k: {"100": ({}, {})})
-    main(["summary", "--gpu", "-D", "1", "-u", "alice"])
-    out = capsys.readouterr().out
-    assert len(clients) == 1  # not created for the cpu-only chunk, once for the gpu one
-    assert "100" in out
+    assert seen == [["100"], ["101"]]      # DCGM computed per chunk, still streaming
+    assert len(clients) == 1               # one Prometheus client
+    assert out.count("Mean:") == 1 and out.index("Mean:") > out.index("101")
 
 
 def test_explicit_jobids_do_not_stream(monkeypatch, capsys, cpu_record):
-    called = {}
-
-    def fake_fetch(ids, timeout):
-        called["ids"] = list(ids)
-        return {"111": cpu_record}
-
     def no_stream(*a, **k):
         raise AssertionError("fetch_chunks must not be used for explicit job IDs")
 
-    monkeypatch.setattr(cli, "fetch", fake_fetch)
-    monkeypatch.setattr(cli, "fetch_chunks", no_stream)
-    main(["summary", "--cpu", "111", "-u", "bob"])
-    assert called["ids"] == ["111"]
+    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: (["111"], "1 job ID(s)"))
+    monkeypatch.setattr(select_mod, "fetch", lambda i, t: {"111": cpu_record})
+    monkeypatch.setattr(select_mod, "fetch_chunks", no_stream)
+    main(["--cpu", "111"])
     assert "111" in capsys.readouterr().out
 
 
-def test_detail_streams_chunks(monkeypatch, capsys, cpu_record):
-    rec2 = dataclasses.replace(cpu_record, jobid="201")
-    monkeypatch.setattr(cli, "select_jobs",
-                        lambda selection, timeout: (["200", "201"], "last 1 day"))
-    monkeypatch.setattr(cli, "fetch_chunks",
-                        lambda ids, timeout: iter([
-                            (["200"], {"200": cpu_record}),
-                            (["201"], {"200": cpu_record, "201": rec2})]))
-    main(["detail", "--cpu", "-D", "1", "-u", "bob"])
+def test_hwdetail_renders_per_gpu_rows(monkeypatch, capsys, gpu_record):
+    _patch_sacct(monkeypatch, {"100": gpu_record})
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: object())
+    monkeypatch.setattr(select_mod, "compute_dcgm",
+                        lambda *a, **k: {"100": ({}, {("node01", "0"): {"SM_ACT%": 80.0}})})
+    main(["finished", "--hwdetail", "-D", "1", "-u", "alice"])
     out = capsys.readouterr().out
-    assert out.index("Job 200") < out.index("Job 201")
+    assert "Job 100" in out and "NODE" in out and "node01" in out
 
 
-def test_summary_gpu_wires_dcgm(monkeypatch, capsys, gpu_record):
-    monkeypatch.setattr(cli, "select_jobs", lambda selection, timeout: (["100"], "x"))
-    monkeypatch.setattr(cli, "fetch", lambda ids, timeout: {"100": gpu_record})
-    monkeypatch.setattr(cli, "client_from_config", lambda cfg, timeout: object())
-    overall = {"SM_ACT%": 60.0, "OCC%": 20.0, "TENSOR%": 5.0, "DRAM%": 10.0, "POWER_W": 400.0}
-    monkeypatch.setattr(cli, "compute_dcgm", lambda *a, **k: {"100": (overall, {})})
-    main(["summary", "--gpu", "-u", "alice", "100"])
-    out = capsys.readouterr().out
-    assert "SM_ACT%" in out and "60.0" in out
-
-
-def test_dcgm_ts_requires_one_jobid(capsys):
-    with pytest.raises(SystemExit):
-        main(["dcgm", "--ts", "1", "2"])
-    assert "one job at a time" in capsys.readouterr().err
-
-
-def test_no_matching_jobs(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "select_jobs", lambda selection, timeout: ([], "last 1 day"))
-    main(["summary", "--cpu", "-u", "nobody"])
+def test_no_matching_jobs_is_not_an_error(monkeypatch, capsys):
+    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, timeout: ([], "last 1 day"))
+    main(["finished", "--cpu", "-u", "nobody"])
     assert "No matching jobs" in capsys.readouterr().err
 
 
-def test_dcgm_table(monkeypatch, capsys, gpu_record):
-    monkeypatch.setattr(cli, "select_jobs", lambda selection, timeout: (["100"], "x"))
-    monkeypatch.setattr(cli, "fetch", lambda ids, timeout: {"100": gpu_record})
-    monkeypatch.setattr(cli, "client_from_config", lambda cfg, timeout: object())
-    per_gpu = {("node01", "0"): {"SM_ACT%": 80.0}}
-    monkeypatch.setattr(cli, "compute_dcgm", lambda *a, **k: {"100": ({}, per_gpu)})
-    main(["dcgm", "-u", "alice", "100"])
-    out = capsys.readouterr().out
-    assert "SM_ACT%" in out and "100" in out and "COMPLETED" in out
-
-
-def test_dcgm_timeseries(monkeypatch, capsys, gpu_record):
-    monkeypatch.setattr(cli, "select_jobs", lambda selection, timeout: (["100"], "x"))
-    monkeypatch.setattr(cli, "fetch", lambda ids, timeout: {"100": gpu_record})
+def test_finished_timeseries(monkeypatch, capsys, gpu_record):
+    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: (["100"], "x"))
+    monkeypatch.setattr(select_mod, "fetch", lambda i, t: {"100": gpu_record})
 
     class Client:
         sampling_period = 60
@@ -271,92 +338,24 @@ def test_dcgm_timeseries(monkeypatch, capsys, gpu_record):
             return ([{"metric": {"UUID": "U0"}, "values": [[1000, "0.8"]]}]
                     if "DCGM_FI_PROF_SM_ACTIVE" in query else [])
 
-    monkeypatch.setattr(cli, "client_from_config", lambda cfg, timeout: Client())
-    main(["dcgm", "--ts", "-u", "alice", "100"])
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: Client())
+    main(["--ts", "100"])
     out = capsys.readouterr().out
-    assert "EPOCH" in out and "80.0" in out
+    assert out.startswith("JOBID,EPOCH,TIME,NODE,GPU,") and "80.0" in out
 
 
-# --- the live subcommand ----------------------------------------------------
+# --- the running branch -----------------------------------------------------
 
-def _live_args(**kw):
-    base = dict(jobids=[], jobids_opt=None, partition=None, user=None, all_users=False,
-                min_elapsed="1h")
-    base.update(kw)
-    return argparse.Namespace(**base)
-
-
-def test_live_is_a_known_subcommand():
-    assert "live" in cli.SUBCOMMANDS
-    assert _inject_default_subcommand(["live", "-a"]) == ["live", "-a"]
-    _, subparsers = build_parser()
-    assert "live" in subparsers.choices
-
-
-def test_live_defaults_to_the_current_user():
-    assert cli._live_selection(_live_args(user="alice")).user == "alice"
-
-
-def test_live_all_users_clears_the_user_filter():
-    assert cli._live_selection(_live_args(all_users=True)).user is None
-
-
-def test_live_all_users_conflicts_with_user():
-    with pytest.raises(JobscopeError):
-        cli._live_selection(_live_args(all_users=True, user="alice"))
-
-
-def test_live_rejects_a_bad_runtime_floor_even_with_no_jobs():
-    # Validated up front, so a typo is never silently ignored.
-    with pytest.raises(JobscopeError):
-        cli._live_selection(_live_args(user="alice", min_elapsed="1 hour"))
-
-
-def test_live_jobids_bypass_the_filters(capsys):
-    selection = cli._live_selection(_live_args(jobids=["100_6"], partition="kempner"))
-    err = capsys.readouterr().err
-    assert "ignoring the -p/-u/-a filters" in err
-    assert selection.jobids == ["100_6"] and selection.user is None
-
-
-def test_live_jobid_flag_merges_with_positional():
-    _, subparsers = build_parser()
-    args = subparsers.choices["live"].parse_intermixed_args(["-j", "111", "222"])
-    args.user = "alice"
-    assert set(cli._live_selection(args).jobids) == {"111", "222"}
-
-
-def test_live_args_order_independent():
-    _, subparsers = build_parser()
-    live = subparsers.choices["live"]
-    a1 = live.parse_intermixed_args(["-p", "kempner", "111"])
-    a2 = live.parse_intermixed_args(["111", "-p", "kempner"])
-    assert a1.jobids == a2.jobids == ["111"] and a1.partition == a2.partition == "kempner"
-
-
-def test_live_describe_needs_no_cluster_access(capsys, monkeypatch):
-    def boom(*a, **k):
-        raise AssertionError("--describe must not query squeue or Prometheus")
-
-    monkeypatch.setattr(cli, "fetch_jobs", boom)
-    monkeypatch.setattr(cli, "client_from_config", boom)
-    main(["live", "--describe"])
-    out = capsys.readouterr().out
-    assert "jobscope live columns" in out and "GPU%" in out
-
-
-def test_live_describe_reflects_the_column_selection(capsys):
-    main(["live", "--all", "--describe"])
-    out = capsys.readouterr().out
-    assert "SM_ACT%" in out and "MEM%" in out
-    # --all pulls in the extended catalog...
-    assert "NVLINK_MBs" in out
-    # ...but never the delta-reduced counter, which a snapshot cannot express.
-    assert "ENERGY_kWh" not in out
+GIB = 1024 ** 3
 
 
 class _LiveClient:
-    """Prometheus stand-in for the live path: one GPU on one job."""
+    """Prometheus stand-in for the squeue branch: one GPU on one job.
+
+    Serves the NVML and cgroup series as well as a DCGM one, because the live path
+    reconstructs the utilization blob from them -- without those, a running job has
+    no per-GPU rows to show under --hwdetail.
+    """
 
     sampling_period = 60
 
@@ -364,6 +363,21 @@ class _LiveClient:
         if "nvidia_gpu_jobId" in query:
             return [{"metric": {"uuid": "U0", "host": "node01:9445", "minor_number": "3"},
                      "value": [at, "4.2e+07"]}]
+        nvml = {"nvidia_gpu_duty_cycle": 90,
+                "nvidia_gpu_memory_used_bytes": 40 * GIB,
+                "nvidia_gpu_memory_total_bytes": 80 * GIB}
+        for name, value in nvml.items():
+            if name in query:
+                return [{"metric": {"uuid": "U0"}, "value": [at, str(value)]}]
+        cgroup = {"cgroup_cpus": 2, "cgroup_cpu_total_seconds": 5400,
+                  "cgroup_memory_rss_bytes": 8 * GIB,
+                  "cgroup_memory_total_bytes": 16 * GIB}
+        for name, value in cgroup.items():
+            if name in query:
+                # The jobid label matters: these are batched into one query per
+                # field across every job, then demultiplexed on it.
+                return [{"metric": {"host": "node01:9306", "jobid": "42000000"},
+                         "value": [at, str(value)]}]
         if "DCGM_FI_PROF_SM_ACTIVE" in query:
             return [{"metric": {"UUID": "U0"}, "value": [at, "0.776"]}]
         return []
@@ -377,94 +391,108 @@ _LIVE_JOB = {42000000: {"jobid": "100_6", "user": "alice", "node": "node01", "na
                         "start_epoch": 1000, "elapsed_seconds": 3600}}
 
 
-def test_live_table_renders(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "fetch_jobs", lambda selection, timeout: dict(_LIVE_JOB))
-    monkeypatch.setattr(cli, "client_from_config", lambda cfg, timeout: _LiveClient())
-    main(["live", "-j", "100_6"])
+def _patch_squeue(monkeypatch):
+    monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, timeout: dict(_LIVE_JOB))
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: _LiveClient())
+
+
+def test_running_table(monkeypatch, capsys):
+    _patch_squeue(monkeypatch)
+    main(["running", "-j", "100_6"])
     out = capsys.readouterr().out
-    assert "100_6" in out and "alice" in out and "RUNNING" in out
-    # One row per job now, so the per-GPU label is gone and SM_ACT% is aggregated.
-    assert "77.6" in out and "GPU 3" not in out
+    assert "100_6" in out and "alice" in out and "RUNNING" in out and "77.6" in out
+    # CPU% comes from cgroup_*: 100 * 5400 / (3600 * 2) = 75.
+    assert "75" in out
 
 
-def test_live_reports_the_jobs_owner_not_the_filter(monkeypatch, capsys):
-    # With explicit JOBIDs the -u filter is bypassed, so naming a user would lie.
-    monkeypatch.setattr(cli, "fetch_jobs", lambda selection, timeout: dict(_LIVE_JOB))
-    monkeypatch.setattr(cli, "client_from_config", lambda cfg, timeout: _LiveClient())
-    main(["live", "-j", "100_6"])
-    assert "alice" in capsys.readouterr().out
+def test_running_is_the_default_mode(monkeypatch, capsys):
+    _patch_squeue(monkeypatch)
+
+    def no_sacct(*a, **k):
+        raise AssertionError("a bare invocation must not reach sacct")
+
+    monkeypatch.setattr(select_mod, "select_jobs", no_sacct)
+    main([])
+    assert "RUNNING" in capsys.readouterr().out
 
 
-def test_live_timeseries_ignores_avg_with_a_note(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "fetch_jobs", lambda selection, timeout: dict(_LIVE_JOB))
-    monkeypatch.setattr(cli, "client_from_config", lambda cfg, timeout: _LiveClient())
-    main(["live", "-j", "100_6", "--ts", "--avg"])
-    captured = capsys.readouterr()
-    assert "--avg ignored with --ts" in captured.err
-    assert captured.out.startswith("JOBID,EPOCH,TIME,NODE,GPU,")
+def test_running_hwdetail(monkeypatch, capsys):
+    """The per-GPU granularity for a running job, off the reconstructed blob."""
+    _patch_squeue(monkeypatch)
+    main(["running", "--hwdetail", "-j", "100_6"])
+    out = capsys.readouterr().out
+    assert "Job 100_6" in out and "node01" in out
+    assert "NODE" in out and "GPU" in out
+    assert "77.6" in out                    # the DCGM column, keyed (node, minor)
 
 
-def test_live_no_matching_jobs_is_not_an_error(monkeypatch, capsys):
-    monkeypatch.setattr(cli, "fetch_jobs", lambda selection, timeout: {})
-    main(["live", "-a"])
+def test_running_timeseries(monkeypatch, capsys):
+    _patch_squeue(monkeypatch)
+    main(["running", "--ts", "-j", "100_6"])
+    out = capsys.readouterr().out
+    assert out.startswith("JOBID,EPOCH,TIME,NODE,GPU,")
+
+
+def test_running_no_matching_jobs(monkeypatch, capsys):
+    monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, timeout: {})
+    main(["running", "-a"])
     assert "No running jobs match" in capsys.readouterr().err
 
 
-# --- reconstructing the blob for running jobs -------------------------------
+def test_diagnose_ignored_for_the_cpu_view(monkeypatch, capsys, cpu_record):
+    _patch_sacct(monkeypatch, {"200": cpu_record})
+    main(["finished", "--cpu", "--diagnose", "-D", "1", "-u", "bob"])
+    assert "ignoring it for --cpu" in capsys.readouterr().err
 
-def _running_record(gpu_record):
-    return dataclasses.replace(gpu_record, jobid="300", state="RUNNING", stats={})
 
-
-def test_running_job_blob_is_reconstructed(monkeypatch, capsys, gpu_record):
-    """A running job has no stored blob, so GPU%/GMEM% would otherwise be '-'."""
-    running = _running_record(gpu_record)
-    monkeypatch.setattr(cli, "select_jobs", lambda selection, timeout: (["300"], "last 1 day"))
-    monkeypatch.setattr(cli, "fetch_chunks",
-                        lambda ids, timeout: iter([(["300"], {"300": running})]))
-    monkeypatch.setattr(cli, "client_from_config", lambda cfg, timeout: object())
-    monkeypatch.setattr(cli, "compute_dcgm", lambda *a, **k: {"300": ({}, {})})
+def test_running_blob_is_reconstructed(monkeypatch, capsys, gpu_record):
+    """A running job selected by ID has no blob, so it is rebuilt from Prometheus."""
+    running = dataclasses.replace(gpu_record, jobid="300", state="RUNNING", stats={})
+    _patch_sacct(monkeypatch, {"300": running})
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: object())
+    monkeypatch.setattr(select_mod, "compute_dcgm", lambda *a, **k: {"300": ({}, {})})
 
     def fake_fill(records, ids, client, timeout=None, workers=1):
         records["300"].stats = gpu_record.stats
         return 1
 
-    monkeypatch.setattr(cli, "fill_running", fake_fill)
-    main(["summary", "--gpu", "-D", "1", "-u", "alice"])
+    monkeypatch.setattr(select_mod, "fill_running", fake_fill)
+    main(["300"])
     out = capsys.readouterr().out
-    # The blob fixture yields gpu=70, gmem=50 (see tests/conftest.py).
-    assert "70" in out and "50" in out
+    assert "70" in out and "50" in out      # the blob fixture's gpu/gmem
 
 
 def test_offline_view_warns_when_no_endpoint_can_fill(monkeypatch, capsys, gpu_record):
-    running = _running_record(gpu_record)
-    monkeypatch.setattr(cli, "select_jobs", lambda selection, timeout: (["300"], "last 1 day"))
-    monkeypatch.setattr(cli, "fetch_chunks",
-                        lambda ids, timeout: iter([(["300"], {"300": running})]))
+    running = dataclasses.replace(gpu_record, jobid="300", state="RUNNING", stats={})
+    _patch_sacct(monkeypatch, {"300": running})
 
     def no_endpoint(cfg, timeout):
         raise JobscopeError("no Prometheus endpoint configured")
 
-    monkeypatch.setattr(cli, "client_from_config", no_endpoint)
-    main(["summary", "--cpu", "-D", "1", "-u", "alice"])
+    monkeypatch.setattr(select_mod, "client_from_config", no_endpoint)
+    main(["finished", "--cpu", "-D", "1", "-u", "alice"])
     err = capsys.readouterr().err
     assert "no Prometheus" in err and "blank" in err
 
 
 def test_finished_job_blob_is_never_recomputed(monkeypatch, capsys, gpu_record):
-    """A completed job must report what Slurm stored, not a fresh query."""
-    monkeypatch.setattr(cli, "select_jobs", lambda selection, timeout: (["100"], "last 1 day"))
-    monkeypatch.setattr(cli, "fetch_chunks",
-                        lambda ids, timeout: iter([(["100"], {"100": gpu_record})]))
-    monkeypatch.setattr(cli, "client_from_config", lambda cfg, timeout: object())
-    monkeypatch.setattr(cli, "compute_dcgm", lambda *a, **k: {"100": ({}, {})})
+    _patch_sacct(monkeypatch, {"100": gpu_record})
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: object())
+    monkeypatch.setattr(select_mod, "compute_dcgm", lambda *a, **k: {"100": ({}, {})})
 
     def boom(*a, **k):
         raise AssertionError("a stored blob must not be refetched")
 
-    monkeypatch.setattr(cli, "fill_running", boom)
-    main(["summary", "--gpu", "-D", "1", "-u", "alice"])
+    monkeypatch.setattr(select_mod, "fill_running", boom)
+    main(["finished", "-D", "1", "-u", "alice"])
     assert "100" in capsys.readouterr().out
+
+
+def test_workers_must_be_positive(monkeypatch, capsys, cpu_record):
+    _patch_sacct(monkeypatch, {"200": cpu_record})
+    with pytest.raises(SystemExit):
+        main(["finished", "--workers", "0", "-D", "1"])
+    assert "--workers" in capsys.readouterr().err
 
 
 def test_config_path(capsys):
@@ -475,3 +503,7 @@ def test_config_path(capsys):
 def test_config_summary(capsys):
     main(["config"])
     assert "config path" in capsys.readouterr().out
+
+
+def test_cli_module_exposes_the_mode_words():
+    assert cli.MODES == (RUNNING, FINISHED)

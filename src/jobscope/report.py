@@ -31,7 +31,7 @@ from .dcgm import (
     values_by_key,
 )
 from .diagnose import LEGEND, diagnose_dcgm
-from .live import Gpu, LiveJob, build_columns, job_sort_key
+from .live import Gpu, LiveJob, build_columns, job_sort_key, timeseries_step
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, Selection
 
@@ -70,8 +70,8 @@ SUMMARY_COLUMNS: List[Column] = [
     Column("TENSOR%", "{:<8}", "dcgm"),
     Column("DRAM%", "{:<7}", "dcgm"),
     Column("POWER_W", "{:<8}", "dcgm"),
-    Column("DIAG", "{:<22}", "diag"),
     Column("RUNTIME", "{:<12}", "id"),
+    Column("DIAG", "{:<22}", "diag"),
 ]
 
 
@@ -96,6 +96,7 @@ def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
         else:
             out.append(col)
     return out
+
 
 DETAIL_COLUMNS: List[Column] = [
     Column("NODE", "{:<16}", "id", 0),
@@ -149,7 +150,7 @@ SUMMARY_DESCRIPTIONS: List[Tuple[str, str, str]] = [
 class RenderOptions:
     """Flags shared by the rendering functions."""
 
-    view: str = "gpu"
+    view: str = "all"
     show_dcgm: bool = False
     diagnose: bool = False
     csv: bool = False
@@ -166,19 +167,20 @@ def cols_for(columns: List[Column], view: str, dcgm: bool = False,
              diagnose: bool = False) -> List[Column]:
     """The columns to show for the chosen view.
 
-    ``blob`` and ``id`` columns are always shown. ``cpu``/``gpu`` narrow to one
-    resource for the ``--cpu``/``--cgpu`` views, which stay offline; DCGM columns
-    belong to the gpu view (the only one that reaches Prometheus for them), and DIAG
-    is added there by --diagnose.
+    ``all`` (the default) shows everything; ``--cpu`` and ``--gpu`` narrow it to one
+    resource. ``id``/``blob`` columns identify the row and appear in every view. The
+    DCGM block needs Prometheus, so it belongs to the views that carry GPU columns,
+    and DIAG rides along with it under --diagnose.
     """
+    gpu_views = ("all", "gpu")
     out = []
     for col in columns:
         group = col.group
         if (group in ("id", "blob")
-                or (group == "cpu" and view in ("cpu", "cgpu", "gpu"))
-                or (group == "gpu" and view in ("gpu", "cgpu"))
-                or (group == "dcgm" and dcgm and view == "gpu")
-                or (group == "diag" and diagnose and dcgm and view == "gpu")):
+                or (group == "cpu" and view in ("all", "cpu"))
+                or (group == "gpu" and view in gpu_views)
+                or (group == "dcgm" and dcgm and view in gpu_views)
+                or (group == "diag" and diagnose and dcgm and view in gpu_views)):
             out.append(col)
     return out
 
@@ -195,7 +197,8 @@ def context_pairs(selection: Selection, desc: str,
         owners = sorted({r.user for r in records.values() if r.user})
         user_val = ", ".join(owners) if owners else "(explicit job IDs)"
         return [("User", user_val), ("Select", desc)]
-    pairs = [("User", selection.user)]
+    # -a/--all-users leaves `user` unset, so say so rather than printing None.
+    pairs = [("User", selection.user or "(all users)")]
     if selection.account:
         pairs.append(("Account", selection.account))
     if selection.partition:
@@ -450,7 +453,7 @@ def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
 def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
                     specs: List[MetricSpec], client: PrometheusClient,
                     timeout: Optional[float], options: RenderOptions,
-                    out=None) -> None:
+                    step: Optional[int] = None, out=None) -> None:
     """Emit the raw per-scrape DCGM time series over the job's window as CSV.
 
     One row per GPU/timestamp; metrics are de-duplicated by Prometheus name. Each
@@ -480,12 +483,14 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
             continue
         uuid_to = {g["uuid"]: (g["node"], g["minor"]) for g in gpus}
         regex = "^(" + "|".join(uuid_to) + ")$"
-        step = max(sampling_period, record.duration // 10000 + 1)  # keep under Prometheus' point cap
+        # --step wins; otherwise never finer than the scrape interval, and coarse
+        # enough to stay under Prometheus' points-per-series cap on a long job.
+        span = timeseries_step(record.duration, sampling_period, step)
         series: Dict[str, dict] = {uuid: {} for uuid in uuid_to}
         for spec in ts_specs:
             for result in client.query_range(
                     '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex),
-                    record.start, record.end, step, timeout):
+                    record.start, record.end, span, timeout):
                 metric = result["metric"]
                 uuid = metric.get(spec.uuid_label) or metric.get("uuid") or metric.get("UUID")
                 if uuid not in series:

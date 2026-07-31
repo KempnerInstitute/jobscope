@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""Deprecated wrapper for ``jobscope live``.
+"""Deprecated wrapper for ``jobscope running``.
 
 This started life as a standalone script (squeue + Prometheus, no install, running
-on the login node's system python). Its logic now lives in the package, as
-``jobscope live`` -- see ``src/jobscope/live.py``. This wrapper stays so existing
-command lines and scripts keep working; it translates the two flags whose names
-changed and hands off.
+on the login node's system python). Its logic now lives in the package -- see
+``src/jobscope/live.py`` -- and "which jobs" is now a mode word rather than a
+subcommand, so the live view is ``jobscope running``. This wrapper stays so
+existing command lines and scripts keep working.
 
 Flag translation:
-  --min-runtime DUR  ->  --min-elapsed DUR   (the package's --min-runtime is the
-                                              DIAG threshold, in seconds)
-  no -u given        ->  --all-users         (this script defaulted to every
-                                              user; jobscope live defaults to you)
+  (mode)             ->  running             the live selection
+  --min-runtime DUR  ->  --min-elapsed DUR   accepted as an alias, no rewrite
+  no -u given        ->  --all-users         this script showed every user;
+                                             jobscope defaults to you
+  --all / --ext      ->  --dcgm              the full metric catalog
 
-Prefer ``jobscope live`` directly. Unlike this script it needs an installed
+Prefer ``jobscope running`` directly. Unlike this script it needs an installed
 jobscope, because the package requires Python >= 3.9 -- see the message below if
 you are on an older interpreter.
+
+Note the granularity changed with the argument tree: ``jobscope running`` prints
+one row per job. For the per-GPU rows this script used to show, add ``--hwdetail``.
 
 Author: Bala Desinghu, Senior AI/HPC Research Computing Engineer, Kempner Institute, Harvard
 """
@@ -26,16 +30,16 @@ import sys
 _MIN_PYTHON = (3, 9)
 
 _NO_PACKAGE = """\
-jobscope_live.py now delegates to `jobscope live`, which needs the installed
+jobscope_live.py now delegates to `jobscope running`, which needs the installed
 jobscope package (Python >= {min}; this interpreter is {have}).
 
   pipx install {repo}          # or: pip install --user {repo}
-  jobscope live -a -p <partition>
+  jobscope running -a -p <partition>
 
 To run straight from a checkout instead:
 
   python{min} -m venv .venv && .venv/bin/pip install -e {repo}
-  .venv/bin/jobscope live -a -p <partition>
+  .venv/bin/jobscope running -a -p <partition>
 """
 
 
@@ -44,16 +48,17 @@ def _repo_root() -> str:
 
 
 def _translate(argv):
-    """Map this script's old flag names onto the `jobscope live` ones.
+    """Map this script's old flags onto the current ones.
 
-    ``--min-runtime`` needs no rewriting -- `jobscope live` accepts it as an alias
-    of ``--min-elapsed``. Only the all-users default actually differs: this script
-    showed every user's jobs unless ``-u`` narrowed it, where `jobscope live`
-    defaults to your own.
+    ``--min-runtime`` needs no rewriting -- it is still accepted as an alias of
+    ``--min-elapsed``. Two things do differ: this script showed every user's jobs
+    unless ``-u`` narrowed it, where jobscope defaults to your own; and the
+    extended catalog moved from ``--all`` to ``--dcgm``.
     """
+    out = ["--dcgm" if a in ("--all", "--ext") else a for a in argv]
     selects_user = any(a in ("-u", "--user", "-a", "--all-users")
-                       or a.startswith("--user=") for a in argv)
-    return list(argv) if selects_user else list(argv) + ["--all-users"]
+                       or a.startswith("--user=") for a in out)
+    return out if selects_user else out + ["--all-users"]
 
 
 def main() -> int:
@@ -78,8 +83,8 @@ def main() -> int:
                 repo=_repo_root()))
             return 1
 
-    sys.stderr.write("note: jobscope_live.py is deprecated; use 'jobscope live'\n")
-    jobscope_main(["live"] + _translate(sys.argv[1:]))
+    sys.stderr.write("note: jobscope_live.py is deprecated; use 'jobscope running'\n")
+    jobscope_main(["running"] + _translate(sys.argv[1:]))
     return 0
 
 

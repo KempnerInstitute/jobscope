@@ -19,16 +19,16 @@ per-job calls and no job-count cap.
 </table>
 
 ```text
-$ jobscope -S 2026-06-01 -E 2026-06-02
+$ jobscope finished -S 2026-07-26 -E 2026-07-27
   User:      bdesinghu
-  Select:    2026-06-01 .. 2026-06-02
-JOBID        STATE     GPUS GPU%   GMEM%   SM_ACT%  OCC%    TENSOR%  DRAM%   POWER_W  RUNTIME      NAME
--------------------------------------------------------------------------------------------------------
-17752673     COMPLETED 1    92     6       77.1     24.9    1.5      15.0    452      02:58:26     combo-pile
-18074321     COMPLETED 1    98     8       49.3     5.8     1.0      6.6     181      01:37:53     vae-wt103
-18074326     COMPLETED 1    93     6       76.7     24.8    1.5      14.8    455      09:28:41     combo-wt103
--------------------------------------------------------------------------------------------------------
-Mean:                       94     7       67.7     18.5    1.3      12.1    363
+  Select:    2026-07-26 .. 2026-07-27
+JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  OCC%    TENSOR%  DRAM%   POWER_W  RUNTIME
+------------------------------------------------------------------------------------------------------------------------------------
+35244230     bdesinghu    COMPLETED 1     11     3      1     78     2       64.3     14.4    2.9      8.9     406      00:09:30
+35246690     bdesinghu    COMPLETED 1     11     2      1     63     3       44.3     8.8     0.2      4.3     338      00:12:07
+35246691     bdesinghu    COMPLETED 1     11     3      1     67     2       43.8     8.7     0.2      4.4     341      00:13:05
+------------------------------------------------------------------------------------------------------------------------------------
+Mean:                                     11     2            69     2       50.8     10.5    1.1      5.9     361
 ```
 
 ## Requirements
@@ -36,9 +36,9 @@ Mean:                       94     7       67.7     18.5    1.3      12.1    363
 - Python 3.9+
 - Slurm with `sacct`, where the jobstats-style AdminComment blob is populated
   (needed by every view).
-- For the GPU and DCGM views only: a Prometheus endpoint serving the DCGM
-  (`DCGM_FI_*`) and `nvidia_gpu_*` series that jobstats scrapes. The offline
-  `--cpu` / `--cgpu` views never contact it.
+- A Prometheus endpoint serving the DCGM (`DCGM_FI_*`), `nvidia_gpu_*` and
+  `cgroup_*` series that jobstats scrapes. Needed for the GPU columns, and for any
+  running job (whose blob does not exist yet). `finished --cpu` never contacts it.
 
 ## Install
 
@@ -54,9 +54,10 @@ pytest
 
 ## Configuration
 
-The GPU and DCGM views need a Prometheus endpoint serving the DCGM and
-`nvidia_gpu_*` series. (The offline `--cpu` / `--cgpu` views, and everything under
-`describe` and `config`, need nothing.) Provide the endpoint one of these ways.
+The GPU columns, and every column for a running job, need a Prometheus endpoint
+serving the DCGM, `nvidia_gpu_*` and `cgroup_*` series. (`finished --cpu`, and
+everything under `describe` and `config`, need nothing.) Provide it one of these
+ways.
 
 ```bash
 # Preferred: environment variable (keeps a credential out of any file)
@@ -93,81 +94,67 @@ secret is never copied.
 ## Quick start
 
 ```bash
-jobscope -D 3                     # summary of your jobs over the last 3 days
-jobscope --cgpu -D 2              # CPU + GPU summary from the stored blob alone
-jobscope --diagnose -D 5          # add an advisory GPU diagnosis column
-jobscope detail JOBID             # per-node / per-GPU breakdown
-jobscope dcgm --ext JOBID         # full per-GPU DCGM profiling table
-jobscope dcgm --ts --csv JOBID | jobscope plot --compact   # time-series chart
-
-jobscope live                     # your running jobs, right now
-jobscope live -p kempner -a       # every user's running jobs in a partition
+jobscope                          # your running jobs, right now (the default)
+jobscope -p kempner -a            # everyone on a partition, right now
+jobscope finished -D 3            # your finished jobs over the last 3 days
+jobscope 30012345                 # one job, running or finished
+jobscope running --hwdetail       # per-GPU rows instead of per-job
+jobscope finished -D 7 --dcgm     # the full DCGM metric catalog
+jobscope 30012345 --ts | jobscope plot --compact    # time-series chart
 ```
 
-`jobscope` alone is shorthand for `jobscope summary`, so the selectors below work
-with or without a subcommand. Flags and JOBIDs may be given in any order
-(`jobscope 12345 -D 3` and `jobscope -D 3 12345` are equivalent), and
-`-j/--jobid` is an explicit alternative to the positional JOBID.
+## The argument tree
 
-A `JOBID` works whether the job is running or finished. Slurm only stores the
-utilization blob when a job *ends*, so for a running job jobscope reconstructs
-`CPU%`/`MEM%`/`GPU%`/`GMEM%` from the same Prometheus metrics jobstats falls back
-to; with no Prometheus endpoint configured those columns stay blank and say so.
+One axis per level, so every option composes with every selection:
 
-## Subcommands
+```
+jobscope [MODE] [scope] [filters] [granularity] [columns] [--diagnose] [output]
+```
 
-| Command | Purpose |
+**Level 1 — which jobs.** The first word, defaulting to `running`:
+
+| word | meaning |
 |---|---|
-| `jobscope summary` | one row per job (the default) |
-| `jobscope detail` | per-node / per-GPU breakdown |
-| `jobscope dcgm` | per-GPU DCGM profiling table (`--ext` for the full catalog, `--ts` for raw time series) |
-| `jobscope live` | per-GPU metrics for the jobs running right now |
-| `jobscope plot` | render `--csv` output as a terminal chart |
-| `jobscope describe` | plain-English column and metric reference (`--dcgm` for the catalog) |
-| `jobscope config` | show the config path or print an example |
+| `running` | jobs running now, via `squeue` (**the default**) |
+| `finished` | finished jobs, via `sacct`; default window the last day |
+| `JOBID ...` | specific jobs, running or finished (`-j` also works) |
 
-Selectors shared by `summary`, `detail`, and `dcgm`: `-N` (last N jobs), `-D`
-(last N days), `-S`/`-E` (explicit window), `-u`/`-A`/`-p`/`-t` (user / account /
-partition / state), `--csv`, and explicit `JOBID`s. With no scope at all, the
-last day is used.
+**Level 2 — scope** (`finished` only): `-D N` days, `-N n` last n jobs, `-S`/`-E`
+an explicit window. Passing one of these without a mode word implies `finished`,
+so `jobscope -D 3` still means what it always did.
 
-## Live view
+**Filters**, every mode: `-p` partition, `-u` user, `-a` all users, `-A` account,
+`-t` state (`finished` only), `--min-elapsed` runtime floor (`running` only).
 
-`jobscope live` answers "what is happening on the GPUs *now*". It selects from
-`squeue` rather than `sacct` and, by default, reports the newest single scrape --
-so unlike every other view it is a snapshot, not a job-length average. One row per
-GPU, or per MIG instance where a card is partitioned.
+**Level 3 — granularity** (pick one) and **columns**:
 
-```bash
-jobscope live                     # your running jobs over 1h
-jobscope live -j 12345_6          # one running job or array element
-jobscope live -p kempner -a       # every user in a partition (-a = all users)
-jobscope live --min-elapsed 5m    # include jobs only 5 minutes in
-jobscope live --avg               # fold over each job's runtime (= jobstats)
-jobscope live --describe          # what each column means
-jobscope live -j 12345 --ts | jobscope plot
-```
+| option | effect |
+|---|---|
+| *(default)* | one row per job |
+| `--hwdetail` | one row per GPU, with node name and GPU number |
+| `--ts` | the per-scrape time series as CSV |
+| `--cpu` / `--gpu` | narrow the columns to one resource |
+| `--dcgm` | the full DCGM metric catalog |
+| `--avg` | `running` only: fold over the runtime instead of a snapshot |
 
-Because a snapshot lands wherever the job happens to be, it will **not** match
-jobstats on a bursty job -- one that alternates compute with gaps is genuinely
-bimodal, and a single scrape can read `GPU% 0` on a GPU averaging ~88%. Use
-`--avg` for a jobstats-comparable number, or `--ts` to see the phases themselves.
+**Level 4** — `--diagnose`, which adds the advisory `DIAG` column at the end.
 
-Columns are identical to `jobscope` and `jobscope dcgm`, so a job reads the same
-either side of its end (see [Columns](#columns)). `--all` adds the extended
-catalog. `CPU%`/`MEM%` are cumulative by nature -- CPU-seconds over elapsed x
-cores, and peak RSS -- so they read the same in both modes; only the GPU columns
-follow the instant-versus-`--avg` choice.
+**Output** — `--csv`, `-n`, `--step` (with `--ts`), `--timeout`, `--workers`, `-c`.
 
-For per-GPU numbers use `jobscope detail`, or `--ts` for the raw series. On a MIG
-node those show one row per instance; the DCGM columns read `-` there, because NVML
-identifies an instance by a `MIG-…` UUID where DCGM reports the physical `GPU-…`
-one and nothing in the metrics maps between them.
+Flags and JOBIDs may be given in any order. A `JOBID` works whether the job is
+running or finished: Slurm only stores the utilization blob when a job *ends*, so
+for a running one jobscope reconstructs `CPU%`/`MEM%`/`GPU%`/`GMEM%` from the same
+Prometheus metrics jobstats falls back to. With no Prometheus endpoint configured
+those columns stay blank and say so.
+
+`jobscope running -j ID` differs from `jobscope ID`: the first reads the live view
+of that job (an instant snapshot, with `--avg` available), the second looks it up
+through `sacct` over its window.
 
 ## Columns
 
-`summary`, `dcgm` and `live` all print one row per job with the same columns, so a
-job reads identically whether it has finished or is still running:
+Every per-job view prints the same columns, so a job reads identically whether it
+has finished or is still running:
 
 ```
 JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  RUNTIME
@@ -175,21 +162,73 @@ JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR% 
 
 `NODE` is the node count and `#GPU` the allocated GPU count. `CPU%`/`MEM%` sit
 beside `SM_ACT%` deliberately: a GPU job whose `GPU%` is low and `CPU%` is high is
-held up on the host, and previously no single view showed both. `--diagnose` adds a
-`DIAG` advisory before `RUNTIME`; `dcgm --ext` widens only the profiling block.
+held up on the host, and no single view used to show both.
 
-Per-GPU numbers live in `jobscope detail` and in `--ts`.
+- `--cpu` narrows to the host columns. For *finished* jobs that needs no Prometheus
+  at all; a running job's `CPU%` comes from `cgroup_*`, so it does.
+- `--gpu` narrows to the GPU columns and the profiling block.
+- `--dcgm` widens the profiling block to the full catalog.
+- `--diagnose` appends the advisory `DIAG` column.
 
-## Views
+## Utilities
 
-- `--gpu` (default) shows every column above, with the DCGM profiling block
-  (`SM_ACT%`/`OCC%`/`TENSOR%`/`DRAM%`/`POWER_W`) pulled from Prometheus.
-- `--cgpu` and `--cpu` read the stored blob only, so they need no Prometheus --
-  except for running jobs, which have no blob yet (see Quick start).
-- `--diagnose` adds a short advisory GPU diagnosis label.
+| Command | Purpose |
+|---|---|
+| `jobscope plot` | render `--csv` output as a terminal chart |
+| `jobscope describe` | plain-English column and metric reference (`--dcgm` for the catalog) |
+| `jobscope config` | show the config path or print an example |
 
-Run `jobscope describe` for column definitions, `jobscope describe --dcgm --ext`
-for the full metric catalog, and `jobscope live --describe` for the live columns.
+## Running jobs
+
+`jobscope` with no arguments answers "what is happening on the GPUs *now*". It
+selects from `squeue` and, by default, reports the newest single scrape -- so
+unlike the historical modes it is a snapshot, not a job-length average.
+
+```bash
+jobscope                          # your running jobs over 1h
+jobscope -j 12345_6               # one running job or array element
+jobscope -p kempner -a            # every user in a partition
+jobscope --min-elapsed 5m         # include jobs only 5 minutes in
+jobscope --avg                    # fold over each job's runtime (= jobstats)
+jobscope --hwdetail               # per-GPU rows
+jobscope --ts -j 12345 | jobscope plot
+```
+
+Because a snapshot lands wherever the job happens to be, it will **not** match
+jobstats on a bursty job -- one that alternates compute with gaps is genuinely
+bimodal, and a single scrape can read `GPU% 0` on a GPU averaging ~88%. Use
+`--avg` for a jobstats-comparable number, or `--ts` to see the phases themselves.
+
+`CPU%`/`MEM%` are cumulative by nature -- CPU-seconds over elapsed x cores, and
+peak RSS -- so they read the same in both modes; only the GPU columns follow the
+instant-versus-`--avg` choice.
+
+On a MIG node `--hwdetail` and `--ts` show the instances; the DCGM columns read
+`-` there, because NVML identifies an instance by a `MIG-…` UUID where DCGM
+reports the physical `GPU-…` one and nothing in the metrics maps between them.
+
+## Moving from the old subcommands
+
+The old positional subcommands are deprecated and print a note, but still work:
+
+| was | now |
+|---|---|
+| `jobscope summary -D 3` | `jobscope finished -D 3` |
+| `jobscope detail JOBID` | `jobscope JOBID --hwdetail` |
+| `jobscope dcgm --ext JOBID` | `jobscope JOBID --dcgm` |
+| `jobscope dcgm --ts JOBID` | `jobscope JOBID --ts` |
+| `jobscope live -a` | `jobscope -a` |
+| `--cgpu` | the default (removed) |
+| `--min-runtime 180` (DIAG cutoff) | `--diag-short 180` |
+
+Note that bare `jobscope` now shows **running** jobs rather than the last day of
+finished ones, and that `--min-runtime` now means the runtime floor
+(`--min-elapsed`) in every mode.
+
+## Reference
+
+Run `jobscope describe` for column definitions and `jobscope describe --dcgm --ext`
+for the full metric catalog.
 
 For the pipeline behind those numbers — which source wins, how each metric is
 reduced over time and across GPUs, the raw-vs-display job ID rule, MIG limits, and

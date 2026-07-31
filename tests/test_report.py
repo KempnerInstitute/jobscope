@@ -33,28 +33,32 @@ def test_fmt_context():
 
 
 def test_cols_for_views():
+    """`all` is the default; --cpu and --gpu narrow it. There is no cgpu any more."""
+    everything = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=True, diagnose=True)]
+    assert "CPU%" in everything and "GPU%" in everything and "SM_ACT%" in everything
+    assert "DIAG" in everything
     cpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "cpu")]
     assert "CPU%" in cpu and "GPU%" not in cpu and "SM_ACT%" not in cpu
-    gpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "gpu", dcgm=True, diagnose=True)]
-    # The gpu view now carries CPU%/MEM% as well, so one table shows whether a GPU
-    # job was actually held up on the host.
-    assert "GPU%" in gpu and "SM_ACT%" in gpu and "DIAG" in gpu
-    assert "CPU%" in gpu and "MEM%" in gpu
-    cgpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "cgpu")]
-    assert "CPU%" in cgpu and "GPU%" in cgpu and "SM_ACT%" not in cgpu
-    # NODE identifies the row in every view, offline ones included.
-    assert all("NODE" in cols for cols in (cpu, gpu, cgpu))
+    gpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "gpu", dcgm=True)]
+    assert "GPU%" in gpu and "SM_ACT%" in gpu and "CPU%" not in gpu
+    # NODE and the other identity columns appear in every view.
+    assert all("NODE" in cols and "JOBID" in cols for cols in (everything, cpu, gpu))
+
+
+def test_diag_is_the_last_column():
+    cols = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=True, diagnose=True)]
+    assert cols[-1] == "DIAG"
 
 
 def test_cols_for_diag_requires_dcgm():
-    without = [c.header for c in cols_for(SUMMARY_COLUMNS, "gpu", dcgm=False, diagnose=True)]
+    without = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=False, diagnose=True)]
     assert "DIAG" not in without
-    with_dcgm = [c.header for c in cols_for(SUMMARY_COLUMNS, "gpu", dcgm=True, diagnose=True)]
+    with_dcgm = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=True, diagnose=True)]
     assert "DIAG" in with_dcgm
 
 
 def test_summarize_diagnose_without_dcgm_does_not_crash(gpu_record):
-    options = RenderOptions(view="gpu", show_dcgm=False, diagnose=True, csv=True, header=True)
+    options = RenderOptions(view="all", show_dcgm=False, diagnose=True, csv=True, header=True)
     text = _render(summarize, ["100"], {"100": gpu_record}, {}, CTX, options)
     assert "DIAG" not in text
 
@@ -81,7 +85,7 @@ def test_extend_detail_row_short_tag():
 
 def test_summarize_gpu_text(gpu_record):
     overall = {"SM_ACT%": 60.0, "OCC%": 20.0, "TENSOR%": 5.0, "DRAM%": 10.0, "POWER_W": 400.0}
-    options = RenderOptions(view="gpu", show_dcgm=True, csv=False, header=True)
+    options = RenderOptions(view="all", show_dcgm=True, csv=False, header=True)
     text = _render(summarize, ["100"], {"100": gpu_record}, {"100": (overall, {})}, CTX, options)
     assert "User:" in text
     assert "SM_ACT%" in text and "60.0" in text and "400" in text
@@ -92,7 +96,7 @@ def test_summarize_gpu_text(gpu_record):
 
 
 def test_summary_csv_roundtrips(gpu_record):
-    options = RenderOptions(view="cgpu", show_dcgm=False, csv=True, header=True)
+    options = RenderOptions(view="all", show_dcgm=False, csv=True, header=True)
     text = _render(summarize, ["100"], {"100": gpu_record}, {}, CTX, options)
     columns, rows = plot.parse_csv(io.StringIO(text))
     assert columns[0] == "JOBID"
@@ -103,25 +107,25 @@ def test_summary_csv_roundtrips(gpu_record):
 def test_summary_mean_row_and_csv_drop(gpu_record, cpu_record):
     records = {"100": gpu_record, "200": cpu_record}
     text = _render(summarize, ["100", "200"], records, {},
-                   CTX, RenderOptions(view="cgpu", show_dcgm=False, csv=False, header=True))
+                   CTX, RenderOptions(view="all", show_dcgm=False, csv=False, header=True))
     assert "Mean:" in text
     csv_text = _render(summarize, ["100", "200"], records, {},
-                       CTX, RenderOptions(view="cgpu", show_dcgm=False, csv=True, header=True))
+                       CTX, RenderOptions(view="all", show_dcgm=False, csv=True, header=True))
     _, rows = plot.parse_csv(io.StringIO(csv_text))
     assert len(rows) == 2  # the Mean row is dropped by the parser
 
 
 def test_summarize_no_jobs():
     text = _render(summarize, [], {}, {}, CTX,
-                   RenderOptions(view="gpu", show_dcgm=True, csv=False, header=True))
+                   RenderOptions(view="all", show_dcgm=True, csv=False, header=True))
     assert "(no GPU jobs" in text
 
 
 def test_detail_text_and_csv(gpu_record):
-    options = RenderOptions(view="cgpu", show_dcgm=False, csv=False, header=True)
+    options = RenderOptions(view="all", show_dcgm=False, csv=False, header=True)
     text = _render(detail, ["100"], {"100": gpu_record}, {}, CTX, options)
     assert "Job 100" in text and "node01" in text and "NODE" in text
-    csv_options = RenderOptions(view="cgpu", show_dcgm=False, csv=True, header=True)
+    csv_options = RenderOptions(view="all", show_dcgm=False, csv=True, header=True)
     csv_text = _render(detail, ["100"], {"100": gpu_record}, {}, CTX, csv_options)
     columns, rows = plot.parse_csv(io.StringIO(csv_text))
     assert columns[0] == "JOBID"
@@ -131,7 +135,7 @@ def test_detail_text_and_csv(gpu_record):
 def test_dcgm_report_is_one_row_per_job(gpu_record):
     overall = {"SM_ACT%": 60.0, "POWER_W": 400.0}
     dcgm_data = {"100": (overall, {})}
-    options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
     csv_text = _render(dcgm_report, ["100"], {"100": gpu_record}, dcgm_data, DEFAULT_SPECS, CTX,
                        options)
     columns, rows = plot.parse_csv(io.StringIO(csv_text))
@@ -146,7 +150,7 @@ def test_dcgm_report_is_one_row_per_job(gpu_record):
 def test_dcgm_ext_only_widens_the_profiling_block(gpu_record):
     """--ext must not become a different view: identity and blob columns are fixed."""
     from jobscope.dcgm import ALL_SPECS
-    options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
 
     def headers(specs):
         text = _render(dcgm_report, ["100"], {"100": gpu_record}, {"100": ({}, {})}, specs,
@@ -166,7 +170,7 @@ def test_every_per_job_view_shares_one_column_set(gpu_record):
     """summary, dcgm and live must print identical columns, by construction."""
     from jobscope.report import summary_columns
 
-    options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
 
     def header(render, *args):
         text = _render(render, *args, CTX, options)
@@ -194,7 +198,7 @@ class _TimeseriesClient:
 
 
 def test_dcgm_timeseries_csv(gpu_record):
-    options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
     text = _render(dcgm_timeseries, ["100"], {"100": gpu_record}, DEFAULT_SPECS,
                    _TimeseriesClient(), None, options)
     columns, rows = plot.parse_csv(io.StringIO(text))
@@ -236,7 +240,7 @@ def test_summary_renderer_two_adds_equals_summarize_text(gpu_record):
 
 def test_summary_renderer_two_adds_equals_summarize_csv(gpu_record):
     jobids, records, dcgm, chunks = _two_gpu_chunks(gpu_record)
-    options = RenderOptions(view="gpu", show_dcgm=True, csv=True, header=True)
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
     single = _render(summarize, jobids, records, dcgm, CTX, options)
     streamed = _render_stream(report.SummaryRenderer, CTX, options, chunks)
     assert streamed == single
