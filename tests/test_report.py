@@ -1066,7 +1066,7 @@ def test_the_combined_worst_orders_by_normalized_waste_and_shows_values():
     # big wastes twice the resource, so it leads.
     assert combined.index("big") < combined.index("small")
     # And the cells are the values, not shares: both ran at 0%.
-    assert "big gpu0 cpu0" in combined and "small gpu0 cpu0" in combined
+    assert "big:gpu0/cpu0" in combined and "small:gpu0/cpu0" in combined
     assert "%gpu" not in combined
 
 
@@ -1142,8 +1142,79 @@ def test_power_waste_is_gpu_hours_below_the_floor():
     assert power.index("long_idle") < power.index("short_idle")
     # The 300 W job is green, so it is absent however large it is.
     assert "busy" not in power
-    # Watts, not percent.
-    assert "@73W" in power and "@73%" not in power
+    # Watts, not percent, and the entry carries the elapsed time.
+    assert "long_idle:73W:10h(10:00:00)" in power
+    assert ":73%" not in power
+
+
+def _owned(jid, user, seconds, gpu_util, gpus=1):
+    """A red GPU job belonging to `user`, having run for `seconds`."""
+    return dataclasses.replace(
+        _timed_job(jid, seconds, gpu_util=gpu_util, gpus=gpus, cpu_seconds=0),
+        user=user)
+
+
+def _worst_block(records, **kw):
+    """The Problem-jobs section's lines."""
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view=kw.get("view", "gpu"), header=True,
+                           time_weighted=True, color=kw.get("color", False),
+                           thresholds=kw.get("thresholds")), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    lines, keep = [], False
+    for line in out.getvalue().splitlines():
+        if line.startswith("3. "):
+            keep = True
+            continue
+        if keep and not set(line) <= {"-", ""}:
+            lines.append(line)
+    return lines
+
+
+def test_the_worst_rows_group_jobs_under_their_owner():
+    """One user usually owns several of the worst jobs; naming them once says more."""
+    records = {"a": _owned("a", "avenkat", 4 * 3600, 0.0),
+               "b": _owned("b", "avenkat", 3 * 3600, 1.0),
+               "c": _owned("c", "binxu", 3600, 2.0)}
+    gpu = [ln for ln in _worst_block(records) if ln.startswith("Worst GPU")]
+    assert len(gpu) == 1 and "avenkat|" in gpu[0]
+    assert gpu[0].count("avenkat") == 1          # named once, not per job
+    assert "a:" in gpu[0] and "b:" in gpu[0]
+    # The second user continues on its own line, under the same column.
+    following = _worst_block(records)[1]
+    assert following.lstrip().startswith("binxu|")
+    assert following.index("binxu") == gpu[0].index("avenkat")
+
+
+def test_each_entry_carries_value_wasted_and_elapsed():
+    records = {"a": _owned("a", "u1", 2 * 3600, 0.0, gpus=3),
+               "b": _owned("b", "u2", 3600, 5.0)}
+    gpu = [ln for ln in _worst_block(records) if ln.startswith("Worst GPU")][0]
+    assert "a:0%:6h(2:00:00)" in gpu            # 3 GPUs x 2h all idle
+
+
+def test_jobs_over_three_hours_are_tinted_red():
+    """Hours of idle hardware do not come back; a brief bad job costs little."""
+    records = {"long": _owned("long", "u1", 3 * 3600 + 1, 0.0),
+               "brief": _owned("brief", "u1", 3 * 3600 - 1, 0.0)}
+    block = "".join(_worst_block(records, color=True, thresholds=_thresholds()))
+    assert report._SGR["red"] + "long:" in block
+    assert report._SGR["red"] + "brief:" not in block
+    # Exactly at the boundary counts as brief: the test is strictly greater.
+    assert report.LONG_RUNNING == 3 * 3600
+    # And nothing is tinted when colour is off.
+    assert "\033" not in "".join(_worst_block(records))
+
+
+def test_a_long_entry_list_wraps_under_the_user_column():
+    """Rather than running past the table width."""
+    records = {"job%02d" % i: _owned("job%02d" % i, "sameuser", 3600, 0.0)
+               for i in range(3)}
+    lines = [ln for ln in _worst_block(records) if "job" in ln]
+    assert all(len(report._ESC_RE.sub("", ln)) <= report.SummaryRenderer.WORST_WIDTH
+               for ln in lines)
 
 
 def test_a_worst_row_per_named_metric_in_a_fixed_order():
@@ -1162,9 +1233,9 @@ def test_the_four_metric_row_prints_every_component_share():
     rows = _worst_with_power(records, {"a": 73.0, "b": 73.0}, sm={"a": 0.0, "b": 0.0})
     # Four tagged values, each under its cutoff -- which is why the job qualified.
     # Power carries its unit, since watts are not a percentage.
-    assert "gpu0 sm0 pw73W cpu0" in rows["Worst all"]
+    assert "gpu0/sm0/pw73W/cpu0" in rows["Worst all"]
     # The two-metric row names only its two.
-    assert "gpu0 cpu0" in rows["Worst both"]
+    assert "gpu0/cpu0" in rows["Worst both"]
     assert "sm" not in rows["Worst both"] and "pw" not in rows["Worst both"]
 
 
@@ -1239,7 +1310,10 @@ def _timed_job(jid, seconds, gpu_util=None, gpus=1, cores=2, cpu_seconds=None,
         node["gpu_utilization"] = {str(i): gpu_util for i in range(gpus)}
         node["gpu_used_memory"] = {str(i): 40 * GIB for i in range(gpus)}
         node["gpu_total_memory"] = {str(i): 80 * GIB for i in range(gpus)}
-    return JobRecord(jobid=jid, state="COMPLETED", name="j", runtime="-", nodes="1",
+    return JobRecord(jobid=jid, state="COMPLETED", name="j",
+                     runtime="%d:%02d:%02d" % (seconds // 3600,
+                                               seconds // 60 % 60, seconds % 60),
+                     nodes="1",
                      gpus=gpus if gpu_util is not None else 0,
                      stats={"total_time": seconds, "nodes": {"n1": node}},
                      start=1000, end=1000 + seconds, duration=seconds,

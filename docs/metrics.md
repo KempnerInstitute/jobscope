@@ -412,7 +412,14 @@ simply carries no GPU data, so it still votes on `CPU%` and `MEM%`.
 
 The `Worst` rows name the top few jobs by resource-time **wasted**,
 `(1 - u) x weight`, not by resource-time held: a 100-hour job at 24% is a larger
-finding than a 10-hour job at 0%. There is one row per measure -- `GPU%`,
+finding than a 10-hour job at 0%.
+
+Entries are grouped under their owner, in rank order rather than alphabetically, so
+the first user named owns the worst job. Each reads `jobid:value:wasted(elapsed)`,
+and a job whose elapsed time exceeds `report.LONG_RUNNING` (three hours) is printed
+red: a brief bad job costs little next to hours of idle hardware. Lines wrap onto
+continuation lines indented under the user column rather than running past the table,
+and the wrap is measured on visible characters so the red escapes do not shorten it. There is one row per measure -- `GPU%`,
 `SM_ACT%`, `POWER_W`, `CPU%` -- and a row is omitted when no job falls in that
 measure's red band. Four rather than every graded column: these say distinct
 things, while the DCGM catalog would add a dozen near-duplicates.

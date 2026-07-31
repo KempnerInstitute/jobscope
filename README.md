@@ -234,13 +234,13 @@ DRAM%    416.1h (86%)   384  18      19
 
 3. Problem jobs
 --------------------------------------------------------------------------------------------
-Worst GPU (3/318):    36337781 48h@0% amazloumi  36358839 11.8h@0% amazloumi
-Worst SM (33/424):    36337781 48h@0% amazloumi  36358839 11.8h@0% amazloumi
-Worst POWER (39/424): 36337781 48h@73W amazloumi  36358839 11.8h@74W amazloumi
-Worst CPU (155/318):  36337781 768.2h@0% amazloumi  36358839 189.1h@0% amazloumi
-Worst both (3):       36337781 gpu0 cpu0  36358839 gpu0 cpu0
-Worst all (2):        36337781 gpu0 sm0 pw73W cpu0  36358839 gpu0 sm0 pw74W cpu0
-Jobs:                 cpu-jobs=318  gpu-jobs=318  gpus=381  no-runtime=4
+Worst GPU (20/77):   hsafaai| 36337337:0%:8h(08:00:29), 36337338:0%:8h(08:00:26)
+Worst SM (20/77):    hsafaai| 36337337:0%:8h(08:00:29), 36337292:0%:8h(08:00:21)
+Worst POWER (20/77): hsafaai| 36337337:68W:8h(08:00:29), 36337338:70W:8h(08:00:26)
+Worst CPU (50/77):   hsafaai| 36337338:1%:64.1h(08:00:26), 36337292:1%:64h(08:00:21)
+Worst both (19):     hsafaai| 36337338:gpu0/cpu1(08:00:26), 36337292:gpu0/cpu1(08:00:21)
+Worst all (19):      hsafaai| 36337338:gpu0/sm0/pw70W/cpu1(08:00:26)
+Jobs:                cpu-jobs=77  gpu-jobs=77  gpus=119  no-blob=13
 ```
 
 **There is no per-job mean**, on purpose. Utilization is bimodal -- jobs cluster
@@ -305,6 +305,11 @@ held, so a long job at a mediocre rate outranks a short one at zero. There is on
 row per measure -- duty cycle, SM residency, board watts, and the host -- and any
 row with no red job is omitted.
 
+Jobs are grouped under their owner, since one user usually owns several of them, and
+each entry reads `jobid:value:wasted(elapsed)`. **A job that ran over three hours is
+printed in red**: a brief bad job costs little, whereas hours of idle hardware do not
+come back.
+
 `POWER_W` is graded in **watts**, not percent: below `[thresholds] power_w`
 (default 100) a GPU counts as idle, so its waste is the GPU-hours held while below
 that floor. Watts are the one idle signal a duty cycle cannot fake -- a job holding
@@ -319,8 +324,11 @@ which weights GPU idleness 3:1 against CPU idleness. The measures are in differe
 units and cannot simply be added -- any exchange rate would be invented, and a
 wrong one decides the ranking by itself -- so each job's waste is expressed as a
 share of the selection's total waste in that measure and the shares are summed.
-Every component is printed (`35%gpu+32%sm+40%pw+23%cpu`), so you can see which
-measure put a job on the list.
+Each cell prints the job's **value** in every metric the row names
+(`36337338:gpu0/sm0/pw70W/cpu1`), all of them under their cutoffs, which is what put
+the job there. The order still carries the ranking. Printing the waste shares instead
+was actively misleading: `12%gpu` reads as a utilization of 12%, the inverse of the
+row's meaning.
 
 **A combined row lists only jobs red in *every* measure it names.** `Worst both:`
 means idle by GPU *and* CPU; `Worst all:` means idle by all four. That is what makes

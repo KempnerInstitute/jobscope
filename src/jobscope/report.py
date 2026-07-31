@@ -11,7 +11,7 @@ import textwrap
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from .blob import GIB, blob_capacity, blob_detail, blob_metrics
 from .config import DEFAULT_THRESHOLDS, Thresholds
@@ -270,6 +270,27 @@ _SHARE_TAG = {"GPU%": "gpu", "SM_ACT%": "sm", "POWER_W": "pw", "CPU%": "cpu"}
 _WORST_SLUG = {"GPU%": "GPU", "SM_ACT%": "SM", "POWER_W": "POWER", "CPU%": "CPU"}
 
 
+# A job running longer than this, and still on a Worst row, is the expensive kind of
+# waste: a short bad job costs little, whereas hours of idle hardware do not come
+# back. Its entry is printed red.
+LONG_RUNNING = 3 * 3600
+
+
+def _worst_groups(entries):
+    """Group ``(user, text, long_running)`` entries by user, keeping rank order.
+
+    Rank order matters: the first user to appear is the one with the worst job, so
+    the groups stay sorted by severity rather than alphabetically.
+    """
+    groups, order = {}, []
+    for user, text, long_running in entries:
+        if user not in groups:
+            groups[user] = []
+            order.append(user)
+        groups[user].append((text, long_running))
+    return [(user, groups[user]) for user in order]
+
+
 def _combined_cell(jid: str, values, tallies) -> str:
     """One job on a combined row: its value in each of the row's metrics.
 
@@ -325,6 +346,18 @@ def _resource_of(header: str, hours: bool):
             key)
 
 
+class WorstJob(NamedTuple):
+    """One entry on a Worst row. ``wasted`` is what the ranking sorts by."""
+
+    wasted: float
+    jobid: str
+    user: str
+    weight: float
+    value: float
+    runtime: str                    # display form, as the job's own row shows it
+    duration: Optional[int]         # seconds, for the long-running test
+
+
 class EfficiencyTally:
     """Where a selection's resource-time went, banded by the utilization thresholds.
 
@@ -366,9 +399,10 @@ class EfficiencyTally:
         self.used = 0.0                 # resource-time actually utilized
         self.total = 0.0                # resource-time allocated
         self.waste_total = 0.0          # resource-time wasted, the combined rows' denominator
-        self.worst: List[Tuple[float, str, str, float, float]] = []
+        self.worst: List["WorstJob"] = []
 
-    def add(self, jobid: str, user: str, value: Optional[float], weight: float) -> None:
+    def add(self, jobid: str, user: str, value: Optional[float], weight: float,
+            runtime: str = "-", duration: Optional[int] = None) -> None:
         band = self.thresholds.grade(self.header, value)
         if not band or weight <= 0:
             # Ungraded (no measurement) or unweighable: counting it would either
@@ -384,7 +418,8 @@ class EfficiencyTally:
         if band == "red":
             # Ranked by resource-time *wasted*, not held: a 100-hour job at 24% is
             # a bigger finding than a 10-hour job at 0%.
-            self.worst.append((wasted, jobid, user, weight, value))
+            self.worst.append(WorstJob(wasted, jobid, user, weight, value,
+                                       runtime, duration))
             self.worst.sort(key=lambda item: -item[0])
             del self.worst[self.WORST:]
 
@@ -478,11 +513,6 @@ class EfficiencyTally:
             row.append(("%d" % self.bands[band][0], band))
         return row
 
-    def worst_line(self) -> str:
-        return "  ".join("%s %s@%d%s %s" % (jid, self._amount(weight), round(value),
-                                            self.value_unit, user)
-                         for _idle, jid, user, weight, value in self.worst)
-
     def csv_cells(self) -> List[str]:
         cells = ["metric=%s" % self.header,
                  "allocated=%s" % self._amount(self.total),
@@ -543,8 +573,7 @@ class SummaryRenderer:
         # metric, which is what the combined rankings need: a share cannot be taken
         # until the selection's totals are known, so the candidates must be kept.
         # Bounded by the red jobs, not the selection -- on a healthy partition, few.
-        self.waste: Dict[str, Tuple[Dict[str, float], str, frozenset,
-                                    Dict[str, float]]] = {}
+        self.waste: Dict[str, tuple] = {}
         # One tally per graded column, so every metric on screen gets a summary and
         # the set follows the view for free: 8 by default, CPU%/MEM% under --cpu,
         # 6 under --gpu, the full catalog under --dcgm. Under time weighting the
@@ -641,7 +670,8 @@ class SummaryRenderer:
                 "gpu": gpus * seconds, "gmem": gpus * seconds}
 
     def _note_waste(self, jid: str, user: str, values: Dict[str, float],
-                    weights: Dict[str, float]) -> None:
+                    weights: Dict[str, float], runtime: str = "-",
+                    duration: Optional[int] = None) -> None:
         """Record what a job wasted per metric, if it is red in any of them.
 
         Every metric's waste is kept, not just the ones the job is red in, because
@@ -658,7 +688,8 @@ class SummaryRenderer:
             if tally.band_of(value) == "red":
                 red.add(header)
         if red:
-            self.waste[jid] = (wasted, user, frozenset(red), dict(values))
+            self.waste[jid] = (wasted, user, frozenset(red), dict(values),
+                               runtime, duration)
 
     def _combined_worst(self, headers: Tuple[str, ...]
                         ) -> List[Tuple[float, str, str, List[Tuple[str, float]]]]:
@@ -683,7 +714,7 @@ class SummaryRenderer:
             # zero total is undefined and the metric's own row already says so.
             return []
         scored = []
-        for jid, (wasted, user, red, values) in self.waste.items():
+        for jid, (wasted, user, red, values, runtime, duration) in self.waste.items():
             if not set(headers) <= red:
                 # Red in *every* metric of the row, not any of them. An OR let a job
                 # that merely wasted some GPU-time onto the four-metric list while
@@ -692,13 +723,14 @@ class SummaryRenderer:
                 continue
             shares = [(h, wasted.get(h, 0.0) / t.waste_total) for h, t in tallies]
             scored.append((sum(v for _h, v in shares), jid, user,
-                           [(h, values.get(h)) for h, _t in tallies]))
+                           [(h, values.get(h)) for h, _t in tallies],
+                           runtime, duration))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return scored[:EfficiencyTally.WORST]
 
     def _combined_candidates(self, headers: Tuple[str, ...]) -> int:
         """How many jobs are red in *all* of ``headers``."""
-        return sum(1 for _w, _u, red, _v in self.waste.values() if set(headers) <= red)
+        return sum(1 for entry in self.waste.values() if set(headers) <= entry[2])
 
     def add(self, jobids: List[str], records: Dict[str, JobRecord],
             dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
@@ -776,8 +808,10 @@ class SummaryRenderer:
                         values[header] = value
                 for header, tally in self.tallies.items():
                     tally.add(jid, row["USER"], values.get(header),
-                              weights[tally.weight_key])
-                self._note_waste(jid, row["USER"], values, weights)
+                              weights[tally.weight_key], row["RUNTIME"],
+                              record.duration if record else None)
+                self._note_waste(jid, row["USER"], values, weights,
+                                 row["RUNTIME"], record.duration if record else None)
             if options.csv:
                 self.writer.writerow([row[h] for h in self.headers])
             else:
@@ -879,14 +913,16 @@ class SummaryRenderer:
             if alone:
                 return
             for one in worst:
+                # Same shape as the text rows: value, wasted resource-time, elapsed.
                 self.writer.writerow(padded("Worst" + _worst_slug(one.header), [
-                    "%s=%s@%d%s" % (jid, one._amount(weight), round(value),
-                                    one.value_unit.strip("%"))
-                    for _idle, jid, _user, weight, value in one.worst]))
+                    "%s=%d%s:%s(%s)" % (job.jobid, round(job.value), one.value_unit,
+                                        one._amount(job.weight), job.runtime)
+                    for job in one.worst]))
             for name, _hs, rows in combined:
                 self.writer.writerow(padded("Worst" + name.capitalize(), [
-                    _combined_cell(jid, values, self.tallies).replace(" ", "=", 1)
-                    for _score, jid, _user, values in rows]))
+                    "%s(%s)" % (_combined_cell(jid, values, self.tallies)
+                                .replace(" ", "=", 1).replace(" ", "/"), runtime)
+                    for _score, jid, _user, values, runtime, _dur in rows]))
             self.writer.writerow(padded("Jobs", counts))
         else:
             # Three sections, because the block answers three questions: how was each
@@ -896,25 +932,39 @@ class SummaryRenderer:
 
             problems = []
             if not alone:
-                # Labels carry counts, so their widths vary; pad them all (and Jobs:)
-                # to one width so the job lists line up under each other.
-                rows_out = [("Worst %s (%d/%d):" % (_worst_slug(one.header),
-                                                    one.bands["red"][0], one.graded()),
-                             one.worst_line()) for one in worst]
+                # (label, [(user, entry text, is long-running)]) per row. Labels carry
+                # counts, so widths vary; everything is padded to one width so the job
+                # lists line up under each other across rows.
+                rows_out = []
+                for one in worst:
+                    rows_out.append((
+                        "Worst %s (%d/%d):" % (_worst_slug(one.header),
+                                               one.bands["red"][0], one.graded()),
+                        [(job.user,
+                          "%s:%d%s:%s(%s)" % (job.jobid, round(job.value),
+                                              one.value_unit, one._amount(job.weight),
+                                              job.runtime),
+                          (job.duration or 0) > LONG_RUNNING)
+                         for job in one.worst]))
                 for name, headers, ranked in combined:
-                    # No denominator here: a row spanning metrics with different
-                    # coverage has no single honest total, so only the candidate count
-                    # is shown. No username either, unlike the per-metric rows: the
-                    # same job ids appear above with their owners.
-                    cells = "  ".join(
-                        _combined_cell(jid, values, self.tallies)
-                        for _score, jid, _user, values in ranked)
-                    rows_out.append(("Worst %s (%d):" % (
-                        name, self._combined_candidates(headers)), cells))
-                rows_out.append(("Jobs:", "  ".join(counts)))
-                label_width = max(len(label) for label, _ in rows_out)
-                problems = ["%-*s %s" % (label_width, label, cells)
-                            for label, cells in rows_out]
+                    # No denominator: a row spanning metrics with different coverage
+                    # has no single honest total, so only the candidate count is shown.
+                    rows_out.append((
+                        "Worst %s (%d):" % (name, self._combined_candidates(headers)),
+                        [(user,
+                          "%s(%s)" % (_combined_cell(jid, values, self.tallies)
+                                      .replace(" ", ":", 1).replace(" ", "/"), runtime),
+                          (duration or 0) > LONG_RUNNING)
+                         for _score, jid, user, values, runtime, duration in ranked]))
+                # Both widths are over possibly-empty sequences: a selection with
+                # nothing red has no Worst rows at all, leaving only Jobs:.
+                label_width = max([len(label) for label, _ in rows_out] + [len("Jobs:")])
+                user_width = max([len(user) + 1 for _label, entries in rows_out
+                                  for user, _t, _l in entries] + [0])
+                for label, entries in rows_out:
+                    problems.extend(self._worst_rows(label, entries, label_width,
+                                                     user_width))
+                problems.append("%-*s %s" % (label_width, "Jobs:", "  ".join(counts)))
 
             self._print_sections([("Summary by metric", summary),
                                   ("Average efficiency  (filled = used, grey = idle)",
@@ -946,6 +996,32 @@ class SummaryRenderer:
         return [line % values for line in self.STAT_LEGEND]
 
     BAR_WIDTH = 34
+    WORST_WIDTH = 132
+
+    def _worst_rows(self, label: str, entries, label_width: int,
+                    user_width: int) -> List[str]:
+        """One line per user: ``label  user| job:val:wasted(elapsed), job:...``.
+
+        Grouped because a single user usually owns several of the worst jobs, and
+        repeating their name three times says less than showing they own the row.
+        Entries wrap onto continuation lines rather than running past the table.
+        """
+        out = []
+        for user, jobs in _worst_groups(entries):
+            prefix = "%-*s %-*s" % (label_width, label, user_width, user + "|")
+            label = ""                          # only the first line is labelled
+            line, count = prefix, 0
+            for text, long_running in jobs:
+                cell = _SGR["red"] + text + _RESET if (
+                    long_running and self.options.color) else text
+                candidate = line + (" " if count == 0 else ", ") + cell
+                if count and len(_ESC_RE.sub("", candidate)) > self.WORST_WIDTH:
+                    out.append(line + ",")
+                    line, count = " " * len(prefix) + " " + cell, 1
+                    continue
+                line, count = candidate, count + 1
+            out.append(line)
+        return out
 
     def _print_sections(self, sections: List[Tuple[str, List[str]]]) -> None:
         """Print ``(title, lines)`` sections, numbered and ruled.
