@@ -485,14 +485,18 @@ job block ends with the efficiency chart repeated **per node**:
 
 ```
   Efficiency by node  (filled = used, grey = idle)
-    holygpu8a10302
-         CPU%  ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   11%
-         GPU%  █████████████████████████████████░   96%
-      SM_ACT%  █████████████████████████████░░░░░   84%
+    holygpu8a10302                                            holygpu8a10401
+         CPU%  ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   11%            CPU%  ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   11%
+         GPU%  █████████████████████████████████░   96%            GPU%  ████████████████████████████████░░   94%
+      SM_ACT%  █████████████████████████████░░░░░   84%         SM_ACT%  ████████████████████████████░░░░░░   84%
       ... one bar per graded column
-    holygpu8a10401
-         GPU%  ████████████████████████████████░░   94%
+    holygpu8a10402                                            holygpu8a10501
+         GPU%  █████████████████████████████████░   96%            GPU%  █████████████████████████████████░   97%
 ```
+
+Two groups to a row, so a four-node job is eight bars tall rather than thirty-two and
+two nodes can be compared without scrolling between them. The widest line is 124
+characters against the job table's 132.
 
 A node's value is the mean over its GPU rows, which within a node *is* the pooled
 figure. `CPU%` and `CPU-MEM` are already per-node figures repeated on each row, so

@@ -1526,23 +1526,78 @@ def _multinode_job(jid="1"):
         start=0, end=100, duration=100, jobid_raw=jid, cluster="c", user="alice")
 
 
+_RESET_T = "\033[0m"
+_BAR_RE = re.compile(r"(\S+)\s+[\u2588\u2591]+\s+(<?\d+)%")
+
+
 def _charts(records, **kw):
-    """``{unit: {metric: percent}}`` parsed back out of the --hwdetail charts."""
-    options = RenderOptions(view=kw.get("view", "all"), show_dcgm=False, csv=kw.get("csv", False),
-                            header=True, color=kw.get("color", False),
-                            thresholds=_thresholds(), nodename=kw.get("nodename"),
+    """``{unit: {metric: percent}}`` parsed back out of the --hwdetail charts.
+
+    The charts are laid out in columns, so a heading line names several units and a
+    bar line carries one bar per unit in the same order. Parsed positionally rather
+    than by character offset, which would break the moment a label width changed.
+    """
+    options = RenderOptions(view=kw.get("view", "all"), show_dcgm=False,
+                            csv=kw.get("csv", False), header=True,
+                            color=kw.get("color", False), thresholds=_thresholds(),
+                            nodename=kw.get("nodename"),
                             plot_avgeff=kw.get("plot_avgeff", True))
     text = _render(detail, list(records), records, {}, CTX, options)
-    charts, unit = {}, None
+    charts, row_units = {}, []
     for line in text.splitlines():
-        stripped = _ESC.sub("", line)
-        if "\u2588" in stripped or "\u2591" in stripped:
-            metric, _, tail = stripped.strip().partition("  ")
-            charts[unit][metric] = int(tail.strip().rstrip("%").split()[-1].lstrip("<"))
-        elif stripped.startswith("    ") and stripped.strip() and "Efficiency" not in line:
-            unit = stripped.strip()
-            charts[unit] = {}
+        plain = _ESC.sub("", line)
+        bars = _BAR_RE.findall(plain)
+        if bars:
+            for (metric, pct), unit in zip(bars, row_units):
+                charts[unit][metric] = int(pct.lstrip("<"))
+        elif plain.startswith("    ") and plain.strip() and "Efficiency" not in plain:
+            row_units = re.split(r"\s{3,}", plain.strip())
+            for unit in row_units:
+                charts.setdefault(unit, {})
     return charts, text
+
+
+def test_in_columns_packs_blocks_side_by_side_in_reading_order():
+    from jobscope.report import in_columns
+    blocks = [["a1", "a2"], ["b1", "b2"], ["c1", "c2"]]
+    out = in_columns(blocks, columns=2, gap=2)
+    # Two per row, then the odd block alone -- both of its lines.
+    assert out == ["a1  b1", "a2  b2", "c1", "c2"]
+
+
+def test_in_columns_pads_a_short_block():
+    """A metric absent from one group leaves its block a line short of its neighbour."""
+    from jobscope.report import in_columns
+    out = in_columns([["a1", "a2", "a3"], ["b1"]], columns=2, gap=1)
+    assert out == ["a1 b1", "a2", "a3"]
+
+
+def test_in_columns_measures_width_without_the_escapes():
+    """Padding by raw length would push the right column out by the SGR bytes."""
+    from jobscope.report import in_columns
+    colored = report._SGR["red"] + "ab" + _RESET_T
+    out = in_columns([[colored], ["cd"]], columns=2, gap=1)
+    # "ab" is two visible characters, so the neighbour starts three columns in.
+    assert _ESC.sub("", out[0]) == "ab cd"
+
+
+def test_the_hwdetail_charts_are_two_columns():
+    """Four nodes read as two rows of two, not thirty-two stacked lines."""
+    charts, text = _charts({"1": _multinode_job()})
+    # Only the chart region: the table above it also mentions the node names.
+    chart = text[text.index("Efficiency by"):].splitlines()
+    heading = [ln for ln in chart if "nodeA" in ln][0]
+    assert "nodeB" in heading                      # both headings share a line
+    bar = [ln for ln in chart if ln.count("GPU%") == 2][0]
+    assert bar.count("%") >= 3                     # two bars, two percentages
+
+
+def test_a_single_group_is_not_columnised():
+    records = {"1": _gpu_job("1", {"0": 90.0})}
+    _c, text = _charts(records)
+    chart = text[text.index("Efficiency by"):]
+    for line in chart.splitlines():
+        assert line.count("GPU%") <= 1             # nothing to pair it with
 
 
 def test_hwdetail_charts_one_group_per_node():

@@ -247,6 +247,32 @@ def bar_lines(items, indent: str = "  ") -> List[str]:
     return out
 
 
+def in_columns(blocks: List[List[str]], columns: int = 2, gap: int = 3) -> List[str]:
+    """Pack equal-shaped blocks of lines side by side, in reading order.
+
+    Widths are measured with the escapes stripped, or a coloured block would be padded
+    by the length of its SGR bytes and push its neighbour out of line. Blocks of unequal
+    height are padded with blanks, since a metric absent from one group leaves it a line
+    short of the others.
+    """
+    blocks = [b for b in blocks if b]
+    if not blocks:
+        return []
+    if columns < 2 or len(blocks) < 2:
+        return [line for block in blocks for line in block]
+    width = max(len(_ESC_RE.sub("", line)) for block in blocks for line in block)
+    out = []
+    for start in range(0, len(blocks), columns):
+        row = blocks[start:start + columns]
+        for index in range(max(len(b) for b in row)):
+            cells = []
+            for block in row:
+                line = block[index] if index < len(block) else ""
+                cells.append(line + " " * (width - len(_ESC_RE.sub("", line))))
+            out.append((" " * gap).join(cells).rstrip())
+    return out
+
+
 def tint(text: str, band: str) -> str:
     """``text`` wrapped in ``band``'s colour, or unchanged when there is none.
 
@@ -1295,7 +1321,7 @@ class DetailRenderer:
             groups = [(node, [r for r in rows if r[_NODE_INDEX] == node])
                       for node in nodes]
             title = "Efficiency by node"
-        out = ["", "  %s  (filled = used, grey = idle)" % title]
+        blocks = []
         for label, members in groups:
             items = []
             for col in metrics:
@@ -1310,9 +1336,12 @@ class DetailRenderer:
                 items.append((col.header, mean,
                               cell_band(self.options, col.header, mean)))
             if items:
-                out.append("    " + label)
-                out.extend(bar_lines(items, indent="      "))
-        return out
+                blocks.append(["    " + label] + bar_lines(items, indent="      "))
+        if not blocks:
+            return []
+        # Side by side: a four-node job is eight bars tall rather than thirty-two, and
+        # two nodes can be compared without scrolling between them.
+        return ["", "  %s  (filled = used, grey = idle)" % title] + in_columns(blocks)
 
     def finish(self) -> None:
         self._start()
