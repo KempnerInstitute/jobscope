@@ -9,7 +9,7 @@ from jobscope.cli import build_parser
 from jobscope.config import Thresholds
 from jobscope.errors import JobscopeError
 
-RED_MAP = Thresholds(25, 20, 25, 25, 15).red_map()
+THRESHOLDS = Thresholds(red=10, power_w=100)
 
 SUMMARY_CSV = """\
 User,alice
@@ -64,11 +64,14 @@ def test_is_pct():
 
 
 def test_grade_thresholds():
-    assert plot.grade("GPU%", 10, RED_MAP, 15) == "red"      # < 25
-    assert plot.grade("GPU%", 30, RED_MAP, 15) == "yellow"   # < 50
-    assert plot.grade("GPU%", 60, RED_MAP, 15) == "green"    # >= 50
-    assert plot.grade("SM_ACT%", 10, RED_MAP, 15) == "red"   # falls back to default 15
-    assert plot.grade("POWER_W", 100, RED_MAP, 15) == "white"  # non-percent
+    assert plot.grade("GPU%", 9, THRESHOLDS) == "red"        # < 10
+    assert plot.grade("GPU%", 15, THRESHOLDS) == "yellow"    # < 20
+    assert plot.grade("GPU%", 60, THRESHOLDS) == "green"     # >= 20
+    assert plot.grade("SM_ACT%", 9, THRESHOLDS) == "red"     # one cutoff for every %
+    # POWER_W is graded, in watts: below the floor a GPU counts as idle.
+    assert plot.grade("POWER_W", 73, THRESHOLDS) == "red"
+    assert plot.grade("POWER_W", 300, THRESHOLDS) == "green"
+    assert plot.grade("RUNTIME", 5, THRESHOLDS) == "white"   # not a graded column
 
 
 def test_detect_kind():

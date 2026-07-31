@@ -490,17 +490,18 @@ def test_sum_and_max_metrics_fall_back_to_the_plain_mean():
 
 # --- the efficiency block ---------------------------------------------------
 
-def test_the_bands_report_job_share_and_resource_share():
-    """The finding is the gap between the two shares.
+def test_the_bands_are_plain_job_counts():
+    """Just how many jobs fell in each band; the shares live in the CSV.
 
-    One idle 16-GPU job against four busy 1-GPU jobs: 20% of the jobs, but 80% of
-    the GPUs. Either number alone hides it.
+    One idle 16-GPU job against four busy 1-GPU jobs. The resource concentration
+    (that one job holds 80% of the GPUs) is what IDLE and the CSV carry now.
     """
     records = {"idle": _gpu_job("idle", {str(i): 0.0 for i in range(16)})}
     records.update({str(i): _gpu_job(str(i), {"0": 90.0}) for i in range(4)})
     row = _stat_rows(records)["GPU%"]
-    assert row[4] == "1 (20%)/80%"       # red: 1 of 5 jobs, holding 80% of the GPUs
-    assert row[6] == "4 (80%)/20%"       # green: 4 of 5 jobs, holding 20%
+    assert row[1:] == ["1", "0", "4"]    # red / yellow / green, jobs only
+    # 16 idle GPUs plus 10% of the 4 busy ones = 16.4 of 20.
+    assert row[0] == "16.4 (82%)"
 
 
 def _stat_rows(records, **kw):
@@ -527,7 +528,7 @@ def _stat_rows(records, **kw):
         # Columns are separated by two or more spaces; a band cell contains a
         # single one ("1 (20%)/80%"), so splitting on any whitespace would break it.
         cells = re.split(r"\s{2,}", line.strip())
-        rows[cells[0]] = cells[1:]      # [RED<, ALLOC, USED, IDLE, RED, YELLOW, GREEN]
+        rows[cells[0]] = cells[1:]      # [IDLE, RED, YELLOW, GREEN]
     return rows
 
 
@@ -546,7 +547,8 @@ def test_the_stat_table_carries_a_legend():
     renderer.add(list(records), records, {})
     renderer.finish()
     text = out.getvalue()
-    assert "RED< is the red cutoff, yellow ends at twice it" in text
+    assert "red below 10%, yellow below 20%, green above" in text
+    assert "POWER_W red below 100 W" in text and "Counts are jobs" in text
     assert "IDLE measures efficiency" in text
     # Directly above the header it explains, and inside the table width.
     lines = text.splitlines()
@@ -577,9 +579,9 @@ def test_a_selection_can_be_half_idle_with_no_red_job():
     records = {str(i): _timed_job(str(i), 3600, cores=4, cpu_seconds=0.5 * 4 * 3600)
                for i in range(6)}
     row = _stat_rows(records, view="cpu", time_weighted=True)["CPU%"]
-    assert row[4] == "0 (0%)/0%"                 # nothing red
-    assert row[3] == "12h (50%)"                 # yet half of 24 core-hours is idle
-    assert row[6].startswith("6 (100%)")         # every job green
+    assert row[1] == "0"                         # nothing red
+    assert row[0] == "12h (50%)"                 # yet half of 24 core-hours is idle
+    assert row[3] == "6"                         # every job green
 
 
 def test_the_default_view_reports_both_resources():
@@ -616,8 +618,8 @@ def test_the_totals_line_reconciles_with_its_own_percentage():
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="gpu", header=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    row = _stat_rows(records, view="gpu")["GPU%"]
-    assert row[1:4] == ["2", "1.7", "0.3 (15%)"]          # ALLOC, USED, IDLE: 0.3/2 = 15%
+    # ALLOC and USED are gone; IDLE still reconciles with its own percentage.
+    assert _stat_rows(records, view="gpu")["GPU%"][0] == "0.3 (15%)"   # 0.3/2 = 15%
 
 
 def test_the_totals_line_splits_allocation_into_used_and_idle():
@@ -627,8 +629,7 @@ def test_the_totals_line_splits_allocation_into_used_and_idle():
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    row = _stat_rows(records)["GPU%"]
-    assert row[1:4] == ["4", "1", "3 (75%)"]              # ALLOC, USED, IDLE
+    assert _stat_rows(records)["GPU%"][0] == "3 (75%)"    # 3 of 4 GPUs idle
 
 
 def test_every_graded_column_gets_a_row_in_column_order():
@@ -666,11 +667,13 @@ def test_each_metric_is_weighted_by_the_resource_it_measures():
     records = {j: _timed_job(j, 3600, gpu_util=50.0, gpus=2, cores=4,
                              cpu_seconds=3600 * 4 * 0.5, total_gb=16)
                for j in ("a", "b")}
+    # Read off IDLE, the only amount left: each is half of that metric's own
+    # allocation, so the three denominators are visibly different resources.
     rows = _stat_rows(records, time_weighted=True)
-    assert rows["CPU%"][1] == "8h"          # 2 jobs x 4 cores x 1h
-    assert rows["MEM%"][1] == "32GBh"       # 2 jobs x 16GB x 1h
-    assert rows["GPU%"][1] == "4h"          # 2 jobs x 2 GPUs x 1h
-    assert rows["GMEM%"][1] == "4h"         # GPU-hours as well
+    assert rows["CPU%"][0] == "4h (50%)"        # half of 2 jobs x 4 cores x 1h
+    assert rows["MEM%"][0] == "16GBh (50%)"     # half of 2 jobs x 16GB x 1h
+    assert rows["GPU%"][0] == "2h (50%)"        # half of 2 jobs x 2 GPUs x 1h
+    assert rows["GMEM%"][0] == "2h (50%)"       # GPU-hours as well
 
 
 def test_byte_amounts_promote_to_terabytes_consistently_within_a_row():
@@ -678,8 +681,7 @@ def test_byte_amounts_promote_to_terabytes_consistently_within_a_row():
     records = {j: _timed_job(j, 3600, gpu_util=50.0, total_gb=20000, used_gb=1000)
                for j in ("a", "b")}
     row = _stat_rows(records, time_weighted=True)["MEM%"]
-    assert row[1].endswith("TBh") and row[2].endswith("TBh"), row
-    assert "TBh" in row[3]
+    assert "TBh" in row[0], row              # promoted, not a 9-digit byte-second
 
 
 def test_the_band_cells_are_tinted_and_idle_takes_the_pooled_grade():
@@ -711,14 +713,15 @@ def test_the_table_is_plain_in_csv_mode_and_when_color_is_off():
 
 def test_worst_ranks_by_wasted_resource_not_by_size():
     """A large job at a mediocre rate wastes more than a small one at zero."""
-    records = {"big": _timed_job("big", 100 * 3600, gpu_util=24.0),    # 76 GPU-h idle
+    # Both red under the uniform 10% cutoff, so both are candidates.
+    records = {"big": _timed_job("big", 100 * 3600, gpu_util=9.0),     # 91 GPU-h idle
                "small": _timed_job("small", 10 * 3600, gpu_util=0.0)}  # 10 GPU-h idle
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, time_weighted=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    worst = [ln for ln in out.getvalue().splitlines() if ln.startswith("Worst GPU:")][0]
+    worst = [ln for ln in out.getvalue().splitlines() if ln.startswith("Worst GPU")][0]
     assert worst.index("big") < worst.index("small")
 
 
@@ -729,10 +732,11 @@ def _worst_lines(records, view="all", time_weighted=True):
         CTX, RenderOptions(view=view, header=True, time_weighted=time_weighted), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    # Values are the payload only: a job id like "A" would otherwise match the "A"
-    # in "alice", and "C" the "C" in "Worst CPU:".
-    return {ln.split(":")[0]: ln.split(":", 1)[1] for ln in out.getvalue().splitlines()
-            if ln.startswith("Worst")}
+    # Keyed on the label without its "(n/total)" count, so a test can ask for
+    # "Worst GPU" without knowing the counts. Values are the payload only: a job id
+    # like "A" would otherwise match the "A" in "alice".
+    return {ln.split("(")[0].strip(): ln.split(":", 1)[1]
+            for ln in out.getvalue().splitlines() if ln.startswith("Worst")}
 
 
 def test_the_combined_worst_normalizes_each_resource():
@@ -819,7 +823,7 @@ def _worst_with_power(records, watts, **kw):
             for j in records}
     renderer.add(list(records), records, dcgm)
     renderer.finish()
-    return {ln.split(":")[0]: ln.split(":", 1)[1]
+    return {ln.split("(")[0].strip(): ln.split(":", 1)[1]
             for ln in out.getvalue().splitlines() if ln.startswith("Worst")}
 
 
@@ -1045,7 +1049,7 @@ _ESC = re.compile(r"\033\[[0-9;]*m")
 
 def _thresholds():
     from jobscope.config import Thresholds
-    return Thresholds(gpu=25, gmem=20, cpu=25, mem=25, default=15)
+    return Thresholds(red=10, power_w=100)
 
 
 def _render_colored(records, color=True, csv=False, dcgm_data=None, show_dcgm=False):
@@ -1070,9 +1074,9 @@ def test_low_utilization_is_red_and_high_is_green():
 
 
 def test_the_middle_band_is_yellow():
-    records = {"1": _gpu_job("1", {"0": 30.0}), "2": _gpu_job("2", {"0": 95.0})}
+    records = {"1": _gpu_job("1", {"0": 15.0}), "2": _gpu_job("2", {"0": 95.0})}
     row = [r for r in _render_colored(records).splitlines() if r.startswith("1 ")][0]
-    assert "\033[33m30" in row             # >= 25 but < 50
+    assert "\033[33m15" in row             # >= 10 but < 20, the uniform cutoff
 
 
 def test_color_does_not_shift_the_columns():
@@ -1131,7 +1135,8 @@ def test_the_table_and_the_charts_grade_alike():
     """One rule, so a job red in a chart is red in the table."""
     from jobscope import plot
     thresholds = _thresholds()
-    red_map, default = thresholds.red_map(), thresholds.default
+
     for header in ("GPU%", "GMEM%", "CPU%", "SM_ACT%"):
         for value in (0, 10, 24, 25, 40, 49, 50, 99):
-            assert thresholds.grade(header, value) == plot.grade(header, value, red_map, default)
+            assert (thresholds.grade(header, value) or "white") == \
+                plot.grade(header, value, thresholds)

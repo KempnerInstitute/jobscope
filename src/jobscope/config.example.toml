@@ -28,23 +28,22 @@ sampling_period = 60
 # site_jobstats_config_path = "/opt/jobstats"
 
 [thresholds]
-# Red cutoffs (percent) for plot color grading. A %-metric value below its cutoff
-# renders red, below twice the cutoff yellow, otherwise green.
-gpu = 25
-gmem = 20
-# CPU% is the share of *allocated* cores kept busy, and a GPU job legitimately
-# keeps few of them, so this sits well below the others. Raise it on a CPU
-# partition, where a job asking for cores is expected to use them.
-cpu = 10
-mem = 25
-# Cutoff applied to any other %-metric (e.g. the DCGM utilization columns).
-default = 15
-# POWER_W is graded in WATTS, not percent: a GPU drawing less than this is treated
-# as idle. That is the one idle signal a duty cycle cannot fake -- a job spinning on
-# a trivial kernel reads busy on GPU% while drawing idle watts. Measured on one
-# GPU partition, idle jobs drew 73-74 W (with GPU% 0 and SM_ACT% 0.0), the next
-# values were 99-101 W, and the median was 289 W against a 573 W maximum. Raise it
-# for hardware with a higher idle draw.
+# Red cutoff in percent, applied to every %-metric (CPU%, MEM%, GPU%, GMEM%, and the
+# DCGM columns). Yellow runs up to twice this, green above. One number rather than
+# one per metric: a reader should not have to carry a different threshold for each
+# row of the summary table.
+#
+# Note red/yellow/green catch *pathological* jobs, not inefficient ones -- at 10, a
+# job at 21% is green while leaving four fifths of its allocation unused. Read the
+# IDLE column of the summary for efficiency.
+red = 10
+
+# POWER_W is graded in WATTS, not percent: a GPU drawing less than this counts as
+# idle. That is the one idle signal a duty cycle cannot fake -- a job spinning on a
+# trivial kernel reads busy on GPU% while drawing idle watts. Measured on one GPU
+# partition, idle jobs drew 73-74 W (with GPU% 0 and SM_ACT% 0.0), the next values
+# were 99-101 W, and the median was 289 W against a 573 W maximum. Raise it for
+# hardware with a higher idle draw.
 power_w = 100
 
 [defaults]

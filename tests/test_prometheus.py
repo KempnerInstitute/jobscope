@@ -51,7 +51,7 @@ def test_query_range_error_returns_empty(monkeypatch):
 
 def _cfg(url):
     return Config(prometheus_url=url, sampling_period=45, sampling_period_explicit=True,
-                  site_jobstats_config_path=None, thresholds=Thresholds(25, 20, 25, 25, 15),
+                  site_jobstats_config_path=None, thresholds=Thresholds(10, 100),
                   defaults=Defaults(workers=8, timeout=90.0, min_runtime=180))
 
 

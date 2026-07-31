@@ -21,8 +21,8 @@ sampling_period = 30
 site_jobstats_config_path = "/opt/jobstats"
 
 [thresholds]
-gpu = 40
-default = 5
+red = 40
+power_w = 250
 
 [defaults]
 workers = 4
@@ -36,7 +36,8 @@ def test_defaults_when_no_file(tmp_path):
     assert cfg.prometheus_url is None
     assert cfg.sampling_period == 60
     assert cfg.defaults.workers == 8
-    assert cfg.thresholds.gpu == 25
+    assert cfg.thresholds.red == 10
+    assert cfg.thresholds.power_w == 100
 
 
 def test_load_from_file(tmp_path):
@@ -47,9 +48,8 @@ def test_load_from_file(tmp_path):
     assert cfg.sampling_period == 30
     assert cfg.sampling_period_explicit is True
     assert cfg.site_jobstats_config_path == "/opt/jobstats"
-    assert cfg.thresholds.gpu == 40
-    assert cfg.thresholds.default == 5
-    assert cfg.thresholds.gmem == 20  # unset -> built-in default
+    assert cfg.thresholds.red == 40
+    assert cfg.thresholds.power_w == 250
     assert cfg.defaults == Defaults(workers=4, timeout=15.0, min_runtime=90)
 
 
@@ -75,7 +75,7 @@ def test_missing_explicit_file_raises():
 def _cfg(**kw):
     base = dict(prometheus_url=None, sampling_period=60, sampling_period_explicit=False,
                 site_jobstats_config_path=None,
-                thresholds=Thresholds(25, 20, 25, 25, 15),
+                thresholds=Thresholds(10, 100),
                 defaults=Defaults(8, 60.0, 180))
     base.update(kw)
     return Config(**base)
@@ -171,10 +171,18 @@ def test_import_site_prometheus_missing_prom_server(tmp_path):
     assert config_module._import_site_prometheus(str(tmp_path)) == (None, 30)
 
 
-def test_thresholds_red_map():
-    red = Thresholds(25, 20, 25, 25, 15).red_map()
-    assert red == {"GPU%": 25, "DUTY%": 25, "GMEM%": 20, "CPU%": 25, "MEM%": 25,
-                   "POWER_W": 100}          # watts, and defaulted
+def test_one_cutoff_covers_every_percent_metric():
+    """Uniform on purpose: a reader should not carry a threshold per row.
+
+    The per-metric values were never calibrated against each other, and having five
+    of them is what made the summary table's cutoff column confusing.
+    """
+    t = Thresholds(red=10, power_w=100)
+    for header in ("GPU%", "CPU%", "MEM%", "GMEM%", "SM_ACT%", "OCC%", "DRAM%"):
+        assert t.cutoff(header) == 10
+        assert t.grade(header, 9) == "red" and t.grade(header, 25) == "green"
+    assert t.cutoff("POWER_W") == 100        # watts, its own knob
+    assert t.cutoff("RUNTIME") is None       # not graded
 
 
 def test_power_is_graded_in_watts_not_percent():
@@ -183,13 +191,13 @@ def test_power_is_graded_in_watts_not_percent():
     A GPU below the floor is idle, which is the signal a duty cycle cannot fake: a
     job spinning on a trivial kernel reads busy on GPU% and draws idle watts.
     """
-    t = Thresholds(25, 20, 10, 25, 15, power_w=100)
+    t = Thresholds(red=10, power_w=100)
     assert t.grade("POWER_W", 73) == "red"        # measured idle floor
     assert t.grade("POWER_W", 135) == "yellow"    # below twice the floor
     assert t.grade("POWER_W", 289) == "green"     # the measured median
     # Without its own cutoff it would fall to `default`, i.e. 15 *watts*, and
     # nothing is ever below that -- every job would read green.
-    assert grade_band(73, 15) == "green"
+    assert grade_band(73, 10) == "green"
 
 
 def test_power_floor_comes_from_the_config_file(tmp_path):
@@ -199,7 +207,7 @@ def test_power_floor_comes_from_the_config_file(tmp_path):
 
 
 def test_a_column_with_no_cutoff_and_no_percent_is_ungraded():
-    t = Thresholds(25, 20, 10, 25, 15)
+    t = Thresholds(red=10)
     assert t.grade("RUNTIME", 5) == "" and t.grade("ENERGY_kWh", 0.3) == ""
 
 
@@ -207,3 +215,13 @@ def test_example_config_text():
     text = example_config_text()
     assert "[prometheus]" in text
     assert "JOBSCOPE_PROM_URL" in text
+
+
+def test_a_config_still_setting_the_old_per_metric_keys_is_told(tmp_path, capsys):
+    """Silently moving a tuned site to a different cutoff would be worse than noisy."""
+    path = tmp_path / "c.toml"
+    path.write_text("[thresholds]\ngpu = 25\nmem = 30\n")
+    cfg = load_config(str(path))
+    err = capsys.readouterr().err
+    assert "gpu, mem no longer apply" in err and "'red'" in err
+    assert cfg.thresholds.red == 10          # and the uniform cutoff is what applies

@@ -32,20 +32,19 @@ JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_
                                             ... 12 more rows ...
 ------------------------------------------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              12     9            80     3       64.9     14.7    0.3      9.5     455
-  RED< is the red cutoff, yellow ends at twice it; band cells are jobs (% of jobs)/% of resource-time
+  red below 10%, yellow below 20%, green above; POWER_W red below 100 W. Counts are jobs.
   bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
-METRIC   RED<  ALLOC     USED     IDLE            RED             YELLOW          GREEN
-CPU%     10    56.2h     6.9h     49.3h (88%)     0 (0%)/0%       17 (100%)/100%  0 (0%)/0%
-MEM%     25    586.5GBh  52.1GBh  534.4GBh (91%)  16 (94%)/91%    1 (6%)/9%       0 (0%)/0%
-GPU%     25    7.1h      5.7h     1.4h (20%)      1 (6%)/1%       1 (6%)/2%       15 (88%)/97%
-GMEM%    20    7.1h      0.2h     6.9h (97%)      17 (100%)/100%  0 (0%)/0%       0 (0%)/0%
-SM_ACT%  15    7.1h      4.6h     2.5h (35%)      1 (6%)/1%       1 (6%)/2%       15 (88%)/97%
-OCC%     15    7.1h      1h       6h (85%)        13 (76%)/52%    4 (24%)/48%     0 (0%)/0%
-TENSOR%  15    7.1h      0h       7h (100%)       17 (100%)/100%  0 (0%)/0%       0 (0%)/0%
-DRAM%    15    7.1h      0.7h     6.4h (91%)      16 (94%)/70%    1 (6%)/30%      0 (0%)/0%
-Worst GPU:   35260825 0.1h@20% bdesinghu
-Worst both:  35260825 4%gpu+0%cpu bdesinghu
-Jobs:        cpu-jobs=17  gpu-jobs=17  gpus=17
+METRIC   IDLE            RED  YELLOW  GREEN
+CPU%     49.3h (88%)     0    17      0
+MEM%     534.4GBh (91%)  15   1       1
+GPU%     1.4h (20%)      0    0       17
+GMEM%    6.9h (97%)      17   0       0
+SM_ACT%  2.5h (35%)      1    0       16
+OCC%     6h (85%)        6    10      1
+TENSOR%  7h (100%)       17   0       0
+DRAM%    6.4h (91%)      14   3       0
+Worst SM (1/17): 35260825 0.1h@3% bdesinghu
+Jobs:            cpu-jobs=17  gpu-jobs=17  gpus=17
 ```
 
 ## Requirements
@@ -206,25 +205,25 @@ held up on the host, and no single view used to show both.
 With more than one job the table ends in footers:
 
 ```
-Used/GPU-hr:                              5      4            44   28     38.4  11.8  10.3  8.4  278
-  RED< is the red cutoff, yellow ends at twice it; band cells are jobs (% of jobs)/% of resource-time
+Used/GPU-hr:                              5      4            43   30     37.5  11.4  9.9  8.2  272
+  red below 10%, yellow below 20%, green above; POWER_W red below 100 W. Counts are jobs.
   bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
-METRIC   RED<  ALLOC     USED    IDLE            RED            YELLOW         GREEN
-CPU%     10    10135.2h  522.6h  9612.5h (95%)   159 (50%)/62%  158 (50%)/35%  2 (1%)/4%
-MEM%     25    126.6TBh  5.3TBh  121.4TBh (96%)  315 (99%)/99%  1 (0%)/0%      3 (1%)/1%
-GPU%     25    719.4h    314.7h  404.7h (56%)    13 (4%)/54%    4 (1%)/0%      302 (95%)/46%
-GMEM%    20    719.4h    201.6h  517.7h (72%)    308 (97%)/67%  0 (0%)/0%      11 (3%)/33%
-SM_ACT%  15    721.7h    277.5h  444.2h (62%)    48 (11%)/54%   17 (4%)/0%     360 (85%)/46%
-OCC%     15    721.7h    85.3h   636.5h (88%)    341 (80%)/58%  67 (16%)/34%   17 (4%)/8%
-TENSOR%  15    721.7h    74.1h   647.6h (90%)    421 (99%)/71%  3 (1%)/3%      1 (0%)/26%
-DRAM%    15    721.7h    60.9h   660.8h (92%)    400 (94%)/61%  18 (4%)/36%    7 (2%)/3%
-Worst GPU:   35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 45.7h@0% amazloumi
-Worst SM:    35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 45.7h@0% amazloumi
-Worst POWER: 35475803 142.9h@73W amazloumi  35476814 142h@73W amazloumi  36337781 45.7h@73W amazloumi
-Worst CPU:   35475803 2286.6h@0% amazloumi  35476814 2271.9h@0% amazloumi  36337781 731.5h@0% amazloumi
-Worst both:  35475803 35%gpu+23%cpu amazloumi  35476814 35%gpu+23%cpu amazloumi  36441613 2%gpu+27%cpu tngotiaoco
-Worst all:   35475803 35%gpu+32%sm+40%pw+23%cpu amazloumi  35476814 35%gpu+32%sm+40%pw+23%cpu amazloumi
-Jobs:        cpu-jobs=319  gpu-jobs=319  gpus=381  no-runtime=5
+METRIC   IDLE            RED  YELLOW  GREEN
+CPU%     10034.5h (95%)  159  158     2
+MEM%     129.6TBh (96%)  307  8       4
+GPU%     408.8h (54%)    5    8       306
+GMEM%    528.9h (70%)    299  9       11
+SM_ACT%  452h (60%)      35   17      373
+OCC%     660.6h (88%)    126  269     30
+TENSOR%  672.3h (89%)    414  9       2
+DRAM%    688.3h (91%)    389  18      18
+Worst GPU (5/319):    35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 47.7h@0% amazloumi
+Worst SM (35/425):    35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 47.7h@0% amazloumi
+Worst POWER (41/425): 35475803 142.9h@73W amazloumi  35476814 142h@73W amazloumi  36337781 47.7h@73W amazloumi
+Worst CPU (159/319):  35475803 2286.6h@0% amazloumi  35476814 2271.9h@0% amazloumi  36337781 763.7h@0% amazloumi
+Worst both (159):     35475803 35%gpu+23%cpu  35476814 35%gpu+23%cpu  36337781 12%gpu+8%cpu
+Worst all (210):      35475803 35%gpu+32%sm+40%pw+23%cpu  35476814 35%gpu+31%sm+40%pw+23%cpu
+Jobs:                 cpu-jobs=319  gpu-jobs=319  gpus=381  no-runtime=5
 ```
 
 **There is no per-job mean**, on purpose. Utilization is bimodal -- jobs cluster
@@ -249,18 +248,20 @@ So the denominators differ by row on purpose, and reading down the `IDLE` column
 is the fastest way to see which resource a selection actually wasted: above, the
 GPUs were 56% idle while the *cores* were 95% idle and the *tensor cores* 90%.
 
-`RED<` is that metric's own red cutoff -- red below it, yellow below twice it,
-green above -- and it varies by row: 25 for `GPU%`, 10 for `CPU%`, 20 for `GMEM%`,
-15 for anything without an explicit setting. The table prints a two-line legend
-saying so, since neither the threshold nor the implicit yellow edge is obvious.
+One cutoff covers every metric -- **red below 10%, yellow below 20%, green above**
+-- so there is no per-row threshold to carry and no cutoff column. `POWER_W` is red
+below 100 W. The table prints a two-line legend saying so.
+
+The band cells are plain job counts. Their resource shares stay in the `--csv`
+output for anyone scripting them.
 
 **`green` means "not pathological", not "efficient".** With a red cutoff of 10 a
 job at 21% is green while wasting four fifths of its cores, so a selection can be
 half idle with nearly every job green:
 
 ```
-METRIC   RED<  ALLOC  USED   IDLE        RED        YELLOW     GREEN
-CPU%     10    173    88.7   84.3 (49%)  0 (0%)/0%  1 (7%)/5%  13 (93%)/95%
+METRIC   IDLE            RED  YELLOW  GREEN
+CPU%     84.3 (49%)      0    1       13
 ```
 
 That is not a contradiction: every job there used about half its cores, so none is
@@ -311,10 +312,9 @@ the cells and colour `jobscope plot`, so the block is a tally of what you can
 already see.
 
 The **running** view reports the same table over resource *counts* rather than
-resource-hours (`Used/GPU:`, and `ALLOC` of `20` GPUs / `269` cores / `916GB`).
-`USED` is fractional there because it is GPU-equivalents busy, not whole GPUs. Its
-numbers are one scrape at a single moment, so weighting them by elapsed time would
-claim that instant represents the whole run; `--avg` folds each job over its
+resource-hours (`Used/GPU:`, and `IDLE` in GPUs / cores / GB rather than hours).
+Its numbers are one scrape at a single moment, so weighting them by elapsed time
+would claim that instant represents the whole run; `--avg` folds each job over its
 runtime and does get the hour-based form.
 
 The two job counts on `Jobs:` differ whenever the selection mixes CPU-only and GPU
@@ -345,20 +345,19 @@ The cutoffs are per column and site-tunable in `[thresholds]`, and they are the
 same ones `jobscope plot` grades with, so a job red in a chart is red in the table:
 
 ```
-gpu = 25      GPU% red below this, yellow below 50
-gmem = 20     GMEM%
-cpu = 10      CPU%  (low on purpose -- see below)
-mem = 25      MEM%
-default = 15  every other %-metric (SM_ACT%, OCC%, TENSOR%, DRAM%, ...)
-power_w = 100 POWER_W, in WATTS -- below this a GPU counts as idle
+red = 10       every %-metric: red below 10, yellow below 20, green above
+power_w = 100  POWER_W, in WATTS -- below this a GPU counts as idle
 ```
 
-`cpu` sits below the others because `CPU%` is the share of *allocated* cores a job
-kept busy, and a GPU job legitimately keeps very few -- it asks for a batch of
-cores and puts the work on the GPU. Measured over a day on one GPU partition,
-`CPU%` had a median of 10 and a maximum of 18 across 396 jobs, so the old cutoff
-of 25 marked every job red and distinguished nothing. Raise it on a CPU
-partition, where a job that asks for cores is expected to use them.
+One cutoff rather than one per metric: a reader should not have to carry a different
+threshold for each row of the summary table, and the old per-metric values were
+never calibrated against each other. `POWER_W` is the exception because watts are
+not a percentage -- and it is the one idle signal a duty cycle cannot fake, since a
+job spinning on a trivial kernel reads busy on `GPU%` while drawing idle watts.
+
+`[thresholds] gpu`, `gmem`, `cpu`, `mem` and `default` no longer do anything. A
+config that still sets them prints one note saying so rather than silently changing
+your cutoffs.
 
 Colour is dropped automatically when the output is not a terminal, with `--csv`,
 under `$NO_COLOR`, or with `--no-color` -- escape codes in a redirected file are

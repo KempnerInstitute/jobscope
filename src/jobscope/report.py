@@ -380,7 +380,16 @@ class EfficiencyTally:
 
     def cutoff(self) -> float:
         """The red threshold for this column, from the site config."""
-        return self.thresholds.red_map().get(self.header, self.thresholds.default)
+        return self.thresholds.cutoff(self.header)
+
+    def graded(self) -> int:
+        """Jobs this metric measured -- the denominator behind its Worst row.
+
+        Differs per metric because coverage does: a finished job with no stored blob
+        has no GPU% but still has DCGM data, so SM_ACT% can cover more jobs than
+        GPU% over the same selection.
+        """
+        return sum(count for count, _weight in self.bands.values())
 
     def band_of(self, value: Optional[float]) -> str:
         """This column's band for ``value``, or "" when it is not graded."""
@@ -423,27 +432,22 @@ class EfficiencyTally:
     def stat_row(self) -> List[Tuple[str, str]]:
         """This metric's table row as ``(cell, band)`` pairs; band "" means no tint.
 
-        ALLOC and USED stay plain. IDLE carries the metric's own pooled grade, so
-        the eye lands on the metrics that wasted their allocation. Each band cell is
-        tinted its own colour, since that is the colour it is naming.
+        Two columns and three counts. ALLOC and USED came out because IDLE already
+        carries the same information in the form anyone acts on -- how much went
+        unused, and what share of the allocation that was. The band cells are bare
+        job counts; their resource shares stay in the CSV for scripting.
+
+        IDLE carries the metric's own pooled grade, so the eye lands on the metrics
+        that wasted their allocation. Each band cell is tinted its own colour, since
+        that is the colour it names.
         """
         idle = self.idle()
         idle_pct = round(100 * idle / self.total) if self.total else 0
-        jobs_total = sum(count for count, _ in self.bands.values())
         row = [(self.header, ""),
-               # The cutoff has to be per row: red is below 25 for GPU% but below
-               # 15 for SM_ACT%, so a single header could not state it.
-               ("%g" % self.cutoff(), ""),
-               (self._amount(self.total), ""),
-               (self._amount(self.used), ""),
                ("%s (%d%%)" % (self._amount(idle), idle_pct),
                 self.band_of(self.pooled()))]
         for band in ("red", "yellow", "green"):
-            jobs, weight = self.bands[band]
-            row.append(("%d (%d%%)/%d%%" % (
-                jobs,
-                round(100 * jobs / jobs_total) if jobs_total else 0,
-                round(100 * weight / self.total) if self.total else 0), band))
+            row.append(("%d" % self.bands[band][0], band))
         return row
 
     def worst_line(self) -> str:
@@ -505,11 +509,12 @@ class SummaryRenderer:
         self.durations = set()      # distinct runtimes, likewise
         self.gpu_total = 0          # GPUs across the selection, for the Jobs footer
         self.unweighted = 0         # jobs left out of the weighting for want of a runtime
-        # {jobid: ({header: wasted}, user)} for jobs red in at least one graded
+        # {jobid: ({header: wasted}, user, {headers it is red in})} for jobs red in
+        # at least one graded
         # metric, which is what the combined rankings need: a share cannot be taken
         # until the selection's totals are known, so the candidates must be kept.
         # Bounded by the red jobs, not the selection -- on a healthy partition, few.
-        self.waste: Dict[str, Tuple[Dict[str, float], str]] = {}
+        self.waste: Dict[str, Tuple[Dict[str, float], str, frozenset]] = {}
         # One tally per graded column, so every metric on screen gets a summary and
         # the set follows the view for free: 8 by default, CPU%/MEM% under --cpu,
         # 6 under --gpu, the full catalog under --dcgm. Under time weighting the
@@ -614,16 +619,16 @@ class SummaryRenderer:
         the job is a candidate at all. That test is what keeps the lists actionable:
         a 95%-efficient job can idle 50 GPU-hours simply by being enormous.
         """
-        wasted, red = {}, False
+        wasted, red = {}, set()
         for header, tally in self.tallies.items():
             value, weight = values.get(header), weights[tally.weight_key]
             if value is None or weight <= 0:
                 continue
             wasted[header] = tally.waste_of(value, weight)
             if tally.band_of(value) == "red":
-                red = True
+                red.add(header)
         if red:
-            self.waste[jid] = (wasted, user)
+            self.waste[jid] = (wasted, user, frozenset(red))
 
     def _combined_worst(self, headers: Tuple[str, ...]
                         ) -> List[Tuple[float, str, str, List[Tuple[str, float]]]]:
@@ -643,11 +648,19 @@ class SummaryRenderer:
             # zero total is undefined and the metric's own row already says so.
             return []
         scored = []
-        for jid, (wasted, user) in self.waste.items():
+        for jid, (wasted, user, red) in self.waste.items():
+            if not red & set(headers):
+                # Candidacy is per row: a job red only in TENSOR% has no business in
+                # a GPU%-plus-CPU% ranking, even though its waste in those is real.
+                continue
             shares = [(h, wasted.get(h, 0.0) / t.waste_total) for h, t in tallies]
             scored.append((sum(v for _h, v in shares), jid, user, shares))
         scored.sort(key=lambda item: (-item[0], item[1]))
         return scored[:EfficiencyTally.WORST]
+
+    def _combined_candidates(self, headers: Tuple[str, ...]) -> int:
+        """How many jobs are red in at least one of ``headers``."""
+        return sum(1 for _w, _u, red in self.waste.values() if red & set(headers))
 
     def add(self, jobids: List[str], records: Dict[str, JobRecord],
             dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
@@ -782,9 +795,9 @@ class SummaryRenderer:
         # first answers "which job drained the most hardware", the second "which job
         # looks worst by any measure" -- three of its four terms describe the GPU, so
         # a GPU-idle job outscores an equally wasteful CPU-idle one.
-        combined = [("both", self._combined_worst(COMBINED_2)),
-                    ("all", self._combined_worst(COMBINED_4))]
-        combined = [(name, rows) for name, rows in combined if rows]
+        combined = [("both", COMBINED_2, self._combined_worst(COMBINED_2)),
+                    ("all", COMBINED_4, self._combined_worst(COMBINED_4))]
+        combined = [(name, hs, rows) for name, hs, rows in combined if rows]
 
         # The job counts differ whenever the selection mixes CPU-only and GPU work:
         # a CPU-only job has no GPU% to average, so it is absent from the GPU
@@ -815,7 +828,7 @@ class SummaryRenderer:
                     "%s=%s@%d%s" % (jid, one._amount(weight), round(value),
                                     one.value_unit.strip("%"))
                     for _idle, jid, _user, weight, value in one.worst]))
-            for name, rows in combined:
+            for name, _hs, rows in combined:
                 self.writer.writerow(padded("Worst" + name.capitalize(), [
                     "%s=%s" % (jid, "+".join("%d" % round(100 * share)
                                              for _h, share in shares))
@@ -829,35 +842,52 @@ class SummaryRenderer:
             print(self._line(used_row), file=self.out)
             for line in self._stat_table(stats):
                 print(line, file=self.out)
-            for one in worst:
-                print("%-12s %s" % ("Worst " + _worst_slug(one.header) + ":",
-                                    one.worst_line()), file=self.out)
-            for name, rows in combined:
-                # Each metric's share of its own total waste, summed. Printing the
-                # components shows which measure put the job on the list.
+            # Labels now carry counts, so their widths vary; pad them all (and
+            # Jobs:) to one width so the job lists still line up under each other.
+            rows_out = [("Worst %s (%d/%d):" % (_worst_slug(one.header),
+                                                one.bands["red"][0], one.graded()),
+                         one.worst_line()) for one in worst]
+            for name, headers, ranked in combined:
+                # No denominator here: a row spanning metrics with different coverage
+                # has no single honest total, so only the candidate count is shown.
+                # No username here, unlike the per-metric rows: with four component
+                # shares the line runs past the table width, and the same job ids
+                # appear above with their owners.
                 cells = "  ".join(
-                    "%s %s %s" % (jid, "+".join(
+                    "%s %s" % (jid, "+".join(
                         "%d%%%s" % (round(100 * share), _SHARE_TAG[h])
-                        for h, share in shares), user)
-                    for _score, jid, user, shares in rows)
-                print("%-12s %s" % ("Worst " + name + ":", cells), file=self.out)
-            print("%-12s %s" % ("Jobs:", "  ".join(counts)), file=self.out)
+                        for h, share in shares))
+                    for _score, jid, _user, shares in ranked)
+                rows_out.append(("Worst %s (%d):" % (
+                    name, self._combined_candidates(headers)), cells))
+            rows_out.append(("Jobs:", "  ".join(counts)))
+            width = max(len(label) for label, _ in rows_out)
+            for label, cells in rows_out:
+                print("%-*s %s" % (width, label, cells), file=self.out)
 
-    STAT_HEADERS = ("METRIC", "RED<", "ALLOC", "USED", "IDLE", "RED", "YELLOW", "GREEN")
 
-    # Two lines of legend, because two things in this table read wrongly without
-    # them. RED< is a threshold, not a count, and the yellow edge is implicit at
-    # twice it. And "green" means only "not pathological": with a red cutoff of 10 a
-    # job at 21% is green while wasting four fifths of its cores, so a selection can
-    # be half idle with almost every job green. IDLE is the efficiency number; the
-    # bands say whether the waste is concentrated in a few jobs or spread over all
-    # of them, which is the difference between someone to talk to and a habit.
+    STAT_HEADERS = ("METRIC", "IDLE", "RED", "YELLOW", "GREEN")
+
+    # Two lines of legend. The first states the cutoffs, which no longer need a
+    # column now that they are uniform. The second is there because "green" means
+    # only "not pathological": at a cutoff of 10 a job at 21% is green while wasting
+    # four fifths of its cores, so a selection can be half idle with almost every
+    # job green. IDLE is the efficiency number; the bands say whether the waste is
+    # concentrated in a few jobs or spread across all of them, which is the
+    # difference between someone to talk to and a habit.
     STAT_LEGEND = (
-        "RED< is the red cutoff, yellow ends at twice it;"
-        " band cells are jobs (% of jobs)/% of resource-time",
+        "red below %(red)g%%, yellow below %(yellow)g%%, green above;"
+        " POWER_W red below %(power)g W. Counts are jobs.",
         "bands catch pathological jobs, IDLE measures efficiency:"
         " no red with a high IDLE means every job wastes a little",
     )
+
+    def _legend(self) -> List[str]:
+        """:data:`STAT_LEGEND` with this run's actual cutoffs filled in."""
+        thresholds = self.options.thresholds or Thresholds(**DEFAULT_THRESHOLDS)
+        values = {"red": thresholds.red, "yellow": 2 * thresholds.red,
+                  "power": thresholds.power_w}
+        return [line % values for line in self.STAT_LEGEND]
 
     def _stat_table(self, stats: List["EfficiencyTally"]) -> List[str]:
         """The per-metric table: one row per graded metric, tinted by band.
@@ -876,7 +906,7 @@ class SummaryRenderer:
         out = []
         last = len(widths) - 1
         if self.options.header:
-            for line in self.STAT_LEGEND:
+            for line in self._legend():
                 out.append("  " + line)
             out.append("  ".join(h if i == last else h.ljust(widths[i])
                                  for i, h in enumerate(self.STAT_HEADERS)))

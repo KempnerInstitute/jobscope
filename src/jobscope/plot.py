@@ -145,16 +145,15 @@ def is_pct(header):
     return header.endswith("%")
 
 
-def grade(header, value, red_map, default_red):
-    """Color name for a %-metric value (rich/plotext share these names).
+def grade(header, value, thresholds):
+    """Color name for a graded value (rich/plotext share these names).
 
-    The bands come from config.grade_band, shared with the report tables so a job
-    is graded the same whether it is charted or printed. "white" here rather than
-    "" because rich and plotext both want an explicit style.
+    Delegates to Thresholds.grade, the same call the report tables make, so a job is
+    graded identically whether it is charted or printed -- plot keeps no copy of the
+    band rule. "white" rather than "" for an ungraded column, because rich and
+    plotext both want an explicit style.
     """
-    if value is None or not is_pct(header):
-        return "white"
-    return config.grade_band(value, red_map.get(header, default_red))
+    return thresholds.grade(header, value) or "white"
 
 
 def detect_kind(columns):
@@ -165,7 +164,7 @@ def detect_kind(columns):
     return "summary"
 
 
-def render_bars(columns, rows, args, Console, Text, red_map, default_red):
+def render_bars(columns, rows, args, Console, Text, thresholds):
     """Horizontal utilization gauges: one bar per %-metric (mean over rows if >1)."""
     console = Console(no_color=args.no_color)
     mcols = metric_cols(columns)
@@ -183,7 +182,7 @@ def render_bars(columns, rows, args, Console, Text, red_map, default_red):
             filled = max(0, min(width, int(round(value / 100.0 * width))))
             text = Text()
             text.append("%9s " % col)
-            text.append("█" * filled, style=grade(col, value, red_map, default_red))
+            text.append("█" * filled, style=grade(col, value, thresholds))
             text.append("░" * (width - filled), style="grey37")
             text.append(" %5.1f%%" % value)
             console.print(text)
@@ -217,7 +216,7 @@ def render_hist(columns, rows, args, plt):
     plt.show()
 
 
-def render_heat(columns, rows, args, Console, Table, Text, red_map, default_red):
+def render_heat(columns, rows, args, Console, Table, Text, thresholds):
     """Jobs (or GPUs) x metrics, cell background colored by value."""
     console = Console(no_color=args.no_color)
     mcols = metric_cols(columns)
@@ -239,7 +238,7 @@ def render_heat(columns, rows, args, Console, Table, Text, red_map, default_red)
             raw = row.get(col, "-")
             value = to_float(raw)
             if value is not None and is_pct(col) and not args.no_color:
-                cells.append(Text(raw, style="black on %s" % grade(col, value, red_map, default_red)))
+                cells.append(Text(raw, style="black on %s" % grade(col, value, thresholds)))
             else:
                 cells.append(raw)
         table.add_row(*cells)
@@ -437,8 +436,6 @@ def run(args) -> None:
         fobj = sys.stdin
 
     thresholds = config.get_config().thresholds
-    red_map = thresholds.red_map()
-    default_red = thresholds.default
 
     columns, rows = parse_csv(fobj)
     if not rows:
@@ -476,10 +473,10 @@ def run(args) -> None:
 
     plt, Console, Table, Text = load_libs()
     if kind == "bars":
-        render_bars(columns, rows, args, Console, Text, red_map, default_red)
+        render_bars(columns, rows, args, Console, Text, thresholds)
     elif kind == "hist":
         render_hist(columns, rows, args, plt)
     elif kind == "heat":
-        render_heat(columns, rows, args, Console, Table, Text, red_map, default_red)
+        render_heat(columns, rows, args, Console, Table, Text, thresholds)
     elif kind == "line":
         render_line(columns, rows, args, plt, Console)

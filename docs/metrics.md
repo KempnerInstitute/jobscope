@@ -288,12 +288,12 @@ printed as zeros, which would read as "nothing used it" instead of "nothing
 measured it".
 
 ```
-METRIC   RED<  ALLOC     USED    IDLE            RED            YELLOW         GREEN
-CPU%     10    10135.2h  522.6h  9612.5h (95%)   159 (50%)/62%  158 (50%)/35%  2 (1%)/4%
-MEM%     25    126.6TBh  5.3TBh  121.4TBh (96%)  315 (99%)/99%  1 (0%)/0%      3 (1%)/1%
-GPU%     25    719.4h    314.7h  404.7h (56%)    13 (4%)/54%    4 (1%)/0%      302 (95%)/46%
-GMEM%    20    719.4h    201.6h  517.7h (72%)    308 (97%)/67%  0 (0%)/0%      11 (3%)/33%
-SM_ACT%  15    721.7h    277.5h  444.2h (62%)    48 (11%)/54%   17 (4%)/0%     360 (85%)/46%
+METRIC   IDLE            RED  YELLOW  GREEN
+CPU%     10034.5h (95%)  159  158     2
+MEM%     129.6TBh (96%)  307  8       4
+GPU%     408.8h (54%)    5    8       306
+GMEM%    528.9h (70%)    299  9       11
+SM_ACT%  452h (60%)      35   17      373
 ```
 
 Each metric is measured against the resource it is a percentage *of*, taken from
@@ -310,16 +310,19 @@ which resource a selection actually wasted. Above, the GPUs were 56% idle while
 the cores were 95% idle -- GPU jobs holding cores they never use, which blocks
 other work from those nodes and no GPU row can show.
 
-`ALLOC`, `USED` and `IDLE` carry one decimal with trailing `.0` trimmed, and one
-unit per row. `USED` is fractional even in the count form -- it is
-GPU-equivalents busy, not whole GPUs -- so rounding it to an integer would make
-the three numbers contradict the percentage beside them.
+`IDLE` carries one decimal with trailing `.0` trimmed, in that row's own unit, plus
+its share of the allocation. It is fractional even in the count form -- what is idle
+is GPU-*equivalents*, not whole GPUs -- so rounding to an integer would make it
+contradict the percentage beside it. `ALLOC` and `USED` were dropped: `IDLE` already
+carries the same information in the form anyone acts on, and the band cells were
+reduced to job counts for the same reason. Both survive in the CSV.
 
-`RED<` is the metric's own red cutoff, which has to be per row: 25 for `GPU%`, 10
-for `CPU%`, and `[thresholds] default` (15) for every column without an explicit
-setting. Red is below it, yellow below twice it, green above. A two-line legend
-above the table says this, because neither the threshold nor the implicit yellow
-edge is self-evident from the column name.
+One cutoff, `[thresholds] red`, covers every percentage metric: red below it,
+yellow below twice it, green above. Uniform on purpose -- the per-metric values it
+replaced were never calibrated against each other, and carrying a different
+threshold for each row is what made the old cutoff column confusing. `POWER_W` has
+its own knob because watts are not a percentage. A two-line legend above the table
+states both.
 
 ### What green does not mean
 
@@ -329,8 +332,8 @@ be half idle with almost every job green, which reads as a contradiction until t
 two columns are separated:
 
 ```
-METRIC   RED<  ALLOC  USED   IDLE        RED        YELLOW     GREEN
-CPU%     10    173    88.7   84.3 (49%)  0 (0%)/0%  1 (7%)/5%  13 (93%)/95%
+METRIC   IDLE        RED  YELLOW  GREEN
+CPU%     84.3 (49%)  0    1       13
 ```
 
 Eleven jobs, each using about half its cores (12, 21, 47, 52, 55, 55, 55, 55, 56,
@@ -402,8 +405,8 @@ is not a restatement of them: r(POWER, GPU%) = 0.69 and r(POWER, SM_ACT%) = 0.64
 against r(GPU%, SM_ACT%) = 0.76. It also covers 35 jobs the blob metrics miss (no
 stored blob), though those held only 0.6 of 349.2 GPU-hours.
 
-`POWER_W` gets no stats-table row: `ALLOC` / `USED` / `IDLE` are resource-time and
-"used watts" has no meaning.
+`POWER_W` gets no stats-table row: `IDLE` is resource-time, and "idle watts" has no
+meaning as a total.
 
 ### The two combined rows
 

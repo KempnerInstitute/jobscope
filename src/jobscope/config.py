@@ -11,6 +11,7 @@ import importlib.resources
 import importlib.util
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
@@ -32,58 +33,50 @@ DEFAULT_MIN_RUNTIME = 180
 # Runtime floor for the running view: jobs younger than this are hidden, since a
 # job still ramping up reads as idle. A duration string, as --min-elapsed takes.
 DEFAULT_MIN_ELAPSED = "10m"
-# Red cutoffs in percent, per graded column. ``cpu`` is 10 rather than 25 because
-# CPU% measures the *allocated* cores a job kept busy, and a GPU job legitimately
-# keeps very few: measured over a day on one GPU partition, CPU% had a median of 10
-# and a maximum of 18 across 396 jobs, so a cutoff of 25 put every single job in
-# red and distinguished nothing. 10 places roughly the bottom quartile there.
+# One red cutoff for every percentage metric, and a watt floor for POWER_W. Uniform
+# rather than per-metric: a reader should not have to carry a different threshold for
+# each row of the summary, and the per-metric values were never calibrated against
+# each other. 10 keeps the behaviour CPU% needed -- GPU jobs hold cores they do not
+# use, and 25 put every job in red -- and extends it to the rest.
 #
-# ``power_w`` is the odd one out: watts, not percent. A GPU below it is treated as
-# idle, which is the one signal a duty cycle cannot fake -- a job spinning on a
-# trivial kernel reads busy on GPU% and draws idle watts. 100 sits in the measured
-# gap: on kempner_eng the idle jobs drew 73-74 W with GPU% 0 and SM_ACT% 0.0, the
-# next values were 99-101 W, and the median was 289 W against a 573 W maximum.
-DEFAULT_THRESHOLDS = {"gpu": 25.0, "gmem": 20.0, "cpu": 10.0, "mem": 25.0,
-                      "default": 15.0, "power_w": 100.0}
+# power_w is watts, not percent. A GPU below it is idle, which is the one signal a
+# duty cycle cannot fake: a job spinning on a trivial kernel reads busy on GPU% and
+# draws idle watts. 100 sits in the measured gap -- on kempner_eng the idle jobs drew
+# 73-74 W with GPU% 0 and SM_ACT% 0.0, the next values were 99-101 W, and the median
+# was 289 W against a 573 W maximum.
+DEFAULT_THRESHOLDS = {"red": 10.0, "power_w": 100.0}
+
+# Superseded by ``red``. Named so a config that still sets them gets told, rather
+# than being silently moved to a different cutoff.
+LEGACY_THRESHOLD_KEYS = ("gpu", "gmem", "cpu", "mem", "default")
 
 
 @dataclass(frozen=True)
 class Thresholds:
-    """Red cutoffs for grading a utilization value: percent, except ``power_w``."""
+    """The grading cutoffs: a percent for every %-metric, and watts for POWER_W."""
 
-    gpu: float
-    gmem: float
-    cpu: float
-    mem: float
-    default: float
-    # Last, and defaulted, so the positional construction elsewhere keeps working.
+    red: float
     power_w: float = DEFAULT_THRESHOLDS["power_w"]
 
-    def red_map(self) -> dict:
-        """Per-header red cutoffs for the graded columns."""
-        return {"GPU%": self.gpu, "DUTY%": self.gpu, "GMEM%": self.gmem,
-                "CPU%": self.cpu, "MEM%": self.mem, "POWER_W": self.power_w}
+    def cutoff(self, header: str) -> Optional[float]:
+        """``header``'s red cutoff, or None when the metric is not graded.
+
+        POWER_W is checked first because it is in watts and so fails the %-suffix
+        test, yet it is the metric whose grading matters most.
+        """
+        if header == "POWER_W":
+            return self.power_w
+        return self.red if str(header).endswith("%") else None
 
     def grade(self, header: str, value: Optional[float]) -> str:
-        """``red`` / ``yellow`` / ``green`` for a graded metric, or ``""`` if not one.
+        """``red`` / ``yellow`` / ``green``, or ``""`` when ``header`` is not graded.
 
-        Lives here so the tables and the charts cannot drift apart: a job shown red
-        in `jobscope plot` is red in the report too, and a site that retunes
-        ``[thresholds]`` moves both at once.
-
-        Graded when the header has its own cutoff, or is any other %-metric (the
-        DCGM columns, which share ``default``). The named-cutoff case has to come
-        first because POWER_W is in watts and so fails the %-suffix test, yet it is
-        the metric whose grading matters most: low watts is an idle GPU.
+        The single entry point for banding, shared by the tables and the charts, so a
+        job shown red in `jobscope plot` is red in the report too and a site that
+        retunes ``[thresholds]`` moves both at once.
         """
-        if value is None:
-            return ""
-        red = self.red_map().get(header)
-        if red is None:
-            if not str(header).endswith("%"):
-                return ""
-            red = self.default
-        return grade_band(value, red)
+        red = None if value is None else self.cutoff(header)
+        return "" if red is None else grade_band(value, red)
 
 
 def grade_band(value: float, red: float) -> str:
@@ -154,12 +147,15 @@ def load_config(path: Optional[str] = None,
     thr = data.get("thresholds") or {}
     dfl = data.get("defaults") or {}
 
+    stale = [key for key in LEGACY_THRESHOLD_KEYS if key in thr]
+    if stale:
+        # Not silently: a site that set gpu = 25 would otherwise be moved to the
+        # uniform cutoff without being told its config had stopped taking effect.
+        print("note: [thresholds] %s no longer apply; one 'red' cutoff now covers "
+              "every %%-metric (see jobscope config --example)"
+              % ", ".join(sorted(stale)), file=sys.stderr)
     thresholds = Thresholds(
-        gpu=float(thr.get("gpu", DEFAULT_THRESHOLDS["gpu"])),
-        gmem=float(thr.get("gmem", DEFAULT_THRESHOLDS["gmem"])),
-        cpu=float(thr.get("cpu", DEFAULT_THRESHOLDS["cpu"])),
-        mem=float(thr.get("mem", DEFAULT_THRESHOLDS["mem"])),
-        default=float(thr.get("default", DEFAULT_THRESHOLDS["default"])),
+        red=float(thr.get("red", DEFAULT_THRESHOLDS["red"])),
         power_w=float(thr.get("power_w", DEFAULT_THRESHOLDS["power_w"])),
     )
     defaults = Defaults(
