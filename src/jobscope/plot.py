@@ -112,7 +112,9 @@ def parse_csv(fobj):
             if record[0] == "JOBID":
                 columns = record
             continue
-        if record[0] in FOOTER_ROWS:
+        if record[0] in FOOTER_ROWS or record[0].startswith("Stat"):
+            # "Stat<METRIC>" rows carry the per-metric efficiency summary. Matched by
+            # prefix because the metric set is open-ended: --dcgm emits 18 of them.
             continue
         rows.append({columns[i]: (record[i] if i < len(record) else "")
                      for i in range(len(columns))})

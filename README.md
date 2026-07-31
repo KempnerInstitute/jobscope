@@ -32,11 +32,17 @@ JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_
                                             ... 12 more rows ...
 ------------------------------------------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              12     9            80     3       64.9     14.7    0.3      9.5     455
-GPU-hours:   7.1 alloc  5.7 used  1.4 idle (20%)
-Core-hours:  56.2 alloc  6.9 used  49.3 idle (88%)
-Bands GPU%:  red<25 1 job (6%)/0.1h (1%)  yellow<50 1 job (6%)/0.1h (2%)  green 15 jobs (88%)/6.9h (97%)
-Bands CPU%:  red<10 0 jobs (0%)/0.0h (0%)  yellow<20 17 jobs (100%)/56.2h (100%)  green 0 jobs (0%)/0.0h (0%)
-Worst:       35260825 0.1h@20% bdesinghu
+METRIC   RED<  ALLOC     USED     IDLE            RED             YELLOW          GREEN
+CPU%     10    56.2h     6.9h     49.3h (88%)     0 (0%)/0%       17 (100%)/100%  0 (0%)/0%
+MEM%     25    586.5GBh  52.1GBh  534.4GBh (91%)  16 (94%)/91%    1 (6%)/9%       0 (0%)/0%
+GPU%     25    7.1h      5.7h     1.4h (20%)      1 (6%)/1%       1 (6%)/2%       15 (88%)/97%
+GMEM%    20    7.1h      0.2h     6.9h (97%)      17 (100%)/100%  0 (0%)/0%       0 (0%)/0%
+SM_ACT%  15    7.1h      4.6h     2.5h (35%)      1 (6%)/1%       1 (6%)/2%       15 (88%)/97%
+OCC%     15    7.1h      1h       6h (85%)        13 (76%)/52%    4 (24%)/48%     0 (0%)/0%
+TENSOR%  15    7.1h      0h       7h (100%)       17 (100%)/100%  0 (0%)/0%       0 (0%)/0%
+DRAM%    15    7.1h      0.7h     6.4h (91%)      16 (94%)/70%    1 (6%)/30%      0 (0%)/0%
+Worst GPU:   35260825 0.1h@20% bdesinghu
+Worst both:  35260825 4%gpu+0%cpu bdesinghu
 Jobs:        cpu-jobs=17  gpu-jobs=17  gpus=17
 ```
 
@@ -198,62 +204,83 @@ held up on the host, and no single view used to show both.
 With more than one job the table ends in footers:
 
 ```
-Used/GPU-hr:                     3   5      34  14   29.8  ...
-GPU-hours:   701.5 alloc  299.0 used  402.5 idle (57%)
-Core-hours:  9875.7 alloc  492.3 used  9383.4 idle (95%)
-Bands GPU%:  red<25 13 jobs (4%)/388.5h (55%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 302 jobs (95%)/318.2h (45%)
-Bands CPU%:  red<10 159 jobs (50%)/6249.1h (63%)  yellow<20 158 jobs (50%)/3366.7h (34%)  green 2 jobs (1%)/344.1h (3%)
-Worst GPU:   35475803 142.9h@0% amazloumi  35476814 142.0h@0% amazloumi  36337781 43.8h@0% amazloumi
-Worst CPU:   35475803 2286.6h@0% amazloumi  35476814 2271.9h@0% amazloumi  36337781 698.4h@0% amazloumi
+Used/GPU-hr:                              5      4            44   28     38.4  11.8  10.3  8.4  278
+METRIC   RED<  ALLOC     USED    IDLE            RED            YELLOW         GREEN
+CPU%     10    10135.2h  522.6h  9612.5h (95%)   159 (50%)/62%  158 (50%)/35%  2 (1%)/4%
+MEM%     25    126.6TBh  5.3TBh  121.4TBh (96%)  315 (99%)/99%  1 (0%)/0%      3 (1%)/1%
+GPU%     25    719.4h    314.7h  404.7h (56%)    13 (4%)/54%    4 (1%)/0%      302 (95%)/46%
+GMEM%    20    719.4h    201.6h  517.7h (72%)    308 (97%)/67%  0 (0%)/0%      11 (3%)/33%
+SM_ACT%  15    721.7h    277.5h  444.2h (62%)    48 (11%)/54%   17 (4%)/0%     360 (85%)/46%
+OCC%     15    721.7h    85.3h   636.5h (88%)    341 (80%)/58%  67 (16%)/34%   17 (4%)/8%
+TENSOR%  15    721.7h    74.1h   647.6h (90%)    421 (99%)/71%  3 (1%)/3%      1 (0%)/26%
+DRAM%    15    721.7h    60.9h   660.8h (92%)    400 (94%)/61%  18 (4%)/36%    7 (2%)/3%
+Worst GPU:   35475803 142.9h@0% amazloumi  35476814 142h@0% amazloumi  36337781 44.7h@0% amazloumi
+Worst CPU:   35475803 2286.6h@0% amazloumi  35476814 2271.9h@0% amazloumi  36337781 715.1h@0% amazloumi
 Worst both:  35475803 35%gpu+24%cpu amazloumi  35476814 35%gpu+24%cpu amazloumi  36337781 11%gpu+7%cpu amazloumi
-Jobs:        cpu-jobs=319  gpu-jobs=319  gpus=381  no-runtime=4
+Jobs:        cpu-jobs=319  gpu-jobs=319  gpus=381  no-runtime=5
 ```
 
 **There is no per-job mean**, on purpose. Utilization is bimodal -- jobs cluster
 near 0% or near 100% -- so an average of them describes a job that does not
-exist. On the day above it read 82%, while the partition was 66% idle.
+exist. On the day above `GPU%` averaged 82% per job while the GPUs were 56% idle.
 
 `Used/GPU-hr:` is a ratio rather than a centre: used resource-time over allocated
-resource-time. Each column is pooled over the resource *it* measures -- GPU-hours
-for `GPU%`, core-hours for `CPU%`, GB-hours for `MEM%` -- so the row is the real
-utilization of the pool and stays true whatever the distribution looks like.
+resource-time, aligned under the columns above it.
 
-Both resources are reported. A GPU job that holds 32 cores and uses two is
-blocking other work from that node, and the GPU lines cannot show it -- above,
-the GPUs were 57% idle while the *cores* were 95% idle. `--gpu` and `--cpu` narrow
-the block to one.
+**One table row per graded metric**, and the set follows the view: eight by
+default, `CPU%`/`MEM%` under `--cpu`, six under `--gpu`, the full catalog under
+`--dcgm`. A metric no job reported is left out rather than shown as zeros. Each
+metric is measured against the resource it is a percentage *of*:
 
-The `Bands` rows are the part worth reading. Each gives a threshold band's share of the
-**jobs** and of the **resource-time**, and the gap between those two numbers is
-the finding: above, 4% of the jobs held 55% of the GPU-hours below 25%. Either
-number alone conceals it.
+| metric | resource |
+|---|---|
+| `CPU%` | allocated core-hours |
+| `MEM%` | allocated host GB-hours |
+| `GPU%`, `GMEM%`, and every DCGM column | allocated GPU-hours |
 
-The `Worst` rows then name the offenders, ranked by resource-time *wasted* rather
-than held, so a long job at a mediocre rate outranks a short one at zero. There
-is one per resource, plus a combined row. GPU-hours and core-hours cannot simply
-be added -- any exchange rate between them would be invented, and a wrong one
-decides the answer by itself -- so `Worst both:` expresses each job's waste as a
-share of the selection's total waste in that resource and sums the two shares.
-Both components are printed (`35%gpu+24%cpu`), so you can see which resource put
-a job on the list. Only jobs red in at least one resource are candidates: a
-95%-efficient job can idle 50 GPU-hours just by being enormous, and there is
-nothing to act on there.
+So the denominators differ by row on purpose, and reading down the `IDLE` column
+is the fastest way to see which resource a selection actually wasted: above, the
+GPUs were 56% idle while the *cores* were 95% idle and the *tensor cores* 90%.
+
+`RED<` is that metric's own red cutoff, since it varies: 25 for `GPU%`, 10 for
+`CPU%`, 15 for anything without an explicit setting. Red is below the cutoff,
+yellow below twice it, green above.
+
+The three band cells give each band's share of the **jobs** and of the
+**resource-time** (`13 (4%)/54%` is 13 jobs, 4% of the jobs, holding 54% of the
+GPU-hours). The gap between those two numbers is the finding, and either alone
+conceals it. On a terminal the band cells are printed in their own colours and
+`IDLE` is tinted by that metric's pooled grade, so a wasted resource is a red
+line in the block.
+
+The `Worst` rows name the offenders, ranked by resource-time *wasted* rather than
+held, so a long job at a mediocre rate outranks a short one at zero. There is one
+per resource, plus a combined row. GPU-hours and core-hours cannot simply be added
+-- any exchange rate between them would be invented, and a wrong one decides the
+answer by itself -- so `Worst both:` expresses each job's waste as a share of the
+selection's total waste in that resource and sums the two shares. Both components
+are printed (`35%gpu+24%cpu`), so you can see which resource put a job on the
+list. Only jobs red in at least one resource are candidates: a 95%-efficient job
+can idle 50 GPU-hours just by being enormous, and there is nothing to act on
+there.
 
 The cutoffs come from `[thresholds]` in your config -- the same ones that tint
-the cells and colour `jobscope plot`, so the footer is a tally of what you can
+the cells and colour `jobscope plot`, so the block is a tally of what you can
 already see.
 
-The **running** view reports the same block over resource *counts* rather than
-resource-hours (`Used/GPU:`, `GPUs: 20 alloc  17.3 used  2.7 idle (13%)`). `used`
-is fractional there because it is GPU-equivalents busy, not whole GPUs. Its numbers are one scrape at a
-single moment, so weighting them by elapsed time would claim that instant
-represents the whole run; `--avg` folds each job over its runtime and does get
-the hour-based form. A `--cpu` run switches the block to `CPU%` over core-hours.
+The **running** view reports the same table over resource *counts* rather than
+resource-hours (`Used/GPU:`, and `ALLOC` of `20` GPUs / `269` cores / `916GB`).
+`USED` is fractional there because it is GPU-equivalents busy, not whole GPUs. Its
+numbers are one scrape at a single moment, so weighting them by elapsed time would
+claim that instant represents the whole run; `--avg` folds each job over its
+runtime and does get the hour-based form.
 
-The two job counts differ whenever the selection mixes CPU-only and GPU work: a
-CPU-only job has no `GPU%` to pool, so it is absent from the GPU figures rather
-than counted as zero. A GPU job that sat idle *is* counted, as 0%. `no-runtime=N`
-appears when a job had no elapsed time to weight by and was left out.
+The two job counts on `Jobs:` differ whenever the selection mixes CPU-only and GPU
+work: a CPU-only job has no `GPU%` to pool, so it is absent from the GPU figures
+rather than counted as zero. A GPU job that sat idle *is* counted, as 0%.
+`no-runtime=N` appears when a job had no elapsed time to weight by. A metric's own
+denominator is its table row, so the DCGM rows can legitimately cover more jobs
+than `gpu-jobs=` -- a job with no stored blob still has Prometheus data.
 `ENERGY_kWh` and `PWRmax_W` have no pooled form -- one is a per-job total and the
 other a peak -- so they fall back to the plain per-job figure.
 `jobscope plot` skips every footer rather than charting them as jobs.

@@ -280,29 +280,65 @@ at all, so it is dropped from the row and counted as `no-runtime=N` in the
 
 ### The efficiency block
 
-`GPU-hours:` and `Core-hours:` split each allocation into used and idle. Both are
-reported in the default view, because a GPU job that holds cores it never uses
-blocks other work from the node and the GPU lines cannot show that: on one day
-kempner_eng was 57% idle by GPU-hour and 95% idle by core-hour. `--gpu` and
-`--cpu` narrow the block to one resource.
-
-`used` is fractional even in the count form -- it is GPU-equivalents busy, not
-whole GPUs -- so all three numbers carry one decimal and reconcile with the
-percentage beside them.
-
-`Bands <column>:` then tallies each threshold band's share of the **jobs** and of
-the **resource-time**, one row per reported resource:
+One table row per graded metric, in the same order as the columns above it, so
+the block cannot drift from the table it summarizes. The set follows the view:
+eight rows by default, `CPU%`/`MEM%` under `--cpu`, six under `--gpu`, the full
+catalog (18) under `--dcgm`. A metric that no job reported is omitted rather than
+printed as zeros, which would read as "nothing used it" instead of "nothing
+measured it".
 
 ```
-Bands GPU%:  red<25 13 jobs (4%)/388.0h (55%)  yellow<50 4 jobs (1%)/0.4h (0%)  green 302 jobs (95%)/313.1h (45%)
-Bands CPU%:  red<10 159 jobs (50%)/6240.6h (63%)  yellow<20 158 jobs (50%)/3303.3h (33%)  green 2 jobs (1%)/331.7h (3%)
+METRIC   RED<  ALLOC     USED    IDLE            RED            YELLOW         GREEN
+CPU%     10    10135.2h  522.6h  9612.5h (95%)   159 (50%)/62%  158 (50%)/35%  2 (1%)/4%
+MEM%     25    126.6TBh  5.3TBh  121.4TBh (96%)  315 (99%)/99%  1 (0%)/0%      3 (1%)/1%
+GPU%     25    719.4h    314.7h  404.7h (56%)    13 (4%)/54%    4 (1%)/0%      302 (95%)/46%
+GMEM%    20    719.4h    201.6h  517.7h (72%)    308 (97%)/67%  0 (0%)/0%      11 (3%)/33%
+SM_ACT%  15    721.7h    277.5h  444.2h (62%)    48 (11%)/54%   17 (4%)/0%     360 (85%)/46%
 ```
 
-The gap between those two shares is the finding -- 4% of the jobs held 55% of the
-GPU-hours below 25% -- and either share alone conceals it. The bands come from
-`config.grade_band` and the site's `[thresholds]`, the same cutoffs that tint the
-cells and colour `jobscope plot`, so the block is a tally of what is already on
-screen rather than a second opinion.
+Each metric is measured against the resource it is a percentage *of*, taken from
+the same `_weights()` the pooled row uses so the two cannot disagree:
+
+| metric | weight | unit |
+|---|---|---|
+| `CPU%` | allocated cores x elapsed | core-hours |
+| `MEM%` | allocated host bytes x elapsed | GB-hours, promoted to TB-hours past four digits |
+| `GPU%`, `GMEM%`, every DCGM `%` | allocated GPUs x elapsed | GPU-hours |
+
+The denominators therefore differ by row, deliberately: reading down `IDLE` shows
+which resource a selection actually wasted. Above, the GPUs were 56% idle while
+the cores were 95% idle -- GPU jobs holding cores they never use, which blocks
+other work from those nodes and no GPU row can show.
+
+`ALLOC`, `USED` and `IDLE` carry one decimal with trailing `.0` trimmed, and one
+unit per row. `USED` is fractional even in the count form -- it is
+GPU-equivalents busy, not whole GPUs -- so rounding it to an integer would make
+the three numbers contradict the percentage beside them.
+
+`RED<` is the metric's own red cutoff, which has to be per row: 25 for `GPU%`, 10
+for `CPU%`, and `[thresholds] default` (15) for every column without an explicit
+setting. Red is below it, yellow below twice it, green above.
+
+The three band cells give each band's share of the **jobs** and of the
+**resource-time**: `13 (4%)/54%` is 13 jobs, 4% of those measured, holding 54% of
+the GPU-hours. The gap between the two is the finding -- 4% of the jobs held 54%
+of the GPU-hours below 25% -- and either share alone conceals it. The bands come
+from `config.grade_band` and the site's `[thresholds]`, the same cutoffs that tint
+the cells and colour `jobscope plot`, so the block is a tally of what is already
+on screen rather than a second opinion.
+
+Bands are computed from the **stored** value, not the printed one. A job whose
+`OCC%` prints as `15.0` may be 14.96 and therefore red against a cutoff of 15;
+banding the display string would make the report depend on its own formatting.
+
+On a terminal each band cell is printed in its own colour and `IDLE` is tinted by
+that metric's pooled grade. Colour is dropped for `--csv`, a non-tty and
+`$NO_COLOR`, and the plain output is the tinted output minus the escapes -- the
+final column is left unpadded so that stays exactly true.
+
+A metric's own row is its denominator, so the DCGM rows can legitimately cover
+more jobs than `gpu-jobs=` on the `Jobs:` line: a finished job with no stored blob
+has no `GPU%` but still has Prometheus data.
 
 The `Worst` rows name the top few jobs by resource-time **wasted**,
 `(1 - u) x weight`, not by resource-time held: a 100-hour job at 24% is a larger

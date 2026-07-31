@@ -2,6 +2,7 @@
 
 import dataclasses
 import io
+import re
 
 from jobscope import plot, report
 from jobscope.blob import GIB
@@ -497,21 +498,37 @@ def test_the_bands_report_job_share_and_resource_share():
     """
     records = {"idle": _gpu_job("idle", {str(i): 0.0 for i in range(16)})}
     records.update({str(i): _gpu_job(str(i), {"0": 90.0}) for i in range(4)})
-    line = _band_line(records)
-    assert "red<25 1 job (20%)/16 (80%)" in line
-    assert "green 4 jobs (80%)/4 (20%)" in line
+    row = _stat_rows(records)["GPU%"]
+    assert row[4] == "1 (20%)/80%"       # red: 1 of 5 jobs, holding 80% of the GPUs
+    assert row[6] == "4 (80%)/20%"       # green: 4 of 5 jobs, holding 20%
 
 
-def _band_line(records, column="GPU%", **kw):
-    """The `Bands <column>:` line from a text-rendered table."""
+def _stat_rows(records, **kw):
+    """``{metric: [cells]}`` from the per-metric table, in table order.
+
+    Keyed on the METRIC cell; ``list(_stat_rows(...))`` therefore gives the row
+    order, which must follow the column order of the table above.
+    """
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view=kw.get("view", "all"), csv=False, header=True,
-                           time_weighted=kw.get("time_weighted", False)), out)
-    renderer.add(list(records), records, {})
+                           show_dcgm=kw.get("show_dcgm", False),
+                           color=kw.get("color", False),
+                           time_weighted=kw.get("time_weighted", False)),
+        out, specs=kw.get("specs"))
+    renderer.add(list(records), records, kw.get("dcgm_data") or {})
     renderer.finish()
-    return [ln for ln in out.getvalue().splitlines()
-            if ln.startswith("Bands " + column)][0]
+    lines = out.getvalue().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("METRIC"))
+    rows = {}
+    for line in lines[start + 1:]:
+        if not line or line.startswith(("Worst", "Jobs")):
+            break
+        # Columns are separated by two or more spaces; a band cell contains a
+        # single one ("1 (20%)/80%"), so splitting on any whitespace would break it.
+        cells = re.split(r"\s{2,}", line.strip())
+        rows[cells[0]] = cells[1:]      # [RED<, ALLOC, USED, IDLE, RED, YELLOW, GREEN]
+    return rows
 
 
 def test_the_default_view_reports_both_resources():
@@ -530,15 +547,11 @@ def test_the_default_view_reports_both_resources():
         renderer.finish()
         return out.getvalue()
 
-    both = lines("all")
-    assert "GPUs:" in both and "Cores:" in both
-    assert "Bands GPU%:" in both and "Bands CPU%:" in both
+    assert list(_stat_rows(records)) == ["CPU%", "MEM%", "GPU%", "GMEM%"]
     # The leading resource names the pooled row, and GPUs lead in the wide view.
-    assert "Used/GPU:" in both
-    assert both.index("GPUs:") < both.index("Cores:")
-
-    assert "Cores:" not in lines("gpu")
-    assert "GPUs:" not in lines("cpu")
+    assert "Used/GPU:" in lines("all")
+    assert list(_stat_rows(records, view="gpu")) == ["GPU%", "GMEM%"]
+    assert list(_stat_rows(records, view="cpu")) == ["CPU%", "MEM%"]
 
 
 def test_the_totals_line_reconciles_with_its_own_percentage():
@@ -552,8 +565,8 @@ def test_the_totals_line_reconciles_with_its_own_percentage():
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="gpu", header=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    line = [ln for ln in out.getvalue().splitlines() if ln.startswith("GPUs:")][0]
-    assert "2 alloc  1.7 used  0.3 idle (15%)" in line     # 0.3/2 = 15%
+    row = _stat_rows(records, view="gpu")["GPU%"]
+    assert row[1:4] == ["2", "1.7", "0.3 (15%)"]          # ALLOC, USED, IDLE: 0.3/2 = 15%
 
 
 def test_the_totals_line_splits_allocation_into_used_and_idle():
@@ -563,8 +576,86 @@ def test_the_totals_line_splits_allocation_into_used_and_idle():
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    text = out.getvalue()
-    assert "GPUs:        4 alloc  1 used  3 idle (75%)" in text
+    row = _stat_rows(records)["GPU%"]
+    assert row[1:4] == ["4", "1", "3 (75%)"]              # ALLOC, USED, IDLE
+
+
+def test_every_graded_column_gets_a_row_in_column_order():
+    """The set follows the view, so the block cannot drift from the table above it."""
+    from jobscope.dcgm import ALL_SPECS
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    dcgm = {j: ({"SM_ACT%": 50.0, "OCC%": 20.0, "TENSOR%": 1.0, "DRAM%": 8.0,
+                 "ENGINE%": 30.0}, {})
+            for j in records}
+    rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
+    assert list(rows) == ["CPU%", "MEM%", "GPU%", "GMEM%",
+                          "SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
+    # --dcgm widens the table, so it widens the block too. ENGINE% is only in the
+    # extended catalog, so it can only appear there.
+    wide = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=ALL_SPECS)
+    assert list(wide)[:8] == list(rows)
+    assert "ENGINE%" in wide and "ENGINE%" not in rows
+
+
+def test_a_metric_no_job_reported_is_omitted():
+    """A row of zeros would read as "nothing used it", not "nothing measured it"."""
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
+    dcgm = {j: ({"SM_ACT%": 50.0}, {}) for j in records}    # OCC%/TENSOR%/DRAM% absent
+    rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
+    assert "SM_ACT%" in rows
+    assert "OCC%" not in rows and "TENSOR%" not in rows and "DRAM%" not in rows
+
+
+def test_each_metric_is_weighted_by_the_resource_it_measures():
+    """CPU% by core-hours, MEM% by GB-hours, the GPU family by GPU-hours.
+
+    Two one-hour jobs, each holding 4 cores, 2 GPUs and 16GB of host memory. The
+    three denominators must match the resource each metric measures, not each other.
+    """
+    records = {j: _timed_job(j, 3600, gpu_util=50.0, gpus=2, cores=4,
+                             cpu_seconds=3600 * 4 * 0.5, total_gb=16)
+               for j in ("a", "b")}
+    rows = _stat_rows(records, time_weighted=True)
+    assert rows["CPU%"][1] == "8h"          # 2 jobs x 4 cores x 1h
+    assert rows["MEM%"][1] == "32GBh"       # 2 jobs x 16GB x 1h
+    assert rows["GPU%"][1] == "4h"          # 2 jobs x 2 GPUs x 1h
+    assert rows["GMEM%"][1] == "4h"         # GPU-hours as well
+
+
+def test_byte_amounts_promote_to_terabytes_consistently_within_a_row():
+    """A row must not read "126.5TBh allocated, 5414.7GBh used"."""
+    records = {j: _timed_job(j, 3600, gpu_util=50.0, total_gb=20000, used_gb=1000)
+               for j in ("a", "b")}
+    row = _stat_rows(records, time_weighted=True)["MEM%"]
+    assert row[1].endswith("TBh") and row[2].endswith("TBh"), row
+    assert "TBh" in row[3]
+
+
+def test_the_band_cells_are_tinted_and_idle_takes_the_pooled_grade():
+    records = {"1": _gpu_job("1", {"0": 2.0}), "2": _gpu_job("2", {"0": 4.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="gpu", header=True, color=True,
+                           thresholds=_thresholds()), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    line = [ln for ln in out.getvalue().splitlines() if ln.startswith("GPU%")][0]
+    # The red band cell, plus IDLE -- pooled utilization is 3%, well under the cutoff.
+    assert line.count(report._SGR["red"]) == 2
+    assert report._SGR["yellow"] in line and report._SGR["green"] in line
+    # METRIC / RED< / ALLOC / USED carry no colour, so the row starts plain.
+    assert not line.startswith("\033")
+
+
+def test_the_table_is_plain_in_csv_mode_and_when_color_is_off():
+    records = {"1": _gpu_job("1", {"0": 2.0}), "2": _gpu_job("2", {"0": 90.0})}
+    for options in (RenderOptions(view="gpu", header=True, color=False),
+                    RenderOptions(view="gpu", header=True, color=True, csv=True)):
+        out = io.StringIO()
+        renderer = report.SummaryRenderer(CTX, options, out)
+        renderer.add(list(records), records, {})
+        renderer.finish()
+        assert "\033" not in out.getvalue()
 
 
 def test_worst_ranks_by_wasted_resource_not_by_size():
@@ -678,8 +769,7 @@ def test_the_block_follows_the_cpu_view_to_cores():
     renderer.add(list(records), records, {})
     renderer.finish()
     text = out.getvalue()
-    assert "Cores:" in text and "GPUs:" not in text
-    assert "Bands CPU%:" in text and "Bands GPU%:" not in text
+    assert list(_stat_rows(records, view="cpu")) == ["CPU%", "MEM%"]
     assert "Used/cpu:" in text
     # GPU totals are noise in a view that hid the GPU columns.
     jobs = [ln for ln in text.splitlines() if ln.startswith("Jobs:")][0]
@@ -737,9 +827,9 @@ def test_short_jobs_do_not_outvote_one_long_job():
     # A per-job mean would read 1 -- (100 + 0*100)/101 -- and call this idle.
     # 172800 GPU-seconds busy of 202800 allocated is 85.
     assert footers["UsedPerGPUHour"]["GPU%"] == "85"
-    assert "allocated=56.3h" in footers["GPUhours"].values()   # 202800s / 3600
+    assert "allocated=56.3h" in footers["StatGPU%"].values()   # 202800s / 3600
     # 100 of 101 jobs are red, but they hold only 15% of the resource-time.
-    assert "red=100" in footers["GPUhours"].values()
+    assert "red=100" in footers["StatGPU%"].values()
 
 
 def test_time_weighting_changes_the_answer_when_only_runtimes_differ():
@@ -811,9 +901,7 @@ def test_plot_skips_the_weighted_footer_too():
 
 # --- highlighting efficient and inefficient jobs ----------------------------
 
-import re as _re  # noqa: E402
-
-_ESC = _re.compile(r"\033\[[0-9;]*m")
+_ESC = re.compile(r"\033\[[0-9;]*m")
 
 
 def _thresholds():

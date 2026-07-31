@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from .blob import blob_capacity, blob_detail, blob_metrics
+from .blob import GIB, blob_capacity, blob_detail, blob_metrics
 from .config import DEFAULT_THRESHOLDS, Thresholds
 from .dcgm import (
     ALL_SPECS,
@@ -233,6 +233,53 @@ def extend_detail_row(row, per_gpu, duration=None, min_runtime=None, diagnose_on
     return out
 
 
+# What each graded column is a percentage *of*, as
+# (label, unit, scale, pooled-row label, CSV label, weight key). CPU% is a share of
+# allocated cores and MEM% of allocated host memory; everything else -- GPU%, GMEM%
+# and every DCGM profiling column -- is a share of time on the allocated GPUs.
+_RESOURCES = {
+    "CPU%": ("Core-hours", "Cores", "cpu", "cpu"),
+    "MEM%": ("GB-hours", "GB", "mem", "mem"),
+    None: ("GPU-hours", "GPUs", "GPU", "gpu"),
+}
+
+
+_BLOB_HEADERS = ("CPU%", "MEM%", "GPU%", "GMEM%")
+
+
+def _blob_value(metrics, header: str) -> Optional[float]:
+    """``header``'s value from a :func:`blob_metrics` tuple, or None.
+
+    None both for a header the blob does not carry (a DCGM column) and for one it
+    carries without a measurement, which the caller treats the same way: look to
+    Prometheus, then give up rather than invent a zero.
+    """
+    if metrics is None or header not in _BLOB_HEADERS:
+        return None
+    return metrics[_BLOB_HEADERS.index(header)]
+
+
+def _resource_of(header: str, hours: bool):
+    """``EfficiencyTally`` arguments for ``header``: the resource it measures.
+
+    ``hours`` selects the resource-time form (a finished job, or ``--avg``) over
+    the bare-count form used by the instantaneous running view.
+    """
+    hourly, counted, name, key = _RESOURCES.get(header, _RESOURCES[None])
+    if key == "mem":
+        # Weights are byte-seconds; divide to GB-hours (or GB) and let _amount
+        # promote to TB when the figure gets long.
+        scale = GIB * 3600.0 if hours else float(GIB)
+        unit = "GBh" if hours else "GB"
+    else:
+        scale = 3600.0 if hours else 1.0
+        unit = "h" if hours else ""
+    return (hourly if hours else counted, unit, scale,
+            "Used/%s-hr:" % name if hours else "Used/%s:" % name,
+            "UsedPer%sHour" % name.upper() if hours else "UsedPer%s" % name.upper(),
+            key)
+
+
 class EfficiencyTally:
     """Where a selection's resource-time went, banded by the utilization thresholds.
 
@@ -250,12 +297,16 @@ class EfficiencyTally:
 
     def __init__(self, header: str, thresholds: "Thresholds", label: str,
                  unit: str, scale: float = 1.0, row: str = "Used/GPU:",
-                 csv_row: str = "UsedPerGPU") -> None:
-        self.header = header            # the column being banded, "GPU%" or "CPU%"
+                 csv_row: str = "UsedPerGPU", weight_key: str = "gpu") -> None:
+        self.header = header            # the column being banded, "GPU%", "SM_ACT%", ...
         self.thresholds = thresholds
         self.label = label              # "GPU-hours", "GPUs", "Core-hours", ...
         self.unit = unit                # "h" for resource-hours, "" for a count
         self.scale = scale              # seconds -> hours, or 1 for a bare count
+        # Which of _weights()'s entries this metric is a percentage *of*: cores for
+        # CPU%, host bytes for MEM%, GPUs for GPU% and every DCGM column. Taking it
+        # from the same source as the pooled row is what stops the two disagreeing.
+        self.weight_key = weight_key
         # What the pooled row is called. Kept to 12 characters, the width of the
         # JOBID column: a longer label shifts every cell in the row one right.
         self.row = row
@@ -294,52 +345,71 @@ class EfficiencyTally:
         """Allocated resource-time that went unused."""
         return self.total - self.used
 
+    def pooled(self) -> Optional[float]:
+        """Utilization over the whole selection, as a percent, or None if unmeasured.
+
+        The same number the pooled row prints for this column: used resource-time
+        over allocated. Used to grade the IDLE cell, so a metric that is mostly
+        waste reads red.
+        """
+        return 100.0 * self.used / self.total if self.total else None
+
     def _amount(self, weight: float) -> str:
-        return "%.1f%s" % (weight / self.scale, self.unit) if self.unit \
-            else "%d" % round(weight / self.scale)
+        """A resource amount with its unit, one decimal, trailing ``.0`` trimmed.
 
-    def totals_line(self) -> str:
-        """Allocated / used / idle. The unit is left to the row label.
+        Fractional even in the count form: ``used`` is GPU-equivalents busy, not
+        whole GPUs. Rounding it to an integer made the numbers stop adding up -- 20
+        allocated and 17.4 used printed as "17 used, 3 idle (13%)" while 3/20 is 15%.
 
-        One decimal, trailing ``.0`` trimmed. ``used`` is genuinely fractional even
-        in the count form -- it is GPU-equivalents busy, not whole GPUs -- so
-        rounding it to an integer made the three numbers stop adding up: 20
-        allocated and 17.4 used printed as "17 used  3 idle (13%)", and 3/20 is 15%.
+        Byte amounts are scaled again here, to GB or TB, because a raw byte-second
+        figure is nine digits wide and unreadable in a table cell. That choice is
+        made once from the tally's own total, so every amount in a row shares one
+        unit -- deciding per value printed "126.5TBh allocated, 5414.7GBh used".
         """
-        idle = self.total - self.used
-        def num(weight):
-            return ("%.1f" % (weight / self.scale)).removesuffix(".0")
-        return "%s alloc  %s used  %s idle (%d%%)" % (
-            num(self.total), num(self.used), num(idle),
-            round(100 * idle / self.total) if self.total else 0)
+        scale, unit = self._unit()
+        return ("%.1f" % (weight / scale)).removesuffix(".0") + unit
 
-    def bands_line(self) -> str:
-        """Each band's share of the jobs *and* of the resource-time.
+    def _unit(self) -> Tuple[float, str]:
+        """``(divisor, suffix)`` for this tally's amounts, promoting GB to TB."""
+        if self.unit.startswith("GB") and self.total / self.scale >= 10000:
+            return self.scale * 1024.0, "TB" + self.unit[2:]
+        return self.scale, self.unit
 
-        Printing both is the point: "5% of jobs holding 64% of the GPU-hours" is
-        the finding, and either number alone conceals it.
+    def stat_row(self) -> List[Tuple[str, str]]:
+        """This metric's table row as ``(cell, band)`` pairs; band "" means no tint.
+
+        ALLOC and USED stay plain. IDLE carries the metric's own pooled grade, so
+        the eye lands on the metrics that wasted their allocation. Each band cell is
+        tinted its own colour, since that is the colour it is naming.
         """
-        red = self.cutoff()
+        idle = self.idle()
+        idle_pct = round(100 * idle / self.total) if self.total else 0
         jobs_total = sum(count for count, _ in self.bands.values())
-        parts = []
-        for band, edge in (("red", "<%g" % red), ("yellow", "<%g" % (2 * red)), ("green", "")):
+        row = [(self.header, ""),
+               # The cutoff has to be per row: red is below 25 for GPU% but below
+               # 15 for SM_ACT%, so a single header could not state it.
+               ("%g" % self.cutoff(), ""),
+               (self._amount(self.total), ""),
+               (self._amount(self.used), ""),
+               ("%s (%d%%)" % (self._amount(idle), idle_pct),
+                self.band_of(self.pooled()))]
+        for band in ("red", "yellow", "green"):
             jobs, weight = self.bands[band]
-            parts.append("%s%s %d job%s (%d%%)/%s (%d%%)" % (
-                band, edge, jobs, "" if jobs == 1 else "s",
+            row.append(("%d (%d%%)/%d%%" % (
+                jobs,
                 round(100 * jobs / jobs_total) if jobs_total else 0,
-                self._amount(weight),
-                round(100 * weight / self.total) if self.total else 0))
-        # The column name lives in the row label, so it is not repeated here.
-        return "  ".join(parts)
+                round(100 * weight / self.total) if self.total else 0), band))
+        return row
 
     def worst_line(self) -> str:
         return "  ".join("%s %s@%d%% %s" % (jid, self._amount(weight), round(value), user)
                          for _idle, jid, user, weight, value in self.worst)
 
     def csv_cells(self) -> List[str]:
-        cells = ["column=%s" % self.header,
+        cells = ["metric=%s" % self.header,
                  "allocated=%s" % self._amount(self.total),
-                 "used=%s" % self._amount(self.used)]
+                 "used=%s" % self._amount(self.used),
+                 "idle=%s" % self._amount(self.idle())]
         for band in ("red", "yellow", "green"):
             jobs, weight = self.bands[band]
             cells.append("%s=%d" % (band, jobs))
@@ -394,21 +464,14 @@ class SummaryRenderer:
         # until the selection's totals are known, so the candidates must be kept.
         # Bounded by the red jobs, not the selection -- on a healthy partition, few.
         self.waste: Dict[str, Tuple[float, float, str]] = {}
-        # Both resources are tallied; finish() prints whichever the view is about.
-        # Under time weighting the weights are resource-seconds, so they render as
-        # hours; otherwise they are bare counts of GPUs or cores.
+        # One tally per graded column, so every metric on screen gets a summary and
+        # the set follows the view for free: 8 by default, CPU%/MEM% under --cpu,
+        # 6 under --gpu, the full catalog under --dcgm. Under time weighting the
+        # weights are resource-seconds and render as hours; otherwise bare counts.
         thresholds = options.thresholds or Thresholds(**DEFAULT_THRESHOLDS)
         hours = options.time_weighted
-        self.tallies = {
-            "gpu": EfficiencyTally("GPU%", thresholds, "GPU-hours" if hours else "GPUs",
-                                   "h" if hours else "", 3600.0 if hours else 1.0,
-                                   row="Used/GPU-hr:" if hours else "Used/GPU:",
-                                   csv_row="UsedPerGPUHour" if hours else "UsedPerGPU"),
-            "cpu": EfficiencyTally("CPU%", thresholds, "Core-hours" if hours else "Cores",
-                                   "h" if hours else "", 3600.0 if hours else 1.0,
-                                   row="Used/cpu-hr:" if hours else "Used/cpu:",
-                                   csv_row="UsedPerCPUHour" if hours else "UsedPerCPU"),
-        }
+        self.tallies = {header: EfficiencyTally(header, thresholds, *_resource_of(header, hours))
+                        for header in self.headers if header.endswith("%")}
         self._started = False
 
     def _line(self, row: dict, color: bool = True) -> str:
@@ -499,13 +562,13 @@ class SummaryRenderer:
             return
         cpu, _mem, gpu, _gmem = metrics
         idle, red = {}, False
-        for key, value in (("gpu", gpu), ("cpu", cpu)):
-            weight = weights[key]
-            if value is None or weight <= 0:
+        for key, header, value in (("gpu", "GPU%", gpu), ("cpu", "CPU%", cpu)):
+            tally, weight = self.tallies.get(header), weights[key]
+            if tally is None or value is None or weight <= 0:
                 idle[key] = 0.0
                 continue
             idle[key] = (1 - value / 100.0) * weight
-            if self.tallies[key].band_of(value) == "red":
+            if tally.band_of(value) == "red":
                 red = True
         if red:
             self.waste[jid] = (idle["gpu"], idle["cpu"], user)
@@ -520,7 +583,10 @@ class SummaryRenderer:
         and a fifth of the idle core-time scores 0.33 + 0.20. Both shares are
         reported, so the reader sees which resource drove the ranking.
         """
-        gpu_idle, cpu_idle = self.tallies["gpu"].idle(), self.tallies["cpu"].idle()
+        gpu, cpu = self.tallies.get("GPU%"), self.tallies.get("CPU%")
+        if gpu is None or cpu is None:
+            return []       # a narrowed view shows one resource; there is no "both"
+        gpu_idle, cpu_idle = gpu.idle(), cpu.idle()
         if gpu_idle <= 0 or cpu_idle <= 0:
             return []       # only one resource wasted anything; its own line says so
         scored = [((g / gpu_idle) + (c / cpu_idle), jid, user, g / gpu_idle, c / cpu_idle)
@@ -567,8 +633,6 @@ class SummaryRenderer:
                             # total matches the GPUs actually behind the GPU figures.
                             self.gpu_total += gpus
                             self.gpu_counts.add(gpus)
-                    if key in self.tallies:
-                        self.tallies[key].add(jid, row["USER"], value, weights[key])
                 self._note_waste(jid, row["USER"], metrics, weights)
             if do_dcgm:
                 overall = dcgm_data.get(jid, ({}, {}))[0]
@@ -584,6 +648,13 @@ class SummaryRenderer:
                 if options.diagnose:
                     row["DIAG"] = diagnose_dcgm(overall, record.duration if record else None,
                                                 options.min_runtime)
+            # Every graded column at once, now that both the blob and the DCGM
+            # values are in hand. Each tally knows which resource weights it.
+            for header, tally in self.tallies.items():
+                value = _blob_value(metrics, header)
+                if value is None and header in self.dcgm_headers and do_dcgm:
+                    value = dcgm_data.get(jid, ({}, {}))[0].get(header)
+                tally.add(jid, row["USER"], value, weights[tally.weight_key])
             if options.csv:
                 self.writer.writerow([row[h] for h in self.headers])
             else:
@@ -624,15 +695,22 @@ class SummaryRenderer:
                     total, n = self.sums_dcgm[header]
                 used_row[header] = format_by_header(header, total / n) if n else "-"
 
-        # Where that resource-time actually went, per resource the view shows. Both
-        # are reported in the default view: a GPU job holding cores it never uses
-        # blocks other work from the node, which the GPU lines cannot show. The
-        # first with data leads -- it names the pooled row and supplies Worst -- so
-        # a --cpu run is not silently blank and a GPU run still leads with GPUs.
-        wanted = {"cpu": ("cpu",), "gpu": ("gpu",)}.get(options.view, ("gpu", "cpu"))
-        shown = [self.tallies[key] for key in wanted if self.tallies[key].total]
-        tally = shown[0] if shown else self.tallies["gpu"]
-        combined = self._combined_worst() if len(shown) > 1 else []
+        # Every graded metric's own summary, in column order, skipping any that no
+        # job reported. The pooled row above shows the same utilization as a
+        # percentage; these rows add the absolute resource-time behind it and how
+        # that time was distributed across the threshold bands.
+        stats = [self.tallies[h] for h in self.headers
+                 if h in self.tallies and self.tallies[h].total]
+        # Worst stays GPU/CPU/combined: one row per metric would swamp the footer.
+        worst = [self.tallies[h] for h in ("GPU%", "CPU%")
+                 if h in self.tallies and self.tallies[h].worst]
+        # The pooled row's label names the resource it leads with: GPUs where the
+        # view has them, else cores, else whatever metric did report.
+        lead = next((t for t in (self.tallies.get("GPU%"), self.tallies.get("CPU%"))
+                     if t is not None and t.total), None)
+        if lead is None and stats:
+            lead = stats[0]
+        combined = self._combined_worst()
 
         # The job counts differ whenever the selection mixes CPU-only and GPU work:
         # a CPU-only job has no GPU% to average, so it is absent from the GPU
@@ -643,8 +721,6 @@ class SummaryRenderer:
             counts.append("gpu-jobs=%d" % self.sums["gpu"][1])
             if self.gpu_total:
                 counts.append("gpus=%d" % self.gpu_total)
-        # gpu-hours is not repeated here: the resource line above already states the
-        # weighted row's denominator, and states it split into used and idle.
         if self.unweighted:
             counts.append("no-runtime=%d" % self.unweighted)
 
@@ -654,37 +730,33 @@ class SummaryRenderer:
             return ([label] + cells + [""] * len(self.headers))[:len(self.headers)]
 
         if options.csv:
-            used_row["JOBID"] = tally.csv_row
+            used_row["JOBID"] = lead.csv_row if lead else "Used"
             self.writer.writerow([used_row[h] for h in self.headers])
-            for one in shown:
-                self.writer.writerow(padded(one.label.replace("-", ""), one.csv_cells()))
-            for one in shown:
-                if one.worst:
-                    self.writer.writerow(padded("Worst" + one.header.rstrip("%"), [
-                        "%s=%s@%d" % (jid, one._amount(weight), round(value))
-                        for _idle, jid, _user, weight, value in one.worst]))
-            if len(shown) > 1 and combined:
+            for one in stats:
+                # "Stat<METRIC>": parse_csv skips the prefix, since the metric set is
+                # open-ended (18 columns under --dcgm) and cannot be enumerated.
+                self.writer.writerow(padded("Stat" + one.header, one.csv_cells()))
+            for one in worst:
+                self.writer.writerow(padded("Worst" + one.header.rstrip("%"), [
+                    "%s=%s@%d" % (jid, one._amount(weight), round(value))
+                    for _idle, jid, _user, weight, value in one.worst]))
+            if combined:
                 self.writer.writerow(padded("WorstBoth", [
                     "%s=%d+%d" % (jid, round(100 * gpu_share), round(100 * cpu_share))
                     for _score, jid, _user, gpu_share, cpu_share in combined]))
             self.writer.writerow(padded("Jobs", counts))
         else:
-            used_row["JOBID"] = tally.row
+            used_row["JOBID"] = lead.row if lead else "Used:"
             if options.header:
                 print("-" * len(self._line({c.header: c.header for c in self.columns},
                                            color=False)), file=self.out)
             print(self._line(used_row), file=self.out)
-            for one in shown:
-                print("%-12s %s" % (one.label + ":", one.totals_line()), file=self.out)
-            for one in shown:
-                # Each band row names its own column, so two of them do not collide.
-                print("%-12s %s" % ("Bands " + one.header + ":", one.bands_line()),
-                      file=self.out)
-            for one in shown:
-                if one.worst:
-                    print("%-12s %s" % ("Worst " + one.header.rstrip("%") + ":",
-                                        one.worst_line()), file=self.out)
-            if len(shown) > 1 and combined:
+            for line in self._stat_table(stats):
+                print(line, file=self.out)
+            for one in worst:
+                print("%-12s %s" % ("Worst " + one.header.rstrip("%") + ":",
+                                    one.worst_line()), file=self.out)
+            if combined:
                 # Shares of each resource's total waste, summed. Printing both
                 # components shows which resource put the job on this list.
                 cells = "  ".join(
@@ -693,6 +765,41 @@ class SummaryRenderer:
                     for _score, jid, user, gpu_share, cpu_share in combined)
                 print("%-12s %s" % ("Worst both:", cells), file=self.out)
             print("%-12s %s" % ("Jobs:", "  ".join(counts)), file=self.out)
+
+    STAT_HEADERS = ("METRIC", "RED<", "ALLOC", "USED", "IDLE", "RED", "YELLOW", "GREEN")
+
+    def _stat_table(self, stats: List["EfficiencyTally"]) -> List[str]:
+        """The per-metric table: one row per graded metric, tinted by band.
+
+        Widths are measured from the content so the columns line up whatever the
+        metric names and magnitudes are. Escape codes wrap the *padded* cell, never
+        the value -- the same rule :meth:`_line` follows, because padding a string
+        that already contains them counts the escape bytes toward the width and
+        shifts every later column.
+        """
+        if not stats:
+            return []
+        rows = [one.stat_row() for one in stats]
+        widths = [max(len(self.STAT_HEADERS[i]), max(len(r[i][0]) for r in rows))
+                  for i in range(len(self.STAT_HEADERS))]
+        out = []
+        last = len(widths) - 1
+        if self.options.header:
+            out.append("  ".join(h if i == last else h.ljust(widths[i])
+                                 for i, h in enumerate(self.STAT_HEADERS)))
+        for row in rows:
+            cells = []
+            for i, ((text, band), width) in enumerate(zip(row, widths)):
+                # The final column is left unpadded rather than padded and stripped
+                # afterwards: with colour on, its trailing spaces would sit *inside*
+                # the escape wrapper where rstrip cannot reach them, and the tinted
+                # output would then differ from the plain output by more than the
+                # escapes.
+                cell = text if i == last else text.ljust(width)
+                tint = band if (band and self.options.color) else ""
+                cells.append(_SGR[tint] + cell + _RESET if tint else cell)
+            out.append("  ".join(cells))
+        return out
 
 
 class DetailRenderer:
