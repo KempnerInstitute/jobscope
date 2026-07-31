@@ -182,6 +182,35 @@ class RenderOptions:
     thresholds: Optional["Thresholds"] = None
 
 
+def cell_band(options: "RenderOptions", header: str, cell) -> str:
+    """The grade for a rendered cell, or ``""`` when it is not a graded metric.
+
+    Shared by the per-job table and ``--hwdetail`` so the two cannot disagree about a
+    colour, the same reason ``plot`` calls ``Thresholds.grade`` rather than keeping its
+    own copy.
+
+    The trailing ``%`` matters: the detail view writes its cells as "11.4%" where the
+    summary writes "11", and a bare ``float()`` rejects the former -- which is why
+    those columns were silently the only untinted ones.
+    """
+    if not options.color or options.thresholds is None:
+        return ""
+    try:
+        value = float(str(cell).rstrip("%"))
+    except (TypeError, ValueError):      # "-", "", a hostname, "76.1GB/1400GB"
+        return ""
+    return options.thresholds.grade(header, value)
+
+
+def tint(text: str, band: str) -> str:
+    """``text`` wrapped in ``band``'s colour, or unchanged when there is none.
+
+    Callers pass the *padded* cell: inserting the escapes first would make str.format
+    count them toward the column width and shift every later column.
+    """
+    return _SGR[band] + text + _RESET if band else text
+
+
 def fmt_context(label: str, value: str) -> str:
     """A '  Label:     value' context line."""
     return "  %-11s%s" % (label + ":", value)
@@ -610,19 +639,12 @@ class SummaryRenderer:
         for col in self.columns:
             text = col.fmt.format(str(row.get(col.header, "")))
             band = self._band(col.header, row.get(col.header)) if color else ""
-            cells.append(_SGR[band] + text + _RESET if band else text)
+            cells.append(tint(text, band))
         return " ".join(cells)
 
     def _band(self, header: str, cell) -> str:
-        """The grade for a rendered cell, or "" when it is not a graded metric."""
-        options = self.options
-        if not options.color or options.thresholds is None:
-            return ""
-        try:
-            value = float(cell)
-        except (TypeError, ValueError):      # "-", "", a job name, a runtime
-            return ""
-        return options.thresholds.grade(header, value)
+        """The grade for a rendered cell; see :func:`cell_band`."""
+        return cell_band(self.options, header, cell)
 
     def _start(self) -> None:
         if self._started:
@@ -1152,7 +1174,11 @@ class DetailRenderer:
         self._started = False
 
     def _line(self, cells) -> str:
-        return " ".join(c.fmt.format(str(cells[c.index])) for c in self.columns)
+        """One per-GPU row, graded like the per-job table above it."""
+        return " ".join(
+            tint(c.fmt.format(str(cells[c.index])),
+                 cell_band(self.options, c.header, cells[c.index]))
+            for c in self.columns)
 
     def _start(self) -> None:
         if self._started:

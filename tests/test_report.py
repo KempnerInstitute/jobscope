@@ -1501,6 +1501,60 @@ def test_color_does_not_shift_the_columns():
     assert _ESC.sub("", _render_colored(records)) == _render_colored(records, color=False)
 
 
+def _render_detail(records, color=True, dcgm_data=None):
+    options = RenderOptions(view="all", show_dcgm=bool(dcgm_data), csv=False,
+                            header=True, color=color, thresholds=_thresholds())
+    return _render(detail, list(records), records, dcgm_data or {}, CTX, options)
+
+
+def test_hwdetail_grades_its_cells_like_the_per_job_table():
+    """One band helper serves both, so a GPU cannot be green in one and red in the
+    other. The per-GPU rows were the only untinted table left."""
+    records = {"1": _gpu_job("1", {"0": 5.0, "1": 95.0})}
+    text = _render_detail(records)
+    assert report._SGR["red"] in text and report._SGR["green"] in text
+
+
+def test_hwdetail_grades_percent_suffixed_cells():
+    """Its cells read "5%" where the summary writes "5".
+
+    A bare float() rejects the trailing sign, which is exactly why these columns were
+    silently the only ones left plain.
+    """
+    from jobscope.report import cell_band
+    options = RenderOptions(color=True, thresholds=_thresholds())
+    assert cell_band(options, "CPU%", "5%") == "red"
+    assert cell_band(options, "CPU%", "50%") == "green"
+    assert cell_band(options, "GPU%", 95.0) == "green"       # bare numbers too
+    # And nothing that is not a measurement.
+    for cell in ("-", "", "holygpu8a10302", "76.1GB/1400GB", "short"):
+        assert cell_band(options, "CPU-MEM", cell) == ""
+
+
+def test_hwdetail_leaves_the_identity_and_paired_columns_plain():
+    records = {"1": _gpu_job("1", {"0": 5.0})}
+    for line in _render_detail(records).splitlines():
+        if not line.startswith("  node"):
+            continue
+        # The node name, the GPU index and the GB/GB pairs carry no grade.
+        assert not line.startswith("  " + report._SGR["red"])
+        for plain in ("76.1GB", "node01"):
+            assert report._SGR["red"] + plain not in line
+
+
+def test_color_does_not_shift_the_hwdetail_columns():
+    """Same rule as the per-job table: wrap the padded cell, never the value."""
+    records = {"1": _gpu_job("1", {"0": 5.0, "1": 95.0})}
+    assert _ESC.sub("", _render_detail(records)) == _render_detail(records, color=False)
+
+
+def test_hwdetail_csv_is_never_tinted():
+    records = {"1": _gpu_job("1", {"0": 5.0})}
+    options = RenderOptions(view="all", csv=True, header=True, color=True,
+                            thresholds=_thresholds())
+    assert "\033" not in _render(detail, ["1"], records, {}, CTX, options)
+
+
 def test_the_header_and_rules_stay_plain():
     records = {"1": _gpu_job("1", {"0": 5.0}), "2": _gpu_job("2", {"0": 95.0})}
     for line in _render_colored(records).splitlines():
