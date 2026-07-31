@@ -475,10 +475,11 @@ On a terminal, every `%` cell is tinted by how efficient it is -- **red** below 
 threshold, **yellow** below twice it, **green** above -- so an idle job is a red row
 and a healthy one is green. The pooled footer row is tinted too, and the same
 cutoffs define the band tallies, so a wasteful selection is obvious at a glance
-and quantified one line below.
+and quantified one line below. `--hwdetail`'s per-GPU rows are graded by the same
+helper, so one GPU cannot read green in one table and red in the other.
 
-The cutoffs are per column and site-tunable in `[thresholds]`, and they are the
-same ones `jobscope plot` grades with, so a job red in a chart is red in the table:
+One cutoff covers every `%` metric, site-tunable in `[thresholds]`, and it is the
+same one `jobscope plot` grades with, so a job red in a chart is red in the table:
 
 ```
 red = 10       every %-metric: red below 10, yellow below 20, green above
