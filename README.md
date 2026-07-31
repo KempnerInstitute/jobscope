@@ -170,12 +170,12 @@ With more than one job the table ends in two footers:
 
 ```
 Mean:                        11     4            70     3       52.8   11.4 ...
-Jobs:                        18     18     18    17     17      17     17   ...
+Jobs:        cpu-jobs=18  gpu-jobs=17
 ```
 
-`Jobs` is the number of jobs behind each mean, **per column**, because the counts
-differ: a CPU-only job contributes to `CPU%` but has no `GPU%` to average. Under
-`#GPU` it is the row total, i.e. how many jobs the table rendered. `jobscope plot`
+The two counts differ whenever the selection mixes CPU-only and GPU work: a
+CPU-only job has no `GPU%` to average, so it is absent from the GPU means rather
+than counted as zero. A GPU job that sat idle *is* counted, as 0%. `jobscope plot`
 skips both footers rather than charting them as jobs.
 
 - `--cpu` narrows to the host columns. For *finished* jobs that needs no Prometheus

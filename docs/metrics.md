@@ -251,9 +251,8 @@ Which jobs contribute is the part worth being exact about:
 The last two lean the same way on purpose: jobscope never invents a zero for a
 GPU it has no measurement of, because a retention gap or an unscraped short job
 would then read as waste that was never observed. The cost is that such jobs
-quietly leave the average, which is why the `Jobs:` footer prints the contributing
-count per column -- if `GPU%` says 17 where `CPU%` says 18, one job's GPU use is
-unmeasured rather than zero.
+quietly leave the average, which is why the `Jobs:` footer prints both totals --
+`cpu-jobs=18 gpu-jobs=17` says one job's GPU use is unmeasured rather than zero.
 
 `mean` by default; `max` for peak-like metrics; `sum` for energy. The per-job
 figure in the summary view uses this; the per-GPU rows in `detail`, `dcgm` and

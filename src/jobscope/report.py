@@ -320,33 +320,32 @@ class SummaryRenderer:
             return str(round(total / count)) if count else "-"
 
         mean_row = {c.header: "" for c in self.columns}
-        jobs_row = {c.header: "" for c in self.columns}
         for key, header in (("cpu", "CPU%"), ("mem", "MEM%"),
                             ("gpu", "GPU%"), ("gmem", "GMEM%")):
             mean_row[header] = mean(key)
-            jobs_row[header] = str(self.sums[key][1])
         if options.show_dcgm:
             for header in self.dcgm_headers:
                 total, count = self.sums_dcgm[header]
                 mean_row[header] = format_by_header(header, total / count) if count else "-"
-                jobs_row[header] = str(count)
 
-        # A per-column count, because the counts genuinely differ: a CPU-only job
-        # contributes to CPU% but has no GPU% to average, so one number in the label
-        # would overstate some columns. #GPU carries the row total, which is the
-        # number of jobs the table actually rendered.
-        jobs_row["#GPU"] = str(self.count)
+        # How many jobs each mean came from. The two counts differ whenever the
+        # selection mixes CPU-only and GPU work: a CPU-only job has no GPU% to
+        # average, so it is absent from the GPU figures rather than counted as zero.
+        counts = ["cpu-jobs=%d" % self.sums["cpu"][1], "gpu-jobs=%d" % self.sums["gpu"][1]]
         if options.csv:
-            mean_row["JOBID"], jobs_row["JOBID"] = "Mean", "Jobs"
+            mean_row["JOBID"] = "Mean"
             self.writer.writerow([mean_row[h] for h in self.headers])
-            self.writer.writerow([jobs_row[h] for h in self.headers])
+            # Padded to the header width so the CSV stays rectangular; parse_csv
+            # drops the row by its first cell either way.
+            self.writer.writerow((["Jobs"] + counts
+                                  + [""] * len(self.headers))[:len(self.headers)])
         else:
-            mean_row["JOBID"], jobs_row["JOBID"] = "Mean:", "Jobs:"
+            mean_row["JOBID"] = "Mean:"
             if options.header:
                 print("-" * len(self._line({c.header: c.header for c in self.columns})),
                       file=self.out)
             print(self._line(mean_row), file=self.out)
-            print(self._line(jobs_row), file=self.out)
+            print("%-12s %s" % ("Jobs:", "  ".join(counts)), file=self.out)
 
 
 class DetailRenderer:

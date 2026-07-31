@@ -289,24 +289,16 @@ def test_detail_renderer_empty_message_ignores_header_flag(cpu_record):
     assert "(no GPU jobs in this selection)" in streamed
 
 
-def test_mean_row_is_followed_by_per_column_job_counts(gpu_record, cpu_record):
-    """How many jobs each mean came from -- per column, because they differ.
+def test_mean_row_is_followed_by_the_two_job_counts(gpu_record, cpu_record):
+    """How many jobs each mean came from, as two labelled totals.
 
-    A CPU-only job contributes to CPU% but has no GPU% to average, so a single
-    count in the label would overstate the GPU columns.
+    They differ whenever the selection mixes CPU-only and GPU work, which is the
+    reason to print them at all: a CPU-only job has no GPU% to average.
     """
-    records = {"100": gpu_record, "200": cpu_record}
-    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
-    text = _render(summarize, ["100", "200"], records,
-                   {"100": ({"SM_ACT%": 60.0}, {})}, CTX, options)
-    rows = {r.split(",")[0]: r.split(",") for r in text.splitlines()}
-    header = rows["JOBID"]
-    jobs = dict(zip(header, rows["Jobs"]))
-    assert dict(zip(header, rows["Mean"]))["CPU%"]           # a mean was printed
-    assert jobs["CPU%"] == "2"        # both jobs have CPU data
-    assert jobs["GPU%"] == "1"        # only the GPU job has GPU data
-    assert jobs["SM_ACT%"] == "1"     # ... and only it had DCGM metrics
-    assert jobs["#GPU"] == "2"        # the row total: jobs actually rendered
+    mean, counts = _mean_row({"100": gpu_record, "200": cpu_record}, show_dcgm=True,
+                             dcgm_data={"100": ({"SM_ACT%": 60.0}, {})})
+    assert mean["CPU%"]                            # a mean was printed
+    assert counts == {"cpu-jobs": 2, "gpu-jobs": 1}
 
 
 def test_footer_rows_are_not_parsed_as_jobs(gpu_record, cpu_record):
@@ -341,21 +333,22 @@ def _gpu_job(jid, utils, allocated=None):
                      cluster="c", user="alice")
 
 
-def _mean_row(records):
-    text = _render(summarize, list(records), records, {}, CTX,
-                   RenderOptions(view="all", show_dcgm=False, csv=True, header=True))
+def _mean_row(records, show_dcgm=False, dcgm_data=None):
+    """``(mean by column, {"cpu-jobs": n, "gpu-jobs": m})`` from a rendered table."""
+    text = _render(summarize, list(records), records, dcgm_data or {}, CTX,
+                   RenderOptions(view="all", show_dcgm=show_dcgm, csv=True, header=True))
     rows = {r.split(",")[0]: r.split(",") for r in text.splitlines()}
-    header = rows["JOBID"]
-    return dict(zip(header, rows["Mean"])), dict(zip(header, rows["Jobs"]))
+    counts = dict(cell.split("=") for cell in rows["Jobs"][1:] if "=" in cell)
+    return dict(zip(rows["JOBID"], rows["Mean"])), {k: int(v) for k, v in counts.items()}
 
 
 def test_a_job_with_no_gpu_is_left_out_of_the_gpu_mean():
     """A CPU-only job has no GPU% to average, so it must not dilute the mean."""
     records = {"1": _gpu_job("1", None), "2": _gpu_job("2", {"0": 80.0})}
-    mean, jobs = _mean_row(records)
+    mean, counts = _mean_row(records)
     assert mean["GPU%"] == "80"        # not 40 -- the CPU-only job is excluded
-    assert jobs["GPU%"] == "1"         # ... and the footer says so
-    assert jobs["CPU%"] == "2"         # while both contributed CPU%
+    # ... and the footer says so, while both jobs contributed CPU%.
+    assert counts == {"cpu-jobs": 2, "gpu-jobs": 1}
 
 
 def test_an_idle_gpu_job_is_counted_as_zero():
@@ -365,9 +358,9 @@ def test_an_idle_gpu_job_is_counted_as_zero():
     finding.
     """
     records = {"1": _gpu_job("1", {"0": 0.0}), "2": _gpu_job("2", {"0": 100.0})}
-    mean, jobs = _mean_row(records)
+    mean, counts = _mean_row(records)
     assert mean["GPU%"] == "50"        # mean(0, 100), not 100
-    assert jobs["GPU%"] == "2"
+    assert counts["gpu-jobs"] == 2
 
 
 def test_a_jobs_own_gpu_mean_spans_its_gpus():
@@ -396,10 +389,10 @@ def test_allocated_gpus_that_reported_nothing_are_not_assumed_idle():
 
 def test_a_gpu_job_with_no_samples_shows_a_dash_and_is_excluded():
     records = {"1": _gpu_job("1", None, allocated=2), "2": _gpu_job("2", {"0": 60.0})}
-    mean, jobs = _mean_row(records)
+    mean, counts = _mean_row(records)
     assert mean["GPU%"] == "60"
-    assert jobs["GPU%"] == "1"         # the sample-less job cannot contribute
-    assert jobs["#GPU"] == "2"         # but it is still one of the rows rendered
+    # The sample-less job cannot contribute, though it is still a rendered row.
+    assert counts == {"cpu-jobs": 2, "gpu-jobs": 1}
 
 
 def test_the_gpu_mean_is_per_job_not_per_gpu():
@@ -410,6 +403,6 @@ def test_the_gpu_mean_is_per_job_not_per_gpu():
     """
     records = {"1": _gpu_job("1", {str(i): 100.0 for i in range(4)}),
                "2": _gpu_job("2", {"0": 0.0})}
-    mean, jobs = _mean_row(records)
+    mean, counts = _mean_row(records)
     assert mean["GPU%"] == "50"
-    assert jobs["GPU%"] == "2"
+    assert counts["gpu-jobs"] == 2
