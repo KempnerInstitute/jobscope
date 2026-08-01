@@ -1650,28 +1650,32 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     power_floor = options.thresholds.power_w if options.thresholds else None
     unit = {"gpu": "GPUs", "node": "nodes"}.get(level, "jobs")
 
-    groups = pool_samples(rows, metrics + ["POWER_W"], level)
+    reported = [c for c in columns if c not in TS_ID_COLUMNS]
+    groups = pool_samples(rows, reported, level)
     verdicts = []
     for key, found in groups.items():
-        means = {m: sum(v) / len(v) for m, v in found["values"].items() if m in metrics}
-        power = found["values"].get("POWER_W")
-        power = sum(power) / len(power) if power else None
-        name, demoted = classify(means, power, power_floor)
+        # Every metric is averaged, but only the judged ones vote. Keeping the two
+        # apart is what lets the CSV report GMEM% and POWER_W without letting them
+        # decide the label.
+        means = {m: sum(v) / len(v) for m, v in found["values"].items()}
+        judged = {m: v for m, v in means.items() if m in metrics}
+        power = means.get("POWER_W")
+        name, demoted = classify(judged, power, power_floor)
         verdicts.append((name, key, found, means, power, demoted))
 
     if options.csv:
+        # jobid, user, every metric the series carried, then the label. Wider than
+        # the metrics the verdict was taken over -- POWER_W and GMEM% do not vote, but
+        # a row you are going to sort or join on should carry what was measured.
         writer = csv.writer(out, lineterminator="\n")
         if options.header:
-            writer.writerow(["CATEGORY", "JOBID", "USER", "NODES", "GPUS", "POWER_W",
-                             "UNDER_FLOOR"] + metrics)
+            writer.writerow(["JOBID", "USER"] + reported + ["LABEL"])
         order = {name: i for i, (name, _l, _c) in enumerate(CATEGORIES)}
-        for name, key, found, means, power, demoted in sorted(
+        for name, key, found, means, _power, _demoted in sorted(
                 verdicts, key=lambda v: (order[v[0]], v[1])):
-            writer.writerow([name, key[0], found["user"], len(found["nodes"]),
-                             len(found["gpus"]),
-                             "" if power is None else "%.0f" % power,
-                             "yes" if demoted else ""]
-                            + ["%.1f" % means[m] if m in means else "" for m in metrics])
+            writer.writerow([key[0], found["user"]]
+                            + ["%.1f" % means[m] if m in means else "" for m in reported]
+                            + [name])
         out.flush()
         return
 

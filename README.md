@@ -819,8 +819,21 @@ allowed to argue a job upward.
 
 `good` collapses to a count by default, since on a healthy partition it is most of the
 output and none of the point; `--all-categories` lists it. `--stats-per-node`
-classifies hosts on the same rule, and `--csv` emits a row per job with a `CATEGORY`
-column.
+classifies hosts on the same rule.
+
+`--csv` gives one row per job -- id, user, every metric the series carried, and the
+label last:
+
+```console
+$ jobscope -p kempner_h100 -a --ts 10m --classify --csv
+JOBID,USER,GPU%,SM_ACT%,OCC%,TENSOR%,DRAM%,POWER_W,GMEM_GB,GMEM%,LABEL
+36229482,zkong,0.0,0.0,0.0,0.0,0.0,69.5,0.5,0.6,wasteful
+36638420_2,mkwun,77.5,76.3,30.5,40.0,41.1,587.9,60.5,76.0,good
+```
+
+It carries `GMEM%` and `POWER_W` even though neither votes on the label: a row you are
+going to sort or join on should say what was measured. Nothing names the partition,
+because `-p` already fixed it for every row.
 
 **A window needs its unit** -- `1h`, `90m`, `30s`, `2d`, the same vocabulary
 `--min-elapsed` uses. That is what keeps `jobscope --ts 36441613` working: a job ID

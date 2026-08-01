@@ -2116,13 +2116,23 @@ def test_the_categories_are_listed_worst_first():
     assert order == ["wasteful", "needs improvement", "good"]
 
 
-def test_the_csv_form_carries_the_category():
-    jobs = {"1": {"GPU%": 0.4, "SM_ACT%": 0.0, "GMEM%": 90, "POWER_W": 73, "USER": "alice"}}
+def test_the_csv_is_jobid_user_metrics_label():
+    """The shape asked for: plain values, the label last."""
+    jobs = {"1": {"GPU%": 0.4, "SM_ACT%": 0.0, "GMEM%": 90, "POWER_W": 73,
+                  "USER": "alice"}}
     text = _classify(jobs, csv=True)
     header, row = [ln.split(",") for ln in text.strip().splitlines()]
-    assert header[:7] == ["CATEGORY", "JOBID", "USER", "NODES", "GPUS", "POWER_W",
-                          "UNDER_FLOOR"]
-    assert row[0] == "wasteful" and row[2] == "alice" and row[6] == ""
+    assert header == ["JOBID", "USER", "GPU%", "SM_ACT%", "GMEM%", "POWER_W", "LABEL"]
+    assert row == ["1", "alice", "0.4", "0.0", "90.0", "73.0", "wasteful"]
+
+
+def test_the_csv_reports_metrics_the_verdict_did_not_use():
+    """GMEM% and POWER_W do not vote, but a row you will sort or join on should
+    still carry what was measured."""
+    jobs = {"1": {"GPU%": 50, "SM_ACT%": 40, "GMEM%": 88, "POWER_W": 300}}
+    header = _classify(jobs, csv=True).splitlines()[0].split(",")
+    assert "GMEM%" in header and "POWER_W" in header
+    assert "GMEM%" not in report.classify_metrics(list(header))
 
 
 def test_a_series_with_no_percentages_cannot_be_classified():

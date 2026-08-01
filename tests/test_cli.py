@@ -893,7 +893,7 @@ def test_plot_ts_charts_instead_of_writing_the_csv(monkeypatch, capsys):
     _fake_ts(monkeypatch, _ts_rows())
     main(["-j", "1", "--plot_ts"])
     out = capsys.readouterr().out
-    assert "JOBID,EPOCH" not in out      # the CSV went to the chart, not to stdout
+    assert "JOBID,USER" not in out       # the CSV went to the chart, not to stdout
     assert "┤" in out and "GPU%" in out
 
 
@@ -1039,7 +1039,7 @@ def test_stats_summarizes_instead_of_writing_the_csv(monkeypatch, capsys):
     _fake_ts(monkeypatch, _ts_rows(gpus=("0",)))
     main(["-j", "1", "--ts", "--stats"])
     out = capsys.readouterr().out
-    assert "JOBID,EPOCH" not in out              # the CSV became the summary
+    assert "JOBID,USER" not in out               # the CSV became the summary
     assert "MEAN" in out and "GPU%" in out
 
 
