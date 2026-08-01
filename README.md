@@ -310,12 +310,12 @@ POWER_W  36.7h (8%)     41   77      294
 
 3. Problem jobs
 --------------------------------------------------------------------------------------------
-Worst GPU (20/77):   hsafaai| 36337337:0%:8h(08:00:29), 36337338:0%:8h(08:00:26)
-Worst SM (20/77):    hsafaai| 36337337:0%:8h(08:00:29), 36337292:0%:8h(08:00:21)
-Worst POWER (20/77): hsafaai| 36337337:68W:8h(08:00:29), 36337338:70W:8h(08:00:26)
-Worst CPU (50/77):   hsafaai| 36337338:1%:64.1h(08:00:26), 36337292:1%:64h(08:00:21)
-Worst both (19):     hsafaai| 36337338:gpu0/cpu1(08:00:26), 36337292:gpu0/cpu1(08:00:21)
-Worst all (19):      hsafaai| 36337338:gpu0/sm0/pw70W/cpu1(08:00:26)
+Worst GPU (20/77):   alice| 36337337:0%:8h(08:00:29), 36337338:0%:8h(08:00:26)
+Worst SM (20/77):    alice| 36337337:0%:8h(08:00:29), 36337292:0%:8h(08:00:21)
+Worst POWER (20/77): alice| 36337337:68W:8h(08:00:29), 36337338:70W:8h(08:00:26)
+Worst CPU (50/77):   alice| 36337338:1%:64.1h(08:00:26), 36337292:1%:64h(08:00:21)
+Worst both (19):     alice| 36337338:gpu0/cpu1(08:00:26), 36337292:gpu0/cpu1(08:00:21)
+Worst all (19):      alice| 36337338:gpu0/sm0/pw70W/cpu1(08:00:26)
 Jobs:                cpu-jobs=77  gpu-jobs=77  gpus=119  no-blob=13
 ```
 
@@ -662,6 +662,38 @@ Note that bare `jobscope` now shows **running** jobs rather than the last day of
 finished ones, and that `--min-runtime` now means the runtime floor
 (`--min-elapsed`) in every mode.
 
+## Useful commands
+
+A working set, in the order you would reach for them.
+
+```bash
+# what is running right now
+jobscope                                          # your jobs
+jobscope -p kempner_eng -a                        # everyone on a partition
+
+# what already ran
+jobscope finished                                 # your last day
+jobscope finished -D 1                            # the same, explicitly
+jobscope finished -S 2026-07-26 -p kempner_eng    # a fixed window on one partition
+jobscope -p kempner_eng -a --avg                  # running, folded over each runtime
+                                                  # (--avg is running-only: a finished
+                                                  #  job is always folded already)
+
+# one job in detail
+jobscope -j 36499551_64                           # summary, with efficiency bars
+jobscope -j 36612315 --plot_ts                    # its metrics charted over time
+jobscope -j 36441613 --ts 60m --stats-per-job     # the last hour, averaged
+
+# a whole partition, triaged
+jobscope -p kempner_h100 -a --ts 60m --classify
+jobscope -p kempner_h100 -a --ts 10m --classify --csv > triage.csv
+```
+
+Two notes on the last group. `--ts WINDOW` narrows the Prometheus queries rather than
+filtering rows, so a short window over a busy partition is cheap -- 145 jobs in about
+16s. And `--classify` implies `--stats-per-job`, so the two do not need to be given
+together.
+
 ## Reference
 
 Run `jobscope describe` for column definitions and `jobscope describe --dcgm --ext`
@@ -794,8 +826,8 @@ $ jobscope -p kempner_h100 -a --ts 10m --classify
   (POWER_W below 100 W forces wasteful)
 
   wasteful (<2%)  15 jobs
-    36229482    zkong          2 GPU  GPU% 0.0 SM_ACT% 0.0 ... POWER_W 70
-    36438938_1  rsimmonsedler  1 GPU  GPU% 0.0 SM_ACT% 0.0 ... POWER_W 118
+    36229482    bob    2 GPU  GPU% 0.0 SM_ACT% 0.0 ... POWER_W 70
+    36438938_1  carol  1 GPU  GPU% 0.0 SM_ACT% 0.0 ... POWER_W 118
   inefficient (2-10%)  4 jobs
     ...
   good (>40%)  98 jobs
@@ -834,8 +866,8 @@ label last:
 ```console
 $ jobscope -p kempner_h100 -a --ts 10m --classify --csv
 JOBID,USER,GPU%,SM_ACT%,OCC%,TENSOR%,DRAM%,POWER_W,GMEM_GB,GMEM%,LABEL
-36229482,zkong,0.0,0.0,0.0,0.0,0.0,69.5,0.5,0.6,wasteful
-36638420_2,mkwun,77.5,76.3,30.5,40.0,41.1,587.9,60.5,76.0,good
+36229482,bob,0.0,0.0,0.0,0.0,0.0,69.5,0.5,0.6,wasteful
+36638420_2,dana,77.5,76.3,30.5,40.0,41.1,587.9,60.5,76.0,good
 ```
 
 It carries `GMEM%` and `POWER_W` even though neither votes on the label: a row you are
