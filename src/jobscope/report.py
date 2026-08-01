@@ -281,10 +281,11 @@ def bar_lines(items, indent: str = "  ") -> List[str]:
         if value > 0 and filled == 0:
             filled = 1
         run = "\u2588" * filled
-        out.append("%s%*s  %s%s  %4s" % (
-            indent, label_width, label, tint(run, band) if run else run,
-            "\u2591" * (BAR_WIDTH - filled),
-            "<1%" if 0 < value < 0.5 else "%d%%" % round(value)))
+        value_text = "<1%" if 0 < value < 0.5 else "%d%%" % round(value)
+        out.append("%s%*s  %4s  %s%s" % (
+            indent, label_width, label, value_text,
+            tint(run, band) if run else run,
+            "\u2591" * (BAR_WIDTH - filled)))
     return out
 
 

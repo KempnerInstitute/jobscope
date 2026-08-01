@@ -626,7 +626,8 @@ def _eff_bars(records, **kw):
     for line in out.getvalue().splitlines():
         if "\u2588" in line or "\u2591" in line:
             head, _, tail = line.strip().partition("  ")
-            bars[head] = (tail.count("\u2588"), int(tail.strip().rstrip("%").split()[-1]))
+            value_text, _, bar_part = tail.strip().partition("  ")
+            bars[head] = (bar_part.count("\u2588"), int(value_text.rstrip("%")))
     return bars
 
 
@@ -1564,7 +1565,7 @@ def _multinode_job(jid="1"):
 
 
 _RESET_T = "\033[0m"
-_BAR_RE = re.compile(r"(\S+)\s+[\u2588\u2591]+\s+(<?\d+)%")
+_BAR_RE = re.compile(r"(\S+)\s+(<?\d+)%\s+[\u2588\u2591]+")
 
 
 def _charts(records, **kw):
