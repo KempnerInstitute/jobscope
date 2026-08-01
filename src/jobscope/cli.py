@@ -630,8 +630,11 @@ def _plot_timeseries(text: str, args) -> None:
     window = _ts_window(args)
     print("job %s  %s%s" % (jobids[0], nodes[0] if nodes else "?",
                             "  last %s" % format_duration(window) if window else ""))
+    # --dcgm/--ext widened the emitted CSV to the extended catalog; chart all of
+    # it rather than the fixed default subset, or the extra columns bought by
+    # --ext would never appear on the chart.
     plot.run(plot.default_args(kind="line", by="metric", columns=True,
-                               no_color=args.no_color),
+                               no_color=args.no_color, all=args.dcgm),
              fobj=io.StringIO(text))
 
 

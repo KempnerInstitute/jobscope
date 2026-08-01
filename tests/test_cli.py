@@ -930,6 +930,25 @@ def test_plot_ts_needs_no_nodename_for_a_single_node_job(monkeypatch, capsys):
     assert "┤" in capsys.readouterr().out
 
 
+def test_plot_ts_charts_every_metric_only_with_dcgm(monkeypatch, capsys):
+    """--dcgm/--ext widens the CSV; the chart should follow, not stay on the default set."""
+    header = "JOBID,USER,EPOCH,TIME,NODE,GPU,GPU%,GMEM%,ENGINE%\n"
+    body = "".join(
+        "100,alice,%d,2020-01-01T00:%02d:00,node01,%s,%d,%d,%d\n"
+        % (1000 + 60 * t, t, g, 90 + t, 50 + t, 30 + t)
+        for g in ("0", "1", "2", "3") for t in range(3))
+
+    def emit(*a, **kw):
+        (kw.get("out") or sys.stdout).write(header + body)
+    monkeypatch.setattr(cli, "emit_timeseries", emit)
+
+    main(["-j", "1", "--plot_ts"])
+    assert "ENGINE%" not in capsys.readouterr().out
+
+    main(["-j", "1", "--dcgm", "--plot_ts"])
+    assert "ENGINE%" in capsys.readouterr().out
+
+
 def test_plot_ts_refuses_several_jobs(monkeypatch, capsys):
     """Series key on (NODE, GPU) alone, so two jobs on one GPU would become one line."""
     _fake_ts(monkeypatch, _ts_rows(jobids=("100", "101")))
