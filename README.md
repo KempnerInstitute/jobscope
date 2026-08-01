@@ -682,6 +682,7 @@ jobscope -p kempner_eng -a --avg                  # running, folded over each ru
 # one job in detail
 jobscope -j 36499551_64                           # summary, with efficiency bars
 jobscope -j 36612315 --plot_ts                    # its metrics charted over time
+jobscope -j 36612315 --plot_ts 60m                # the same, last hour only
 jobscope -j 36441613 --ts 60m --stats-per-job     # the last hour, averaged
 
 # a whole partition, triaged
@@ -689,10 +690,13 @@ jobscope -p kempner_h100 -a --ts 60m --classify
 jobscope -p kempner_h100 -a --ts 10m --classify --csv > triage.csv
 ```
 
-Two notes on the last group. `--ts WINDOW` narrows the Prometheus queries rather than
-filtering rows, so a short window over a busy partition is cheap -- 145 jobs in about
-16s. And `--classify` implies `--stats-per-job`, so the two do not need to be given
-together.
+The window goes on whichever flag you are already using -- `--plot_ts 60m`, not
+`--ts 60m --plot_ts`, since `--plot_ts` *is* `--ts` with the chart in place of the CSV
+and the two are mutually exclusive.
+
+Two further notes. `--ts WINDOW` narrows the Prometheus queries rather than filtering
+rows, so a short window over a busy partition is cheap -- 145 jobs in about 16s. And
+`--classify` implies `--stats-per-job`, so the two do not need to be given together.
 
 ## Reference
 
