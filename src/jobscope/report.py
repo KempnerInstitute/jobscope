@@ -1638,8 +1638,8 @@ TS_STAT_TAIL = ("METRIC", "N", "MIN", "MEAN", "MAX", "LAST")
 
 
 
-def _stat_lead(level: str, multi_job: bool) -> Tuple[str, ...]:
-    """The identifying columns for a level, before METRIC.
+def unit_headers(level: str, multi_job: bool) -> Tuple[str, ...]:
+    """The identifying columns for a level, before the metrics.
 
     Each level names what it pooled: a node row says how many GPUs went into it, a job
     row how many nodes and GPUs. Without that the reader cannot tell a one-GPU mean
@@ -1650,6 +1650,22 @@ def _stat_lead(level: str, multi_job: bool) -> Tuple[str, ...]:
         return ("JOBID", "NODES", "GPUS")
     job = ("JOBID",) if multi_job else ()
     return job + (("NODE", "GPUS") if level == "node" else ("NODE:GPU",))
+
+
+def unit_values(level: str, multi_job: bool, key: tuple, found: dict) -> Tuple[str, ...]:
+    """The values for :func:`unit_headers`, in the same order.
+
+    Paired with it deliberately: these were two mirrored branch chains that had to
+    agree positionally with nothing to enforce it, and the widths index straight into
+    that agreement. Adding a level now means editing one thing twice, next to itself.
+    """
+    jobid = key[0]
+    if level == "job":
+        return (jobid, str(len(found["nodes"])), str(len(found["gpus"])))
+    job = (jobid,) if multi_job else ()
+    if level == "node":
+        return job + (key[1], str(len(found["gpus"])))
+    return job + ("%s:%s" % (key[1], key[2]),)
 
 
 def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOptions",
@@ -1700,10 +1716,29 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
               file=out)
         print(file=out)
 
-    # Widths from the content: usernames run from 5 to 16 characters here, and a
-    # fixed column turns the longest ones into ragged rows.
-    id_width = max((len(v[1][0]) for v in verdicts), default=8)
-    user_width = max((len(v[2]["user"]) for v in verdicts), default=8)
+    # Columns rather than inline "NAME value" pairs: this was the one table in the
+    # tool that named its metric on every row and aligned nothing, so a jobid, a
+    # username and a reading ran together. The identity block also has to say which
+    # unit was judged -- at node level every row read as the same job id before.
+    multi_job = len({r.get("JOBID", "?") for r in rows}) > 1
+    headers = unit_headers(level, multi_job) + ("USER",) + tuple(metrics) + ("POWER_W",)
+
+    def cells_for(key, found, means, power) -> Tuple[str, ...]:
+        return (unit_values(level, multi_job, key, found) + (found["user"],)
+                + tuple("%.1f" % means[m] if m in means else "-" for m in metrics)
+                + ("-" if power is None else "%.0f" % power,))
+
+    table = {id(v): cells_for(v[1], v[2], v[3], v[4]) for v in verdicts}
+    # Measured across every category, so the columns line up between them and two
+    # jobs in different bands stay comparable at a glance.
+    widths = [max(len(headers[i]), max((len(c[i]) for c in table.values()), default=0))
+              for i in range(len(headers))]
+    text_cols = len(unit_headers(level, multi_job)) + 1        # identity, then numbers
+
+    def row_text(cells) -> str:
+        return "  ".join(c.ljust(widths[i]) if i < text_cols else c.rjust(widths[i])
+                         for i, c in enumerate(cells)).rstrip()
+
     by_name: Dict[str, list] = {}
     for verdict in verdicts:
         by_name.setdefault(verdict[0], []).append(verdict)
@@ -1717,12 +1752,10 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
             # Most of a healthy partition, and none of what the report is for.
             print("    (--all-categories to list them)", file=out)
             continue
-        for _n, key, group, means, power in sorted(found, key=lambda v: v[1]):
-            cells = " ".join("%s %.1f" % (m, means[m]) for m in metrics if m in means)
-            print("    %-*s %-*s %d GPU  %s  POWER_W %s"
-                  % (id_width, key[0], user_width, group["user"],
-                     len(group["gpus"]), cells,
-                     "-" if power is None else "%.0f" % power), file=out)
+        if options.header:
+            print("    " + row_text(headers), file=out)
+        for verdict in sorted(found, key=lambda v: v[1]):
+            print("    " + row_text(table[id(verdict)]), file=out)
         print(file=out)
     out.flush()
 
@@ -1770,17 +1803,8 @@ def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptio
     groups = pool_samples(rows, metrics, level)
 
     multi_job = len({r.get("JOBID", "?") for r in rows}) > 1
-    lead = _stat_lead(level, multi_job)
+    lead = unit_headers(level, multi_job)
     headers = lead + TS_STAT_TAIL
-
-    def labels(key, found) -> Tuple[str, ...]:
-        jobid = key[0]
-        if level == "job":
-            return (jobid, str(len(found["nodes"])), str(len(found["gpus"])))
-        job = (jobid,) if multi_job else ()
-        if level == "node":
-            return job + (key[1], str(len(found["gpus"])))
-        return job + ("%s:%s" % (key[1], key[2]),)
 
     def order(item):
         key, _found = item
@@ -1794,7 +1818,7 @@ def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptio
             if not values:
                 continue
             mean = sum(values) / len(values)
-            table.append((labels(key, found), metric, len(values),
+            table.append((unit_values(level, multi_job, key, found), metric, len(values),
                           min(values), mean, max(values), values[-1]))
     if not table:
         print("No samples to summarize.", file=sys.stderr)

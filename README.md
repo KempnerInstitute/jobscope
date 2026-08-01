@@ -830,8 +830,9 @@ $ jobscope -p kempner_h100 -a --ts 10m --classify
   (POWER_W below 100 W forces wasteful)
 
   wasteful (<2%)  15 jobs
-    36229482    bob    2 GPU  GPU% 0.0 SM_ACT% 0.0 ... POWER_W 70
-    36438938_1  carol  1 GPU  GPU% 0.0 SM_ACT% 0.0 ... POWER_W 118
+    JOBID       NODES  GPUS  USER   GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W
+    36229482    1      2     bob     0.0      0.0   0.0      0.0    0.0       70
+    36438938_1  1      1     carol   0.0      0.0   0.0      0.0    0.0      118
   inefficient (2-10%)  4 jobs
     ...
   good (>40%)  98 jobs
@@ -864,8 +865,11 @@ every architecture, which is the thing that does not work.
 output and none of the point; `--all-categories` lists it. `--stats-per-node`
 classifies hosts on the same rule.
 
-`--csv` gives one row per job -- id, user, every metric the series carried, and the
-label last:
+The rows are aligned columns under a header, and the identity block names whatever
+was judged -- `JOBID` per job, `NODE` under `--stats-per-node`, `NODE:GPU` per card.
+
+For storing or post-processing, `--csv` gives one row per job -- id, user, every metric
+the series carried, and the label last:
 
 ```console
 $ jobscope -p kempner_h100 -a --ts 10m --classify --csv

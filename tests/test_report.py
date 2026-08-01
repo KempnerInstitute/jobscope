@@ -2232,3 +2232,40 @@ def test_for_model_returns_itself_when_nothing_is_configured():
     t = _per_model_thresholds()
     assert t.for_model("") is t and t.for_model("NVIDIA A40") is t
     assert t.for_model(RTX) is not t and t.for_model(RTX).power_w == 330
+
+
+def test_the_classify_rows_are_aligned_columns_under_a_header():
+    """Not inline "NAME value" pairs: a jobid, a username and a reading ran together."""
+    jobs = {"1": {"GPU%": 0.4, "SM_ACT%": 0.0, "GMEM%": 9, "POWER_W": 73, "USER": "al"},
+            "2": {"GPU%": 0.1, "SM_ACT%": 0.0, "GMEM%": 9, "POWER_W": 70,
+                  "USER": "a-very-long-username"}}
+    lines = [ln for ln in _classify(jobs).splitlines() if ln.startswith("    ")]
+    header, *body = lines
+    assert header.split() == ["JOBID", "NODES", "GPUS", "USER", "GPU%", "SM_ACT%",
+                              "POWER_W"]
+    assert "GPU% 0.4" not in "".join(body)          # the metric name is not repeated
+    # Every row is the same shape, and the long username does not shift the columns.
+    assert len({len(ln.rstrip()) for ln in body}) <= 2
+    assert all(len(ln.split()) == 7 for ln in body)
+
+
+def test_classify_names_the_unit_it_judged():
+    """At node level every row used to print the job id, so the nodes were identical."""
+    rows = [{"JOBID": "1", "USER": "u", "NODE": n, "GPU": "0", "GPU%": "50"}
+            for n in ("nodeA", "nodeB") for _ in range(2)]
+    out = io.StringIO()
+    report.timeseries_classify(rows, ["GPU%"],
+                               RenderOptions(view="all", header=True,
+                                             thresholds=_thresholds()),
+                               out=out, level="node", show_all=True)
+    text = out.getvalue()
+    assert "NODE" in text and "nodeA" in text and "nodeB" in text
+
+
+def test_the_identity_columns_and_their_values_stay_in_step():
+    """They were two mirrored branch chains that had to agree positionally."""
+    found = {"nodes": {"n1", "n2"}, "gpus": {("n1", "0"), ("n2", "0")}, "user": "u"}
+    for level, key in (("job", ("1",)), ("node", ("1", "n1")), ("gpu", ("1", "n1", "0"))):
+        for multi in (False, True):
+            assert len(report.unit_headers(level, multi)) == \
+                len(report.unit_values(level, multi, key, found)), (level, multi)
