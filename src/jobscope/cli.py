@@ -324,14 +324,19 @@ def _inert_dests(args) -> set:
         # among them: the series carries a NODE column, so the filter applies.
         hide.update({"view", "diagnose", "diag_short", "per_gpu", "no_plot"})
         if args.plot_ts:
-            hide.update({"csv", "ts"})   # raises / mutually exclusive
+            # raises / exclusive / both noted as ignored below
+            hide.update({"csv", "ts", "stats", "classify"})
         else:
             hide.add("plot_ts")
+        if not args.classify:
+            hide.add("all_categories")            # raises without --classify
     else:
         hide.add("step")  # only emit_timeseries reads it
         hide.add("ts" if args.per_gpu else "nodename")
         if args.per_gpu:
             hide.add("plot_ts")
+        # All three summarize a series, so all three raise without one.
+        hide.update({"stats", "classify", "all_categories"})
     if args.view == "cpu":
         # show_dcgm goes false, so the spec list is never built and DIAG has no GPU
         # metric to advise on.
@@ -573,20 +578,28 @@ def _ts_window(args) -> Optional[int]:
             % (flag, flag, flag, value))
 
 
+def _emitted_series(text: str):
+    """``(columns, rows)`` from a series just emitted into a buffer, or ``None``.
+
+    None means there was nothing to read; ``emit_timeseries`` has already said why on
+    stderr, so every consumer below simply returns.
+    """
+    columns, rows = plot.parse_csv(io.StringIO(text))
+    return (columns, rows) if rows else None
+
+
 def _classify_timeseries(text: str, options, level: str, show_all: bool) -> None:
     """Sort the series --classify just emitted into categories."""
-    columns, rows = plot.parse_csv(io.StringIO(text))
-    if not rows:
-        return          # emit_timeseries has already said why on stderr
-    timeseries_classify(rows, columns, options, level=level, show_all=show_all)
+    found = _emitted_series(text)
+    if found:
+        timeseries_classify(found[1], found[0], options, level=level, show_all=show_all)
 
 
 def _stats_timeseries(text: str, options, level: str) -> None:
     """Summarize the series --stats just emitted, in place of writing its CSV."""
-    columns, rows = plot.parse_csv(io.StringIO(text))
-    if not rows:
-        return          # emit_timeseries has already said why on stderr
-    timeseries_stats(rows, plot.metric_cols(columns), options, level=level)
+    found = _emitted_series(text)
+    if found:
+        timeseries_stats(found[1], plot.metric_cols(found[0]), options, level=level)
 
 
 def _plot_timeseries(text: str, args) -> None:
@@ -596,10 +609,10 @@ def _plot_timeseries(text: str, args) -> None:
     knows how many nodes and jobs it covers, and because the fix for each is a flag on
     this side of the pipe.
     """
-    _columns, rows = plot.parse_csv(io.StringIO(text))
-    if not rows:
-        # emit_timeseries has already said why on stderr.
+    found = _emitted_series(text)
+    if not found:
         return
+    rows = found[1]
     jobids = sorted({r.get("JOBID") for r in rows if r.get("JOBID")})
     if len(jobids) > 1:
         # render_line keys its series on (NODE, GPU) alone, so two jobs that shared a
@@ -652,6 +665,9 @@ def handle_report(args) -> None:
     if args.stats and args.plot_ts:
         print("note: the chart already prints min/mean/max/last; ignoring --stats",
               file=sys.stderr)
+    if args.classify and args.plot_ts:
+        # The plot branch wins below, so say so rather than drop it silently.
+        print("note: --plot_ts draws the series; ignoring --classify", file=sys.stderr)
     if args.nodename and not (args.per_gpu or args.ts):
         # The per-job table's NODE column is a count of nodes, not a name, so there is
         # nothing there to match; say so rather than filtering nothing.

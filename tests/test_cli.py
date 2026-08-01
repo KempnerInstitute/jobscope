@@ -1132,3 +1132,21 @@ def test_all_categories_needs_classify(capsys):
     with pytest.raises(SystemExit):
         main(["-j", "1", "--ts", "--all-categories"])
     assert "applies to --classify" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv,hidden", [
+    (["running"], {"--stats", "--classify", "--all-categories"}),   # all three raise
+    # (a bare [] would reach the top-level parser, which does not narrow)
+    (["--ts"], {"--all-categories"}),                         # raises without --classify
+    (["--plot-ts"], {"--stats", "--classify"}),               # both silently ignored
+])
+def test_the_narrowed_help_hides_the_summarizers_that_would_not_run(argv, hidden, capsys):
+    """The feature's whole claim is that it hides what would not have worked."""
+    _, shown = _help_for(argv, capsys)
+    assert hidden <= set(shown), (hidden - set(shown), shown)
+
+
+def test_classify_with_plot_ts_says_it_is_ignored(monkeypatch, capsys):
+    _fake_ts(monkeypatch, _ts_rows(gpus=("0",)))
+    main(["-j", "1", "--plot_ts", "--classify"])
+    assert "ignoring --classify" in capsys.readouterr().err

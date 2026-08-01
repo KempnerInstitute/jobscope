@@ -15,13 +15,12 @@ from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from .blob import GIB, blob_capacity, blob_detail, blob_metrics
-from .config import DEFAULT_THRESHOLDS, Thresholds, floor_band
+from .config import DEFAULT_THRESHOLDS, Thresholds
 from .dcgm import (
     ALL_SPECS,
     DCGM_BLOB_HEADERS,
     DCGM_HEADERS,
     DEFAULT_SPECS,
-    DERIVED_COLUMNS,
     DESCRIPTIONS,
     MODEL_KEY,
     MetricSpec,
@@ -259,9 +258,7 @@ def cell_band(options: "RenderOptions", header: str, cell, model: str = "") -> s
     value = cell_value(cell)
     if value is None:
         return ""
-    if header == "POWER_W" and model:
-        return floor_band(value, options.thresholds.floor_for(model))
-    return options.thresholds.grade(header, value)
+    return options.thresholds.for_model(model).grade(header, value)
 
 
 BAR_WIDTH = 34
@@ -578,12 +575,9 @@ class EfficiencyTally:
     def add(self, jobid: str, user: str, value: Optional[float], weight: float,
             runtime: str = "-", duration: Optional[int] = None,
             model: str = "") -> None:
-        # The floor is resolved per call, not per tally: one selection spans hardware,
-        # and POWER_W's cutoff is a property of the card rather than of the column.
-        floor = self.cutoff(model)
-        band = ("" if value is None or floor is None
-                else floor_band(value, floor)) if self.absolute \
-            else self.thresholds.grade(self.header, value)
+        # The model is bound per call, not per tally: one selection spans hardware,
+        # and POWER_W's floor is a property of the card rather than of the column.
+        band = self.band_of(value, model)
         if not band or weight <= 0:
             # Ungraded (no measurement) or unweighable: counting it would either
             # invent a utilization or give it no resource to account for.
@@ -621,14 +615,8 @@ class EfficiencyTally:
         return (1 - value / 100.0) * weight
 
     def cutoff(self, model: str = "") -> Optional[float]:
-        """The red threshold for this column, from the site config.
-
-        For POWER_W that depends on ``model``: watts are hardware, and the same
-        reading means idle on one card and busy on another.
-        """
-        if self.absolute and model:
-            return self.thresholds.floor_for(model)
-        return self.thresholds.cutoff(self.header)
+        """The red threshold for this column, for ``model``'s hardware."""
+        return self.thresholds.for_model(model).cutoff(self.header)
 
     def graded(self) -> int:
         """Jobs this metric measured -- the denominator behind its Worst row.
@@ -639,9 +627,9 @@ class EfficiencyTally:
         """
         return sum(count for count, _weight in self.bands.values())
 
-    def band_of(self, value: Optional[float]) -> str:
+    def band_of(self, value: Optional[float], model: str = "") -> str:
         """This column's band for ``value``, or "" when it is not graded."""
-        return self.thresholds.grade(self.header, value)
+        return self.thresholds.for_model(model).grade(self.header, value)
 
     def idle(self) -> float:
         """Allocated resource-time that went unused."""
@@ -763,6 +751,9 @@ class SummaryRenderer:
         # until the selection's totals are known, so the candidates must be kept.
         # Bounded by the red jobs, not the selection -- on a healthy partition, few.
         self.waste: Dict[str, tuple] = {}
+        # jobid -> GPU model, so the printed POWER_W cell is graded against the
+        # same floor as the tally row beneath it.
+        self.models: Dict[str, str] = {}
         # One tally per graded column, so every metric on screen gets a summary and
         # the set follows the view for free: 8 by default, CPU%/MEM% under --cpu,
         # 6 under --gpu, the full catalog under --dcgm. Under time weighting the
@@ -792,13 +783,15 @@ class SummaryRenderer:
         cells = []
         for col in self.columns:
             text = col.fmt.format(str(row.get(col.header, "")))
-            band = self._band(col.header, row.get(col.header)) if color else ""
+            band = (self._band(col.header, row.get(col.header),
+                               self.models.get(row.get("JOBID", ""), ""))
+                    if color else "")
             cells.append(tint(text, band))
         return " ".join(cells)
 
-    def _band(self, header: str, cell) -> str:
+    def _band(self, header: str, cell, model: str = "") -> str:
         """The grade for a rendered cell; see :func:`cell_band`."""
-        return cell_band(self.options, header, cell)
+        return cell_band(self.options, header, cell, model)
 
     def _start(self) -> None:
         if self._started:
@@ -853,7 +846,7 @@ class SummaryRenderer:
 
     def _note_waste(self, jid: str, user: str, values: Dict[str, float],
                     weights: Dict[str, float], runtime: str = "-",
-                    duration: Optional[int] = None) -> None:
+                    duration: Optional[int] = None, model: str = "") -> None:
         """Record what a job wasted per metric, if it is red in any of them.
 
         Every metric's waste is kept, not just the ones the job is red in, because
@@ -866,8 +859,8 @@ class SummaryRenderer:
             value, weight = values.get(header), weights[tally.weight_key]
             if value is None or weight <= 0:
                 continue
-            wasted[header] = tally.waste_of(value, weight)
-            if tally.band_of(value) == "red":
+            wasted[header] = tally.waste_of(value, weight, model)
+            if tally.band_of(value, model) == "red":
                 red.add(header)
         if red:
             self.waste[jid] = (wasted, user, frozenset(red), dict(values),
@@ -989,12 +982,14 @@ class SummaryRenderer:
                     if value is not None:
                         values[header] = value
                 model = job_model(dcgm_data.get(jid, ({}, {}))[1])
+                self.models[jid] = model
                 for header, tally in self.tallies.items():
                     tally.add(jid, row["USER"], values.get(header),
                               weights[tally.weight_key], row["RUNTIME"],
                               record.duration if record else None, model=model)
                 self._note_waste(jid, row["USER"], values, weights,
-                                 row["RUNTIME"], record.duration if record else None)
+                                 row["RUNTIME"], record.duration if record else None,
+                                 model=model)
             if options.csv:
                 self.writer.writerow([row[h] for h in self.headers])
             else:
@@ -1295,8 +1290,7 @@ class SummaryRenderer:
                 # output would then differ from the plain output by more than the
                 # escapes.
                 cell = text if i == last else text.ljust(width)
-                tint = band if (band and self.options.color) else ""
-                cells.append(_SGR[tint] + cell + _RESET if tint else cell)
+                cells.append(tint(cell, band if self.options.color else ""))
             out.append("  ".join(cells))
         return out
 
@@ -1592,10 +1586,6 @@ def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
             yield job, gpu
 
 
-# What a --stats row aggregates over. "gpu" is one row per card, "node" pools a
-# job's cards on one host, "job" pools every card it held.
-STAT_LEVELS = ("gpu", "node", "job")
-
 # --classify bands, worst first: (name, label, colour).
 CATEGORIES = (
     ("wasteful", "<2%", "red"),
@@ -1604,7 +1594,6 @@ CATEGORIES = (
     ("average", "20-40%", "green"),
     ("good", ">40%", "green"),
 )
-WASTEFUL = CATEGORIES[0][0]
 
 
 def band_of(best: float) -> str:
@@ -1855,7 +1844,7 @@ def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]
     """
     out = out or sys.stdout
     columns = build_columns(specs)
-    derived = [d for d in DERIVED_COLUMNS if {s.key for s in specs}.issuperset(d.deps)]
+    derived = applicable_derived(specs)
     writer = csv.writer(out, lineterminator="\n")
     if options.header:
         writer.writerow(TS_ID_COLUMNS

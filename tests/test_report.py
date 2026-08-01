@@ -2205,3 +2205,30 @@ def test_the_power_tally_judges_each_job_on_its_own_hardware():
     assert tally.bands["red"][0] == 1 and tally.bands["green"][0] == 1
     assert tally.waste_of(165.0, 3600.0, "Tesla V100-PCIE-32GB") == 0.0
     assert tally.waste_of(165.0, 3600.0, RTX) == 3600.0
+
+
+def test_every_power_grading_path_uses_the_same_floor():
+    """The cell, the tally band and the waste ledger must agree on one reading.
+
+    They did not: the model was an optional argument on four methods and three call
+    sites omitted it, so 165 W on an RTX read red in the tally row and green in the
+    cell above it. Binding the model into the Thresholds is what makes omission
+    impossible; this pins that they cannot drift apart again.
+    """
+    t = _per_model_thresholds()
+    options = RenderOptions(view="all", color=True, thresholds=t)
+    tally = report.EfficiencyTally("POWER_W", t, "GPU-hours", "h", 3600.0,
+                                   absolute=True, value_unit="W")
+    for model, expected in ((RTX, "red"), ("Tesla V100-PCIE-32GB", "green"), ("", "green")):
+        assert report.cell_band(options, "POWER_W", 165, model) == expected, model
+        assert tally.band_of(165.0, model) == expected, model
+        wasted = tally.waste_of(165.0, 1.0, model)
+        assert (wasted == 1.0) is (expected == "red"), model
+        assert tally.cutoff(model) == t.floor_for(model), model
+
+
+def test_for_model_returns_itself_when_nothing_is_configured():
+    """The common path allocates nothing."""
+    t = _per_model_thresholds()
+    assert t.for_model("") is t and t.for_model("NVIDIA A40") is t
+    assert t.for_model(RTX) is not t and t.for_model(RTX).power_w == 330

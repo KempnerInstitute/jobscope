@@ -12,7 +12,7 @@ import importlib.util
 import os
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
@@ -72,6 +72,19 @@ class Thresholds:
         if model:
             return float(self.power_w_by_model.get(model, self.power_w))
         return self.power_w
+
+    def for_model(self, model: Optional[str]) -> "Thresholds":
+        """These thresholds with ``POWER_W``'s floor resolved for one card.
+
+        Binding the model once beats handing it to every grading call. The floor was
+        previously an optional argument on four separate methods, and the sites that
+        forgot it -- the printed cell, and the waste ledger behind the Worst rows --
+        graded the same reading against the global floor while the tally used the
+        card's. One 165 W sample came out red in the table and green in the cell.
+        Resolved here, a caller cannot forget what it never passes.
+        """
+        floor = self.floor_for(model)
+        return self if floor == self.power_w else replace(self, power_w=floor)
 
     def cutoff(self, header: str) -> Optional[float]:
         """``header``'s red cutoff, or None when the metric is not graded.
