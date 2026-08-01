@@ -1066,3 +1066,35 @@ def test_stats_composes_with_the_window(monkeypatch, capsys):
     main(["-j", "1", "--ts", "30m", "--stats"])
     assert captured["options"].window == 1800      # the window narrowed the query
     assert "MEAN" in capsys.readouterr().out       # and the summary still rendered
+
+
+@pytest.mark.parametrize("flag,level", [
+    ("--stats", "gpu"),
+    ("--stats-per-node", "node"), ("--stats_per_node", "node"),
+    ("--stats-per-job", "job"), ("--stats_per_job", "job"),
+])
+def test_the_stats_level_flags(flag, level):
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args([flag])
+    assert args.stats == level
+
+
+def test_the_stats_levels_are_mutually_exclusive():
+    _, subparsers = build_parser()
+    with pytest.raises(SystemExit):
+        subparsers.choices[RUNNING].parse_intermixed_args(["--stats", "--stats-per-job"])
+
+
+@pytest.mark.parametrize("flag,lead", [
+    ("--stats", "NODE:GPU"), ("--stats-per-node", "NODE"), ("--stats-per-job", "JOBID"),
+])
+def test_each_level_renders_through_the_ts_path(flag, lead, monkeypatch, capsys):
+    _fake_ts(monkeypatch, _ts_rows(nodes=("node01", "node02"), gpus=("0", "1")))
+    main(["-j", "1", "--ts", flag])
+    assert capsys.readouterr().out.splitlines()[0].split()[0] == lead
+
+
+def test_a_stats_level_still_needs_a_timeseries(capsys):
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--stats-per-node"])
+    assert "add --ts" in capsys.readouterr().err

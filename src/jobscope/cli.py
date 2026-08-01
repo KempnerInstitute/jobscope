@@ -159,9 +159,17 @@ def build_parser():
                        help="chart that time series instead of writing it: one panel per "
                             "metric, one column per GPU. Takes the same optional window. "
                             "Needs --nodename on a multi-node job")
-    shape.add_argument("--stats", action="store_true",
+    level = shape.add_mutually_exclusive_group()
+    level.add_argument("--stats", action="store_const", const="gpu", dest="stats",
                        help="--ts: summarize the series instead of writing it -- "
                             "min/mean/max/last per GPU per metric, over the window")
+    level.add_argument("--stats-per-node", "--stats_per_node", action="store_const",
+                       const="node", dest="stats",
+                       help="the same, pooled per node: one set of figures for the "
+                            "job's GPUs on each host")
+    level.add_argument("--stats-per-job", "--stats_per_job", action="store_const",
+                       const="job", dest="stats",
+                       help="the same, pooled across every node and GPU the job held")
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
                        help="--per-gpu / --ts: report only this node's GPUs")
@@ -557,12 +565,12 @@ def _ts_window(args) -> Optional[int]:
             % (flag, flag, flag, value))
 
 
-def _stats_timeseries(text: str, options) -> None:
+def _stats_timeseries(text: str, options, level: str) -> None:
     """Summarize the series --stats just emitted, in place of writing its CSV."""
     columns, rows = plot.parse_csv(io.StringIO(text))
     if not rows:
         return          # emit_timeseries has already said why on stderr
-    timeseries_stats(rows, plot.metric_cols(columns), options)
+    timeseries_stats(rows, plot.metric_cols(columns), options, level=level)
 
 
 def _plot_timeseries(text: str, args) -> None:
@@ -667,7 +675,7 @@ def handle_report(args) -> None:
         if args.plot_ts:
             _plot_timeseries(buffer.getvalue(), args)
         else:
-            _stats_timeseries(buffer.getvalue(), options)
+            _stats_timeseries(buffer.getvalue(), options, args.stats)
         return
 
     # The detail granularity renders the fixed DETAIL_COLUMNS, so it takes no spec

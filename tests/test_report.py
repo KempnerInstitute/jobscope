@@ -1894,10 +1894,11 @@ def test_the_timeseries_header_is_unchanged_by_the_filter(gpu_record):
 
 # --- --ts --stats: summarizing the window -----------------------------------
 
-def _ts_stats(rows, metrics=("GPU%", "POWER_W"), **kw):
+def _ts_stats(rows, metrics=("GPU%", "POWER_W"), level="gpu", **kw):
     out = io.StringIO()
     report.timeseries_stats(rows, list(metrics),
-                            RenderOptions(view="all", header=True, **kw), out=out)
+                            RenderOptions(view="all", header=True, **kw),
+                            out=out, level=level)
     return out.getvalue()
 
 
@@ -1945,7 +1946,7 @@ def test_the_summary_has_a_csv_form():
     rows = [_sample("n1", "0", **{"GPU%": 10}), _sample("n1", "0", **{"GPU%": 30})]
     text = _ts_stats(rows, metrics=["GPU%"], csv=True)
     columns, parsed = [ln.split(",") for ln in text.strip().splitlines()]
-    assert columns == list(report.TS_STAT_HEADERS)
+    assert columns == ["NODE:GPU"] + list(report.TS_STAT_TAIL)
     assert parsed == ["n1:0", "GPU%", "2", "10.0", "20.0", "30.0", "30.0"]
 
 
@@ -1954,3 +1955,60 @@ def test_the_mean_is_tinted_by_its_band():
     rows = [_sample("n1", "0", **{"GPU%": 2})]
     text = _ts_stats(rows, metrics=["GPU%"], color=True, thresholds=_thresholds())
     assert "\033[31m" in text          # 2% is red
+
+
+def _two_node_rows():
+    """Two nodes, two GPUs each, two samples -- so pooling has something to pool."""
+    return [_sample(node, gpu, **{"GPU%": value, "JOBID": "100"})
+            for node, gpu, value in (("n1", "0", 10), ("n1", "0", 20),
+                                     ("n1", "1", 30), ("n1", "1", 40),
+                                     ("n2", "0", 50), ("n2", "0", 60),
+                                     ("n2", "1", 70), ("n2", "1", 80))]
+
+
+def test_per_node_pools_a_jobs_gpus_on_one_host():
+    text = _ts_stats(_two_node_rows(), metrics=["GPU%"], level="node")
+    rows = {ln.split()[0]: ln.split() for ln in text.splitlines()[1:]}
+    # n1 pools 10,20,30,40 -> mean 25 over 4 samples from 2 GPUs.
+    assert rows["n1"][1:] == ["2", "GPU%", "4", "10.0", "25.0", "40.0", "40.0"]
+    assert rows["n2"][1:] == ["2", "GPU%", "4", "50.0", "65.0", "80.0", "80.0"]
+
+
+def test_per_job_pools_every_node_and_gpu():
+    text = _ts_stats(_two_node_rows(), metrics=["GPU%"], level="job")
+    row = text.splitlines()[1].split()
+    # JOBID NODES GPUS METRIC N MIN MEAN MAX LAST -- mean of 10..80 is 45.
+    assert row == ["100", "2", "4", "GPU%", "8", "10.0", "45.0", "80.0", "80.0"]
+
+
+def test_each_level_says_what_it_pooled():
+    """A node mean of one GPU and of sixteen must not look the same."""
+    rows = _two_node_rows()
+    assert _ts_stats(rows, metrics=["GPU%"]).splitlines()[0].split()[0] == "NODE:GPU"
+    assert _ts_stats(rows, metrics=["GPU%"], level="node").splitlines()[0].split()[:2] \
+        == ["NODE", "GPUS"]
+    assert _ts_stats(rows, metrics=["GPU%"], level="job").splitlines()[0].split()[:3] \
+        == ["JOBID", "NODES", "GPUS"]
+
+
+def test_pooling_weights_by_samples_not_by_gpu():
+    """A card the exporter missed for most of the window is not a full peer.
+
+    Averaging per-GPU means would give the sparse card equal say; pooling the samples
+    gives it the say its coverage earned.
+    """
+    rows = ([_sample("n1", "0", **{"GPU%": 0, "JOBID": "100"})] * 9
+            + [_sample("n1", "1", **{"GPU%": 100, "JOBID": "100"})])
+    row = _ts_stats(rows, metrics=["GPU%"], level="node").splitlines()[1].split()
+    # NODE GPUS METRIC N MIN MEAN MAX LAST
+    assert row[3] == "10"        # N: nine samples plus one
+    assert row[5] == "10.0"      # MEAN, not the 50.0 a mean-of-means would give
+
+
+def test_the_jobid_leads_only_when_several_jobs_are_present():
+    one = _ts_stats(_two_node_rows(), metrics=["GPU%"], level="node")
+    assert one.splitlines()[0].split()[0] == "NODE"
+    two = _ts_stats(_two_node_rows()
+                    + [_sample("n3", "0", **{"GPU%": 5, "JOBID": "101"})],
+                    metrics=["GPU%"], level="node")
+    assert two.splitlines()[0].split()[:2] == ["JOBID", "NODE"]

@@ -216,6 +216,8 @@ job that is running right now.
 | `--per-gpu` | one row per GPU, with node name and GPU number (see below). `--hwdetail` is the old name and still works |
 | `--ts [WINDOW]` | the per-scrape time series as CSV; `--ts 1h` is the last hour of the run |
 | `--stats` | with `--ts`: summarize that series instead -- min/mean/max/last per GPU per metric |
+| `--stats-per-node` | the same, pooled per node |
+| `--stats-per-job` | the same, pooled across every node and GPU |
 | `--plot_ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--dcgm` | the full DCGM metric catalog |
@@ -746,6 +748,25 @@ the numbers cannot disagree with the series they summarize. `N` is the sample co
 which is worth a glance: it says whether the window actually had data. `MEAN` is tinted
 by its band, as `IDLE` is in the summary table, and `--csv` emits the same rows for
 scripting.
+
+`--stats-per-node` pools the job's GPUs on each host, and `--stats-per-job` pools
+every card it held:
+
+```console
+$ jobscope -j 36441613 --ts 20m --stats-per-node
+  NODE            GPUS  METRIC    N    MIN   MEAN    MAX   LAST
+  holygpu8a10302  4     GPU%     84   17.0   93.1  100.0  100.0
+
+$ jobscope -j 36441613 --ts 20m --stats-per-job
+  JOBID     NODES  GPUS  METRIC     N    MIN   MEAN    MAX   LAST
+  36441613  4      16    GPU%     336    0.0   93.4  100.0  100.0
+```
+
+Each level names what it pooled -- a node mean over one GPU and over sixteen must not
+read the same. Pooling is over the *samples*, not over per-GPU means, so a card the
+exporter missed for half the window carries half the weight instead of counting as a
+full peer. `JOBID` leads the narrower levels only when the series covers more than one
+job.
 
 Note this is a plain mean of samples, not each metric's own reducer -- the tables peak
 memory where this averages it. That is the honest reading of "the average over this

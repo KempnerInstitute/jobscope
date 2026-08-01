@@ -1549,12 +1549,29 @@ def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
             yield job, gpu
 
 
-TS_STAT_HEADERS = ("NODE:GPU", "METRIC", "N", "MIN", "MEAN", "MAX", "LAST")
+# What a --stats row aggregates over. "gpu" is one row per card, "node" pools a
+# job's cards on one host, "job" pools every card it held.
+STAT_LEVELS = ("gpu", "node", "job")
+TS_STAT_TAIL = ("METRIC", "N", "MIN", "MEAN", "MAX", "LAST")
+
+
+def _stat_lead(level: str, multi_job: bool) -> Tuple[str, ...]:
+    """The identifying columns for a level, before METRIC.
+
+    Each level names what it pooled: a node row says how many GPUs went into it, a job
+    row how many nodes and GPUs. Without that the reader cannot tell a one-GPU mean
+    from a sixteen-GPU one. JOBID leads only when the series covers more than one job,
+    which for the usual single-job selection keeps the table narrow.
+    """
+    if level == "job":
+        return ("JOBID", "NODES", "GPUS")
+    job = ("JOBID",) if multi_job else ()
+    return job + (("NODE", "GPUS") if level == "node" else ("NODE:GPU",))
 
 
 def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptions",
-                     out=None) -> None:
-    """``min / mean / max / last`` per GPU per metric, over whatever the series covers.
+                     out=None, level: str = "gpu") -> None:
+    """``min / mean / max / last`` per metric, pooled at ``level``.
 
     Computed from the samples ``--ts`` already fetched rather than from fresh queries,
     so the numbers cannot disagree with the series they summarize -- and so a window
@@ -1563,53 +1580,84 @@ def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptio
     A plain mean of samples, which is not every metric's own reducer: the tables peak
     memory where this averages it. That is the honest reading of "the average over
     this window", and it is what ``jobscope plot`` prints under its charts.
+
+    Pooling the samples themselves rather than averaging per-GPU means is what makes
+    the node and job levels right when coverage is uneven: a card the exporter missed
+    for half the window then carries half the weight, instead of counting as a full
+    peer.
     """
     out = out or sys.stdout
-    by_gpu: Dict[Tuple[str, str], Dict[str, list]] = {}
+    groups: Dict[tuple, dict] = {}
     for row in rows:
-        key = (row.get("NODE", "?"), row.get("GPU", "?"))
-        seen = by_gpu.setdefault(key, {})
+        jobid, node = row.get("JOBID", "?"), row.get("NODE", "?")
+        gpu = row.get("GPU", "?")
+        key = {"gpu": (jobid, node, gpu), "node": (jobid, node)}.get(level, (jobid,))
+        found = groups.setdefault(key, {"values": {}, "nodes": set(), "gpus": set()})
+        found["nodes"].add(node)
+        found["gpus"].add((node, gpu))
         for metric in metrics:
             value = cell_value(row.get(metric))
             if value is not None:
-                seen.setdefault(metric, []).append(value)
+                found["values"].setdefault(metric, []).append(value)
+
+    multi_job = len({r.get("JOBID", "?") for r in rows}) > 1
+    lead = _stat_lead(level, multi_job)
+    headers = lead + TS_STAT_TAIL
+
+    def labels(key, found) -> Tuple[str, ...]:
+        jobid = key[0]
+        if level == "job":
+            return (jobid, str(len(found["nodes"])), str(len(found["gpus"])))
+        job = (jobid,) if multi_job else ()
+        if level == "node":
+            return job + (key[1], str(len(found["gpus"])))
+        return job + ("%s:%s" % (key[1], key[2]),)
+
+    def order(item):
+        key, _found = item
+        return (key[0], key[1] if len(key) > 1 else "",
+                gpu_minor_key(key[2]) if len(key) > 2 else 0)
 
     table = []
-    for (node, gpu), found in sorted(by_gpu.items(), key=lambda kv: (kv[0][0], gpu_minor_key(kv[0][1]))):
+    for key, found in sorted(groups.items(), key=order):
         for metric in metrics:
-            values = found.get(metric)
+            values = found["values"].get(metric)
             if not values:
                 continue
             mean = sum(values) / len(values)
-            table.append(("%s:%s" % (node, gpu), metric, len(values),
+            table.append((labels(key, found), metric, len(values),
                           min(values), mean, max(values), values[-1]))
     if not table:
         print("No samples to summarize.", file=sys.stderr)
         return
 
+    cells = [tuple(label) + (metric, str(n), "%.1f" % low, "%.1f" % mean,
+                             "%.1f" % high, "%.1f" % last)
+             for label, metric, n, low, mean, high, last in table]
     if options.csv:
         writer = csv.writer(out, lineterminator="\n")
         if options.header:
-            writer.writerow(TS_STAT_HEADERS)
-        for label, metric, n, low, mean, high, last in table:
-            writer.writerow([label, metric, n, "%.1f" % low, "%.1f" % mean,
-                             "%.1f" % high, "%.1f" % last])
+            writer.writerow(headers)
+        for row in cells:
+            writer.writerow(list(row))
         out.flush()
         return
 
-    cells = [(label, metric, str(n), "%.1f" % low, "%.1f" % mean, "%.1f" % high,
-              "%.1f" % last) for label, metric, n, low, mean, high, last in table]
-    widths = [max(len(TS_STAT_HEADERS[i]), max(len(r[i]) for r in cells))
-              for i in range(len(TS_STAT_HEADERS))]
+    # The label columns are text and left-aligned; the numbers right-align under
+    # their headers. METRIC is the boundary.
+    text_cols = len(lead) + 1
+    widths = [max(len(headers[i]), max(len(r[i]) for r in cells))
+              for i in range(len(headers))]
+    mean_at = len(lead) + 3
     if options.header:
-        print("  " + "  ".join(h.ljust(widths[i]) if i < 2 else h.rjust(widths[i])
-                               for i, h in enumerate(TS_STAT_HEADERS)), file=out)
-    for row, (_l, metric, _n, _lo, mean, _hi, _last) in zip(cells, table):
+        print("  " + "  ".join(h.ljust(widths[i]) if i < text_cols else h.rjust(widths[i])
+                               for i, h in enumerate(headers)), file=out)
+    for row, entry in zip(cells, table):
         # Tint the mean by its band, as the summary table tints IDLE: the column
         # anyone reads first should say whether the number is a problem.
-        painted = [cell.ljust(widths[i]) if i < 2 else cell.rjust(widths[i])
+        painted = [cell.ljust(widths[i]) if i < text_cols else cell.rjust(widths[i])
                    for i, cell in enumerate(row)]
-        painted[4] = tint(painted[4], cell_band(options, metric, mean))
+        painted[mean_at] = tint(painted[mean_at], cell_band(options, entry[1], entry[4]))
         print("  " + "  ".join(painted).rstrip(), file=out)
     out.flush()
 

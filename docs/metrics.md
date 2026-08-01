@@ -10,7 +10,8 @@ Companion documents: `jobscope describe` (column reference) and `jobscope descri
 place of writing it. Both time-series flags take an optional window (`--ts 1h`),
 which narrows the range queries to the end of the run rather than filtering rows,
 and `--ts --stats` reduces the series to min/mean/max/last per GPU per metric
-without querying anything further.
+without querying anything further -- `--stats-per-node` and `--stats-per-job`
+pool the same samples over a host's GPUs and over the whole job.
 
 ---
 
