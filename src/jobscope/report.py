@@ -206,6 +206,12 @@ def no_such_node(nodename: str, seen) -> JobscopeError:
                          % (nodename, ", ".join(sorted(seen)) or "(none)"))
 
 
+# The identity block every --ts row carries, before the metric columns. USER is here
+# so a partition-wide report can name whose job is idle; plot.ID_COLS already lists it,
+# so charts ignore it as an identity column.
+TS_ID_COLUMNS = ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU"]
+
+
 def cell_value(cell) -> Optional[float]:
     """The number in a rendered cell, or None when there is not one.
 
@@ -1467,7 +1473,7 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         """
         nonlocal wrote_header
         if options.header and not wrote_header:
-            writer.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"]
+            writer.writerow(TS_ID_COLUMNS
                             + [header for _key, header, _dec in columns])
             wrote_header = True
         writer.writerow(row)
@@ -1516,7 +1522,8 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
                 for column in derived:
                     cells[column.header] = column.fn(keyed)
                 rows.append((node, gpu_minor_key(minor), stamp,
-                             [jid, stamp, time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
+                             [jid, record.user, stamp,
+                              time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
                               node, minor]
                              + [format_number(cells.get(h), d, missing="")
                                 for _k, h, d in columns]))
@@ -1552,7 +1559,65 @@ def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
 # What a --stats row aggregates over. "gpu" is one row per card, "node" pools a
 # job's cards on one host, "job" pools every card it held.
 STAT_LEVELS = ("gpu", "node", "job")
+
+# --classify bands, worst first: (name, label, colour).
+CATEGORIES = (
+    ("wasteful", "<2%", "red"),
+    ("inefficient", "2-10%", "red"),
+    ("needs improvement", "10-20%", "yellow"),
+    ("average", "20-40%", "green"),
+    ("good", ">40%", "green"),
+)
+WASTEFUL = CATEGORIES[0][0]
+
+
+def band_of(best: float) -> str:
+    """The category a best-metric falls in.
+
+    Spelled out rather than derived from a table of edges, because the edges are the
+    whole specification and they are not uniform: "below 2" excludes 2, while every
+    band above it includes its top. So 1.9 is wasteful, 2.0 and 10.0 are inefficient,
+    and 10.1 needs improvement.
+    """
+    if best < 2.0:
+        return "wasteful"
+    if best <= 10.0:
+        return "inefficient"
+    if best <= 20.0:
+        return "needs improvement"
+    if best <= 40.0:
+        return "average"
+    return "good"
+
+# Occupancy of memory is not use of a GPU -- a job can reserve 80GB and compute
+# nothing -- so GMEM% is excluded from the verdict. It still prints.
+CLASSIFY_SKIP = ("GMEM%",)
+
+
+def classify_metrics(columns) -> List[str]:
+    """The ``%`` columns a verdict is taken over, in CSV order."""
+    return [c for c in columns if c.endswith("%") and c not in CLASSIFY_SKIP]
+
+
+def classify(values: Dict[str, float], power: Optional[float],
+             floor: Optional[float]) -> Tuple[str, bool]:
+    """``(category, demoted)`` for one unit's mean values.
+
+    The band of the unit's *best* metric. That is the same rule as "every metric is
+    below X", just read from the other end -- so this generalises the AND used by the
+    ``Worst all`` row rather than introducing a second notion of idle.
+
+    ``POWER_W`` below the floor forces ``wasteful`` and can only ever demote. Drawing
+    power is not evidence of doing work: on one partition a job sat at 0% on every
+    metric while pulling 118 W, a card held warm and busy with nothing. Letting watts
+    argue upward would have cleared it.
+    """
+    name = band_of(max(values.values()) if values else 0.0)
+    if floor and power is not None and power < floor and name != WASTEFUL:
+        return WASTEFUL, True
+    return name, False
 TS_STAT_TAIL = ("METRIC", "N", "MIN", "MEAN", "MAX", "LAST")
+
 
 
 def _stat_lead(level: str, multi_job: bool) -> Tuple[str, ...]:
@@ -1567,6 +1632,104 @@ def _stat_lead(level: str, multi_job: bool) -> Tuple[str, ...]:
         return ("JOBID", "NODES", "GPUS")
     job = ("JOBID",) if multi_job else ()
     return job + (("NODE", "GPUS") if level == "node" else ("NODE:GPU",))
+
+
+def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOptions",
+                        out=None, level: str = "job", show_all: bool = False) -> None:
+    """Group the units into efficiency categories, worst first.
+
+    The verdict for each is :func:`classify`; what this adds is the reading order. A
+    partition sweep exists to be acted on from the top, and on a healthy one most jobs
+    are fine -- so ``good`` collapses to a count unless ``show_all``, which is the
+    difference between a page and a hundred of them.
+    """
+    out = out or sys.stdout
+    metrics = classify_metrics(columns)
+    if not metrics:
+        raise JobscopeError("no %-metrics in this series to classify")
+    power_floor = options.thresholds.power_w if options.thresholds else None
+    unit = {"gpu": "GPUs", "node": "nodes"}.get(level, "jobs")
+
+    groups = pool_samples(rows, metrics + ["POWER_W"], level)
+    verdicts = []
+    for key, found in groups.items():
+        means = {m: sum(v) / len(v) for m, v in found["values"].items() if m in metrics}
+        power = found["values"].get("POWER_W")
+        power = sum(power) / len(power) if power else None
+        name, demoted = classify(means, power, power_floor)
+        verdicts.append((name, key, found, means, power, demoted))
+
+    if options.csv:
+        writer = csv.writer(out, lineterminator="\n")
+        if options.header:
+            writer.writerow(["CATEGORY", "JOBID", "USER", "NODES", "GPUS", "POWER_W",
+                             "UNDER_FLOOR"] + metrics)
+        order = {name: i for i, (name, _l, _c) in enumerate(CATEGORIES)}
+        for name, key, found, means, power, demoted in sorted(
+                verdicts, key=lambda v: (order[v[0]], v[1])):
+            writer.writerow([name, key[0], found["user"], len(found["nodes"]),
+                             len(found["gpus"]),
+                             "" if power is None else "%.0f" % power,
+                             "yes" if demoted else ""]
+                            + ["%.1f" % means[m] if m in means else "" for m in metrics])
+        out.flush()
+        return
+
+    if options.header:
+        print("  %d %s, by best of %s" % (len(verdicts), unit, ", ".join(metrics)),
+              file=out)
+        if power_floor:
+            print("  (POWER_W below %g W forces %s)" % (power_floor, WASTEFUL), file=out)
+        print(file=out)
+
+    # Widths from the content: usernames run from 5 to 16 characters here, and a
+    # fixed column turns the longest ones into ragged rows.
+    id_width = max((len(v[1][0]) for v in verdicts), default=8)
+    user_width = max((len(v[2]["user"]) for v in verdicts), default=8)
+    by_name: Dict[str, list] = {}
+    for verdict in verdicts:
+        by_name.setdefault(verdict[0], []).append(verdict)
+    for name, label, colour in CATEGORIES:
+        found = by_name.get(name, [])
+        if not found:
+            continue
+        heading = "%s (%s)  %d %s" % (name, label, len(found), unit)
+        print("  " + (tint(heading, colour) if options.color else heading), file=out)
+        if name == "good" and not show_all:
+            # Most of a healthy partition, and none of what the report is for.
+            print("    (--all-categories to list them)", file=out)
+            continue
+        for _n, key, group, means, power, demoted in sorted(found, key=lambda v: v[1]):
+            cells = " ".join("%s %.1f" % (m, means[m]) for m in metrics if m in means)
+            print("    %-*s %-*s %d GPU  %s  POWER_W %s%s"
+                  % (id_width, key[0], user_width, group["user"],
+                     len(group["gpus"]), cells,
+                     "-" if power is None else "%.0f" % power,
+                     " !" if demoted else ""), file=out)
+        print(file=out)
+    out.flush()
+
+
+def pool_samples(rows: List[dict], metrics: List[str], level: str) -> Dict[tuple, dict]:
+    """``{key: {values, nodes, gpus, user}}``, pooling the series at ``level``.
+
+    Shared by the stats table and the classification so the two cannot disagree about
+    what a job's mean is: one grouping, read two ways.
+    """
+    groups: Dict[tuple, dict] = {}
+    for row in rows:
+        jobid, node = row.get("JOBID", "?"), row.get("NODE", "?")
+        gpu = row.get("GPU", "?")
+        key = {"gpu": (jobid, node, gpu), "node": (jobid, node)}.get(level, (jobid,))
+        found = groups.setdefault(key, {"values": {}, "nodes": set(), "gpus": set(),
+                                        "user": row.get("USER", "?")})
+        found["nodes"].add(node)
+        found["gpus"].add((node, gpu))
+        for metric in metrics:
+            value = cell_value(row.get(metric))
+            if value is not None:
+                found["values"].setdefault(metric, []).append(value)
+    return groups
 
 
 def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptions",
@@ -1587,18 +1750,7 @@ def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptio
     peer.
     """
     out = out or sys.stdout
-    groups: Dict[tuple, dict] = {}
-    for row in rows:
-        jobid, node = row.get("JOBID", "?"), row.get("NODE", "?")
-        gpu = row.get("GPU", "?")
-        key = {"gpu": (jobid, node, gpu), "node": (jobid, node)}.get(level, (jobid,))
-        found = groups.setdefault(key, {"values": {}, "nodes": set(), "gpus": set()})
-        found["nodes"].add(node)
-        found["gpus"].add((node, gpu))
-        for metric in metrics:
-            value = cell_value(row.get(metric))
-            if value is not None:
-                found["values"].setdefault(metric, []).append(value)
+    groups = pool_samples(rows, metrics, level)
 
     multi_job = len({r.get("JOBID", "?") for r in rows}) > 1
     lead = _stat_lead(level, multi_job)
@@ -1678,7 +1830,7 @@ def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]
     derived = [d for d in DERIVED_COLUMNS if {s.key for s in specs}.issuperset(d.deps)]
     writer = csv.writer(out, lineterminator="\n")
     if options.header:
-        writer.writerow(["JOBID", "EPOCH", "TIME", "NODE", "GPU"]
+        writer.writerow(TS_ID_COLUMNS
                         + [header for _k, header, _d in columns])
 
     for job, gpu in _live_rows(jobs, gpus):
@@ -1690,7 +1842,7 @@ def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]
             for column in derived:
                 values[column.key] = column.fn(values)
             writer.writerow(
-                [job["jobid"], epoch,
+                [job["jobid"], job.get("user", "?"), epoch,
                  time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(epoch)),
                  gpu.host, gpu.csv_id]
                 + [format_number(values.get(key), dec, missing="")

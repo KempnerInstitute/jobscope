@@ -351,7 +351,7 @@ def test_finished_timeseries(monkeypatch, capsys, gpu_record):
     monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: Client())
     main(["--ts", "100"])
     out = capsys.readouterr().out
-    assert out.startswith("JOBID,EPOCH,TIME,NODE,GPU,") and "80.0" in out
+    assert out.startswith("JOBID,USER,EPOCH,TIME,NODE,GPU,") and "80.0" in out
 
 
 # --- the running branch -----------------------------------------------------
@@ -440,7 +440,7 @@ def test_running_timeseries(monkeypatch, capsys):
     _patch_squeue(monkeypatch)
     main(["running", "--ts", "-j", "100_6"])
     out = capsys.readouterr().out
-    assert out.startswith("JOBID,EPOCH,TIME,NODE,GPU,")
+    assert out.startswith("JOBID,USER,EPOCH,TIME,NODE,GPU,")
 
 
 def test_running_no_matching_jobs(monkeypatch, capsys):
@@ -864,12 +864,13 @@ def test_narrowing_leaves_a_formattable_usage_line(capsys):
 
 # --- --plot_ts: the time-series chart in one command -------------------------
 
-_TS_HEAD = "JOBID,EPOCH,TIME,NODE,GPU,GPU%,GMEM%\n"
+_TS_HEAD = "JOBID,USER,EPOCH,TIME,NODE,GPU,GPU%,GMEM%\n"
 
 
 def _ts_rows(jobids=("100",), nodes=("node01",), gpus=("0", "1", "2", "3")):
     return "".join(
-        "%s,%d,2020-01-01T00:%02d:00,%s,%s,%d,%d\n" % (j, 1000 + 60 * t, t, n, g, 90 + t, 50 + t)
+        "%s,alice,%d,2020-01-01T00:%02d:00,%s,%s,%d,%d\n"
+        % (j, 1000 + 60 * t, t, n, g, 90 + t, 50 + t)
         for j in jobids for n in nodes for g in gpus for t in range(3))
 
 
@@ -1098,3 +1099,36 @@ def test_a_stats_level_still_needs_a_timeseries(capsys):
     with pytest.raises(SystemExit):
         main(["-j", "1", "--stats-per-node"])
     assert "add --ts" in capsys.readouterr().err
+
+
+def test_classify_groups_the_jobs(monkeypatch, capsys):
+    _fake_ts(monkeypatch, _ts_rows(jobids=("100", "101"), nodes=("node01",), gpus=("0",)))
+    main(["-p", "kempner", "-a", "--ts", "10m", "--classify"])
+    out = capsys.readouterr().out
+    assert "by best of" in out and "jobs" in out
+    assert "JOBID,USER,EPOCH" not in out      # the CSV became the report
+
+
+def test_classify_defaults_to_the_job_as_the_unit(monkeypatch, capsys):
+    """"Which jobs are idle" is asked about jobs, so that is the level."""
+    _fake_ts(monkeypatch, _ts_rows(nodes=("node01", "node02"), gpus=("0", "1")))
+    main(["-j", "1", "--ts", "--classify"])
+    assert "1 jobs" in capsys.readouterr().out       # not 2 nodes or 4 GPUs
+
+
+def test_classify_can_group_nodes_instead(monkeypatch, capsys):
+    _fake_ts(monkeypatch, _ts_rows(nodes=("node01", "node02"), gpus=("0", "1")))
+    main(["-j", "1", "--ts", "--classify", "--stats-per-node"])
+    assert "2 nodes" in capsys.readouterr().out
+
+
+def test_classify_needs_a_timeseries(capsys):
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--classify"])
+    assert "add --ts" in capsys.readouterr().err
+
+
+def test_all_categories_needs_classify(capsys):
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--ts", "--all-categories"])
+    assert "applies to --classify" in capsys.readouterr().err

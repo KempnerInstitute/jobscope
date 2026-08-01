@@ -218,6 +218,7 @@ job that is running right now.
 | `--stats` | with `--ts`: summarize that series instead -- min/mean/max/last per GPU per metric |
 | `--stats-per-node` | the same, pooled per node |
 | `--stats-per-job` | the same, pooled across every node and GPU |
+| `--classify` | with `--ts`: sort the jobs into efficiency categories, worst first |
 | `--plot_ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--dcgm` | the full DCGM metric catalog |
@@ -772,6 +773,54 @@ Note this is a plain mean of samples, not each metric's own reducer -- the table
 memory where this averages it. That is the honest reading of "the average over this
 window". `--plot_ts` already prints the same figures under its charts, so `--stats`
 adds nothing there and says so.
+
+#### Triaging a partition: `--classify`
+
+`--stats-per-job` over a partition is 145 jobs x 8 metrics and no verdict.
+`--classify` sorts them instead:
+
+```console
+$ jobscope -p kempner_h100 -a --ts 10m --classify
+  142 jobs, by best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM%
+  (POWER_W below 100 W forces wasteful)
+
+  wasteful (<2%)  15 jobs
+    36229482    zkong          2 GPU  GPU% 0.0 SM_ACT% 0.0 ... POWER_W 70
+    36438938_1  rsimmonsedler  1 GPU  GPU% 0.0 SM_ACT% 0.0 ... POWER_W 118
+  inefficient (2-10%)  4 jobs
+    ...
+  good (>40%)  98 jobs
+    (--all-categories to list them)
+```
+
+| category | best metric |
+|---|---|
+| wasteful | `< 2%` |
+| inefficient | `2-10%` |
+| needs improvement | `10-20%` |
+| average | `20-40%` |
+| good | `> 40%` |
+
+The edges are not uniform, so they are worth stating: "below 2%" *excludes* 2, while
+every band above it *includes* its top. 10.0 is inefficient; 10.1 needs improvement.
+
+**A job is judged on its best metric**, which is the same rule as "every metric is
+below X" read from the other end -- the AND the `Worst all` row uses, generalised to
+five bands rather than a second notion of idle. `GMEM%` sits out: reserving 80GB and
+computing nothing is still computing nothing. The header names the metrics actually
+used, since `--dcgm` widens the set.
+
+**`POWER_W` demotes but never promotes.** Below the `[thresholds] power_w` floor forces
+`wasteful` whatever the percentages say; above it, power changes nothing, and a `!`
+marks any job the floor pushed down. The direction is the point: on one partition a job
+sat at **0% on every metric while drawing 118 W** -- a card held warm and busy with
+nothing. Watts are evidence of a GPU being awake, not of it working, so they are not
+allowed to argue a job upward.
+
+`good` collapses to a count by default, since on a healthy partition it is most of the
+output and none of the point; `--all-categories` lists it. `--stats-per-node`
+classifies hosts on the same rule, and `--csv` emits a row per job with a `CATEGORY`
+column.
 
 **A window needs its unit** -- `1h`, `90m`, `30s`, `2d`, the same vocabulary
 `--min-elapsed` uses. That is what keeps `jobscope --ts 36441613` working: a job ID

@@ -244,7 +244,7 @@ def test_dcgm_timeseries_csv(gpu_record):
     text = _render(dcgm_timeseries, ["100"], {"100": gpu_record}, DEFAULT_SPECS,
                    _TimeseriesClient(), None, options)
     columns, rows = plot.parse_csv(io.StringIO(text))
-    assert columns[:5] == ["JOBID", "EPOCH", "TIME", "NODE", "GPU"]
+    assert columns[:6] == ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU"]
     assert [r["SM_ACT%"] for r in rows] == ["80.0", "60.0"]
     assert rows[0]["EPOCH"] == "1000"
 
@@ -2012,3 +2012,119 @@ def test_the_jobid_leads_only_when_several_jobs_are_present():
                     + [_sample("n3", "0", **{"GPU%": 5, "JOBID": "101"})],
                     metrics=["GPU%"], level="node")
     assert two.splitlines()[0].split()[:2] == ["JOBID", "NODE"]
+
+
+# --- --classify: efficiency categories --------------------------------------
+
+@pytest.mark.parametrize("best,category", [
+    (0.0, "wasteful"), (1.9, "wasteful"),
+    (2.0, "inefficient"), (10.0, "inefficient"),
+    (10.1, "needs improvement"), (20.0, "needs improvement"),
+    (20.1, "average"), (40.0, "average"),
+    (40.1, "good"), (100.0, "good"),
+])
+def test_the_category_edges(best, category):
+    """The edges are the specification, so they are pinned rather than inferred.
+
+    Not uniform: "below 2%" excludes 2, where every band above it includes its top.
+    """
+    assert report.band_of(best) == category
+
+
+def test_the_category_is_the_best_metric_not_the_worst():
+    """A job doing real work on one measure is not idle because others are low.
+
+    The same rule as "every metric is below X", read from the other end.
+    """
+    busy = {"GPU%": 0.0, "SM_ACT%": 0.0, "TENSOR%": 0.0, "DRAM%": 45.0}
+    assert report.classify(busy, None, 100) == ("good", False)
+    assert report.classify({m: 0.0 for m in busy}, None, 100) == ("wasteful", False)
+
+
+def test_gmem_takes_no_part_in_the_verdict():
+    """Reserving 80GB and computing nothing is still computing nothing."""
+    assert "GMEM%" not in report.classify_metrics(
+        ["JOBID", "GPU%", "GMEM%", "SM_ACT%", "POWER_W", "GMEM_GB"])
+    assert report.classify_metrics(["GPU%", "GMEM%", "SM_ACT%"]) == ["GPU%", "SM_ACT%"]
+
+
+def test_power_below_the_floor_demotes_to_wasteful():
+    """Whatever the percentages said."""
+    busy = {"GPU%": 45.0, "SM_ACT%": 40.0}
+    assert report.classify(busy, 300, 100) == ("good", False)
+    assert report.classify(busy, 73, 100) == ("wasteful", True)
+
+
+def test_power_above_the_floor_never_promotes():
+    """A real job: 0% on every metric while drawing 118 W -- a card held warm.
+
+    Drawing power is not evidence of work, so watts may argue a job down but never up.
+    """
+    idle = {"GPU%": 0.0, "SM_ACT%": 0.0, "TENSOR%": 0.0}
+    assert report.classify(idle, 118, 100) == ("wasteful", False)
+    assert report.classify(idle, 500, 100) == ("wasteful", False)
+
+
+def test_the_floor_comes_from_config():
+    busy = {"GPU%": 45.0}
+    assert report.classify(busy, 150, 100)[0] == "good"      # above a 100 W floor
+    assert report.classify(busy, 150, 200)[0] == "wasteful"  # below a 200 W one
+
+
+def _classify_rows(jobs):
+    """`jobs` is {jobid: {user, metrics...}} -> two samples each."""
+    rows = []
+    for jobid, spec in jobs.items():
+        for _ in range(2):
+            row = {"JOBID": jobid, "USER": spec.get("USER", "u"), "NODE": "n1", "GPU": "0"}
+            row.update({k: str(v) for k, v in spec.items() if k != "USER"})
+            rows.append(row)
+    return rows
+
+
+def _classify(jobs, columns=("GPU%", "SM_ACT%", "GMEM%", "POWER_W"), **kw):
+    out = io.StringIO()
+    show_all = kw.pop("show_all", False)
+    report.timeseries_classify(
+        _classify_rows(jobs), list(columns),
+        RenderOptions(view="all", header=True, thresholds=_thresholds(), **kw),
+        out=out, level="job", show_all=show_all)
+    return out.getvalue()
+
+
+def test_the_report_names_the_metrics_it_judged_on():
+    """--dcgm widens the set, so 'best of' means something different per run."""
+    text = _classify({"1": {"GPU%": 50, "SM_ACT%": 40, "GMEM%": 90, "POWER_W": 300}})
+    assert "by best of GPU%, SM_ACT%" in text and "GMEM%" not in text.splitlines()[0]
+    assert "below 100 W forces wasteful" in text
+
+
+def test_good_collapses_unless_asked_for():
+    """On a healthy partition it is most of the output and none of the point."""
+    jobs = {"1": {"GPU%": 90, "SM_ACT%": 80, "GMEM%": 50, "POWER_W": 400}}
+    assert "--all-categories" in _classify(jobs)
+    assert "1 " in _classify(jobs, show_all=True).split("good")[1]
+
+
+def test_the_categories_are_listed_worst_first():
+    jobs = {"1": {"GPU%": 90, "SM_ACT%": 90, "GMEM%": 1, "POWER_W": 400},
+            "2": {"GPU%": 0.5, "SM_ACT%": 0.1, "GMEM%": 1, "POWER_W": 300},
+            "3": {"GPU%": 15, "SM_ACT%": 12, "GMEM%": 1, "POWER_W": 300}}
+    text = _classify(jobs)
+    order = [ln.strip().split(" (")[0] for ln in text.splitlines()
+             if ln.startswith("  ") and not ln.startswith("    ") and ln.endswith("jobs")]
+    assert order == ["wasteful", "needs improvement", "good"]
+
+
+def test_the_csv_form_carries_the_category():
+    jobs = {"1": {"GPU%": 0.4, "SM_ACT%": 0.0, "GMEM%": 90, "POWER_W": 73, "USER": "alice"}}
+    text = _classify(jobs, csv=True)
+    header, row = [ln.split(",") for ln in text.strip().splitlines()]
+    assert header[:7] == ["CATEGORY", "JOBID", "USER", "NODES", "GPUS", "POWER_W",
+                          "UNDER_FLOOR"]
+    assert row[0] == "wasteful" and row[2] == "alice" and row[6] == ""
+
+
+def test_a_series_with_no_percentages_cannot_be_classified():
+    with pytest.raises(JobscopeError, match="no %-metrics"):
+        _classify({"1": {"POWER_W": 300}}, columns=("POWER_W",))

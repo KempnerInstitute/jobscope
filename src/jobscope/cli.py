@@ -33,6 +33,7 @@ from .report import (
     SummaryRenderer,
     describe,
     describe_dcgm,
+    timeseries_classify,
     timeseries_stats,
 )
 from .sacct import DEFAULT_STATE, default_user
@@ -170,6 +171,13 @@ def build_parser():
     level.add_argument("--stats-per-job", "--stats_per_job", action="store_const",
                        const="job", dest="stats",
                        help="the same, pooled across every node and GPU the job held")
+    shape.add_argument("--classify", action="store_true",
+                       help="--ts: group the jobs into efficiency categories -- wasteful "
+                            "<2%%, inefficient 2-10%%, needs improvement 10-20%%, average "
+                            "20-40%%, good >40%%, by each one's best metric")
+    shape.add_argument("--all-categories", "--all_categories", dest="all_categories",
+                       action="store_true",
+                       help="--classify: list the 'good' jobs too, instead of counting them")
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
                        help="--per-gpu / --ts: report only this node's GPUs")
@@ -565,6 +573,14 @@ def _ts_window(args) -> Optional[int]:
             % (flag, flag, flag, value))
 
 
+def _classify_timeseries(text: str, options, level: str, show_all: bool) -> None:
+    """Sort the series --classify just emitted into categories."""
+    columns, rows = plot.parse_csv(io.StringIO(text))
+    if not rows:
+        return          # emit_timeseries has already said why on stderr
+    timeseries_classify(rows, columns, options, level=level, show_all=show_all)
+
+
 def _stats_timeseries(text: str, options, level: str) -> None:
     """Summarize the series --stats just emitted, in place of writing its CSV."""
     columns, rows = plot.parse_csv(io.StringIO(text))
@@ -625,6 +641,11 @@ def handle_report(args) -> None:
     if args.plot_avgeff:
         print("note: --plot_avgeff is the default now; use --no-plot to omit the "
               "efficiency bars", file=sys.stderr)
+    if args.classify and not args.ts:
+        raise JobscopeError("--classify sorts a time series into categories; add --ts "
+                            "(optionally with a window, e.g. --ts 10m)")
+    if args.all_categories and not args.classify:
+        raise JobscopeError("--all-categories applies to --classify")
     if args.stats and not args.ts:
         raise JobscopeError("--stats summarizes a time series; add --ts (optionally with "
                             "a window, e.g. --ts 1h)")
@@ -666,7 +687,7 @@ def handle_report(args) -> None:
             if on:
                 print("note: %s does not apply to --ts (a per-GPU metric series)" % flag,
                       file=sys.stderr)
-        if not (args.plot_ts or args.stats):
+        if not (args.plot_ts or args.stats or args.classify):
             emit_timeseries(request, cfg, timeout, workers, specs, args.step, options)
             return
         buffer = io.StringIO()
@@ -674,6 +695,11 @@ def handle_report(args) -> None:
                         out=buffer)
         if args.plot_ts:
             _plot_timeseries(buffer.getvalue(), args)
+        elif args.classify:
+            # The unit of "which jobs are idle" is the job, so that is the default
+            # level; --stats-per-node classifies hosts on the same rule.
+            _classify_timeseries(buffer.getvalue(), options, args.stats or "job",
+                                 args.all_categories)
         else:
             _stats_timeseries(buffer.getvalue(), options, args.stats)
         return

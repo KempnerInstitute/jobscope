@@ -439,8 +439,8 @@ def test_live_timeseries_uses_the_schema_plot_reads():
     out = io.StringIO()
     live_timeseries(jobs, samples, gpus, DEFAULT_LIVE_SPECS, RenderOptions(), out=out)
     lines = out.getvalue().splitlines()
-    assert lines[0].startswith("JOBID,EPOCH,TIME,NODE,GPU,")
-    assert lines[1].startswith("100_6,1000,")
+    assert lines[0].startswith("JOBID,USER,EPOCH,TIME,NODE,GPU,")
+    assert lines[1].startswith("100_6,alice,1000,")   # USER names whose job it is
     # MEM% is recomputed per timestamp, so it tracks memory growth: 10/80 = 12.5.
     assert lines[1].endswith("12.5")
 
@@ -452,7 +452,7 @@ def test_live_timeseries_keeps_mig_slices_distinct():
     samples = {"MIG-a": {1000: {"mem": 1.0}}, "MIG-b": {1000: {"mem": 2.0}}}
     out = io.StringIO()
     live_timeseries(jobs, samples, gpus, DEFAULT_LIVE_SPECS, RenderOptions(), out=out)
-    gpu_column = [row.split(",")[4] for row in out.getvalue().splitlines()[1:]]
+    gpu_column = [row.split(",")[5] for row in out.getvalue().splitlines()[1:]]
     # Both share minor 0; without the .instance suffix plot would merge them.
     assert gpu_column == ["0.0", "0.1"]
 
