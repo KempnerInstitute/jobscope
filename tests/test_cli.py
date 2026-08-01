@@ -1032,3 +1032,37 @@ def test_the_chart_says_which_window_it_is_showing(monkeypatch, capsys):
     _fake_ts(monkeypatch, _ts_rows())
     main(["-j", "1", "--plot_ts", "1h"])
     assert "last 1h" in capsys.readouterr().out
+
+
+def test_stats_summarizes_instead_of_writing_the_csv(monkeypatch, capsys):
+    _fake_ts(monkeypatch, _ts_rows(gpus=("0",)))
+    main(["-j", "1", "--ts", "--stats"])
+    out = capsys.readouterr().out
+    assert "JOBID,EPOCH" not in out              # the CSV became the summary
+    assert "MEAN" in out and "GPU%" in out
+
+
+def test_stats_needs_a_timeseries(capsys):
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--stats"])
+    assert "add --ts" in capsys.readouterr().err
+
+
+def test_stats_is_redundant_with_plot_ts(monkeypatch, capsys):
+    """The chart already prints min/mean/max/last under it."""
+    _fake_ts(monkeypatch, _ts_rows(gpus=("0",)))
+    main(["-j", "1", "--plot_ts", "--stats"])
+    assert "already prints" in capsys.readouterr().err
+
+
+def test_stats_composes_with_the_window(monkeypatch, capsys):
+    captured = {}
+
+    def emit(*a, **kw):
+        captured["options"] = a[-1]
+        kw["out"].write(_TS_HEAD + _ts_rows(gpus=("0",)))
+
+    monkeypatch.setattr(cli, "emit_timeseries", emit)
+    main(["-j", "1", "--ts", "30m", "--stats"])
+    assert captured["options"].window == 1800      # the window narrowed the query
+    assert "MEAN" in capsys.readouterr().out       # and the summary still rendered

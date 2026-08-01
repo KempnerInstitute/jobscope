@@ -1890,3 +1890,67 @@ def test_the_timeseries_header_is_unchanged_by_the_filter(gpu_record):
         return text.splitlines()[0]
 
     assert header("node01") == header(None)
+
+
+# --- --ts --stats: summarizing the window -----------------------------------
+
+def _ts_stats(rows, metrics=("GPU%", "POWER_W"), **kw):
+    out = io.StringIO()
+    report.timeseries_stats(rows, list(metrics),
+                            RenderOptions(view="all", header=True, **kw), out=out)
+    return out.getvalue()
+
+
+def _sample(node, gpu, **values):
+    row = {"NODE": node, "GPU": gpu}
+    row.update({k: str(v) for k, v in values.items()})
+    return row
+
+
+def test_the_window_summary_is_min_mean_max_last():
+    rows = [_sample("n1", "0", **{"GPU%": v, "POWER_W": 100}) for v in (10, 20, 60)]
+    line = [ln for ln in _ts_stats(rows).splitlines() if "GPU%" in ln][0].split()
+    # NODE:GPU METRIC N MIN MEAN MAX LAST
+    assert line[2:] == ["3", "10.0", "30.0", "60.0", "60.0"]
+
+
+def test_the_summary_matches_the_series_it_summarizes():
+    """Computed from the samples --ts already fetched, so it cannot disagree."""
+    values = [1.0, 2.5, 99.0, 4.0]
+    rows = [_sample("n1", "0", **{"GPU%": v}) for v in values]
+    line = [ln for ln in _ts_stats(rows, metrics=["GPU%"]).splitlines() if "GPU%" in ln][0]
+    assert "%.1f" % (sum(values) / len(values)) in line
+
+
+def test_each_gpu_is_summarized_separately_in_gpu_order():
+    rows = ([_sample("n1", "2", **{"GPU%": 10})] + [_sample("n1", "0", **{"GPU%": 90})])
+    labels = [ln.split()[0] for ln in _ts_stats(rows, metrics=["GPU%"]).splitlines()[1:]]
+    assert labels == ["n1:0", "n1:2"]      # by GPU number, not first-seen
+
+
+def test_blank_samples_do_not_count_toward_the_mean():
+    """A metric the exporter did not report is absent, not zero."""
+    rows = [_sample("n1", "0", **{"GPU%": 10}), _sample("n1", "0", **{"GPU%": ""}),
+            _sample("n1", "0", **{"GPU%": 30})]
+    line = [ln for ln in _ts_stats(rows, metrics=["GPU%"]).splitlines() if "GPU%" in ln][0]
+    assert line.split()[2:5] == ["2", "10.0", "20.0"]
+
+
+def test_a_metric_with_no_samples_at_all_is_omitted():
+    rows = [_sample("n1", "0", **{"GPU%": 10, "POWER_W": ""})]
+    assert "POWER_W" not in _ts_stats(rows)
+
+
+def test_the_summary_has_a_csv_form():
+    rows = [_sample("n1", "0", **{"GPU%": 10}), _sample("n1", "0", **{"GPU%": 30})]
+    text = _ts_stats(rows, metrics=["GPU%"], csv=True)
+    columns, parsed = [ln.split(",") for ln in text.strip().splitlines()]
+    assert columns == list(report.TS_STAT_HEADERS)
+    assert parsed == ["n1:0", "GPU%", "2", "10.0", "20.0", "30.0", "30.0"]
+
+
+def test_the_mean_is_tinted_by_its_band():
+    """The column read first should say whether the number is a problem."""
+    rows = [_sample("n1", "0", **{"GPU%": 2})]
+    text = _ts_stats(rows, metrics=["GPU%"], color=True, thresholds=_thresholds())
+    assert "\033[31m" in text          # 2% is red

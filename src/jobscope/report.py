@@ -1549,6 +1549,71 @@ def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
             yield job, gpu
 
 
+TS_STAT_HEADERS = ("NODE:GPU", "METRIC", "N", "MIN", "MEAN", "MAX", "LAST")
+
+
+def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptions",
+                     out=None) -> None:
+    """``min / mean / max / last`` per GPU per metric, over whatever the series covers.
+
+    Computed from the samples ``--ts`` already fetched rather than from fresh queries,
+    so the numbers cannot disagree with the series they summarize -- and so a window
+    costs nothing extra to summarize.
+
+    A plain mean of samples, which is not every metric's own reducer: the tables peak
+    memory where this averages it. That is the honest reading of "the average over
+    this window", and it is what ``jobscope plot`` prints under its charts.
+    """
+    out = out or sys.stdout
+    by_gpu: Dict[Tuple[str, str], Dict[str, list]] = {}
+    for row in rows:
+        key = (row.get("NODE", "?"), row.get("GPU", "?"))
+        seen = by_gpu.setdefault(key, {})
+        for metric in metrics:
+            value = cell_value(row.get(metric))
+            if value is not None:
+                seen.setdefault(metric, []).append(value)
+
+    table = []
+    for (node, gpu), found in sorted(by_gpu.items(), key=lambda kv: (kv[0][0], gpu_minor_key(kv[0][1]))):
+        for metric in metrics:
+            values = found.get(metric)
+            if not values:
+                continue
+            mean = sum(values) / len(values)
+            table.append(("%s:%s" % (node, gpu), metric, len(values),
+                          min(values), mean, max(values), values[-1]))
+    if not table:
+        print("No samples to summarize.", file=sys.stderr)
+        return
+
+    if options.csv:
+        writer = csv.writer(out, lineterminator="\n")
+        if options.header:
+            writer.writerow(TS_STAT_HEADERS)
+        for label, metric, n, low, mean, high, last in table:
+            writer.writerow([label, metric, n, "%.1f" % low, "%.1f" % mean,
+                             "%.1f" % high, "%.1f" % last])
+        out.flush()
+        return
+
+    cells = [(label, metric, str(n), "%.1f" % low, "%.1f" % mean, "%.1f" % high,
+              "%.1f" % last) for label, metric, n, low, mean, high, last in table]
+    widths = [max(len(TS_STAT_HEADERS[i]), max(len(r[i]) for r in cells))
+              for i in range(len(TS_STAT_HEADERS))]
+    if options.header:
+        print("  " + "  ".join(h.ljust(widths[i]) if i < 2 else h.rjust(widths[i])
+                               for i, h in enumerate(TS_STAT_HEADERS)), file=out)
+    for row, (_l, metric, _n, _lo, mean, _hi, _last) in zip(cells, table):
+        # Tint the mean by its band, as the summary table tints IDLE: the column
+        # anyone reads first should say whether the number is a problem.
+        painted = [cell.ljust(widths[i]) if i < 2 else cell.rjust(widths[i])
+                   for i, cell in enumerate(row)]
+        painted[4] = tint(painted[4], cell_band(options, metric, mean))
+        print("  " + "  ".join(painted).rstrip(), file=out)
+    out.flush()
+
+
 def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]],
                     gpus: Dict[str, Gpu], specs: List[MetricSpec],
                     options: RenderOptions, out=None) -> None:

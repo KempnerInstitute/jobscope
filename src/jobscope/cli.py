@@ -33,6 +33,7 @@ from .report import (
     SummaryRenderer,
     describe,
     describe_dcgm,
+    timeseries_stats,
 )
 from .sacct import DEFAULT_STATE, default_user
 from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
@@ -158,6 +159,9 @@ def build_parser():
                        help="chart that time series instead of writing it: one panel per "
                             "metric, one column per GPU. Takes the same optional window. "
                             "Needs --nodename on a multi-node job")
+    shape.add_argument("--stats", action="store_true",
+                       help="--ts: summarize the series instead of writing it -- "
+                            "min/mean/max/last per GPU per metric, over the window")
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
                        help="--per-gpu / --ts: report only this node's GPUs")
@@ -553,6 +557,14 @@ def _ts_window(args) -> Optional[int]:
             % (flag, flag, flag, value))
 
 
+def _stats_timeseries(text: str, options) -> None:
+    """Summarize the series --stats just emitted, in place of writing its CSV."""
+    columns, rows = plot.parse_csv(io.StringIO(text))
+    if not rows:
+        return          # emit_timeseries has already said why on stderr
+    timeseries_stats(rows, plot.metric_cols(columns), options)
+
+
 def _plot_timeseries(text: str, args) -> None:
     """Chart the series ``--plot_ts`` just emitted, in place of writing its CSV.
 
@@ -605,6 +617,12 @@ def handle_report(args) -> None:
     if args.plot_avgeff:
         print("note: --plot_avgeff is the default now; use --no-plot to omit the "
               "efficiency bars", file=sys.stderr)
+    if args.stats and not args.ts:
+        raise JobscopeError("--stats summarizes a time series; add --ts (optionally with "
+                            "a window, e.g. --ts 1h)")
+    if args.stats and args.plot_ts:
+        print("note: the chart already prints min/mean/max/last; ignoring --stats",
+              file=sys.stderr)
     if args.nodename and not (args.per_gpu or args.ts):
         # The per-job table's NODE column is a count of nodes, not a name, so there is
         # nothing there to match; say so rather than filtering nothing.
@@ -640,13 +658,16 @@ def handle_report(args) -> None:
             if on:
                 print("note: %s does not apply to --ts (a per-GPU metric series)" % flag,
                       file=sys.stderr)
-        if not args.plot_ts:
+        if not (args.plot_ts or args.stats):
             emit_timeseries(request, cfg, timeout, workers, specs, args.step, options)
             return
         buffer = io.StringIO()
         emit_timeseries(request, cfg, timeout, workers, specs, args.step, options,
                         out=buffer)
-        _plot_timeseries(buffer.getvalue(), args)
+        if args.plot_ts:
+            _plot_timeseries(buffer.getvalue(), args)
+        else:
+            _stats_timeseries(buffer.getvalue(), options)
         return
 
     # The detail granularity renders the fixed DETAIL_COLUMNS, so it takes no spec

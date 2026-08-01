@@ -215,6 +215,7 @@ job that is running right now.
 | *(default)* | one row per job |
 | `--per-gpu` | one row per GPU, with node name and GPU number (see below). `--hwdetail` is the old name and still works |
 | `--ts [WINDOW]` | the per-scrape time series as CSV; `--ts 1h` is the last hour of the run |
+| `--stats` | with `--ts`: summarize that series instead -- min/mean/max/last per GPU per metric |
 | `--plot_ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--dcgm` | the full DCGM metric catalog |
@@ -726,6 +727,30 @@ costs a twenty-fourth of the samples to fetch -- and the step is measured over t
 actually queried, so a window keeps the native scrape resolution where the whole run
 would have been coarsened. The chart names the window it drew, since the x axis counts
 minutes from the window's own start either way.
+
+#### Averages over the window: `--stats`
+
+`--ts` gives every sample; `--stats` gives what they add up to, one row per GPU per
+metric:
+
+```console
+$ jobscope -j 36612315 --ts 60m --stats
+  NODE:GPU          METRIC    N    MIN   MEAN    MAX   LAST
+  holygpu8a17601:2  GPU%     61   17.0   20.6   22.0   21.0
+  holygpu8a17601:2  SM_ACT%  61    1.3    1.3    1.6    1.3
+  holygpu8a17601:2  POWER_W  61  119.0  119.9  120.0  120.0
+```
+
+Computed from the samples `--ts` already fetched, so there are **no extra queries** and
+the numbers cannot disagree with the series they summarize. `N` is the sample count,
+which is worth a glance: it says whether the window actually had data. `MEAN` is tinted
+by its band, as `IDLE` is in the summary table, and `--csv` emits the same rows for
+scripting.
+
+Note this is a plain mean of samples, not each metric's own reducer -- the tables peak
+memory where this averages it. That is the honest reading of "the average over this
+window". `--plot_ts` already prints the same figures under its charts, so `--stats`
+adds nothing there and says so.
 
 **A window needs its unit** -- `1h`, `90m`, `30s`, `2d`, the same vocabulary
 `--min-elapsed` uses. That is what keeps `jobscope --ts 36441613` working: a job ID
