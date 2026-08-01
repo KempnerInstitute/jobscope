@@ -251,6 +251,12 @@ def gpu_minor_key(minor):
     return int(minor) if str(minor).isdigit() else minor
 
 
+# Where a card's model rides in a per-GPU metric dict. Not a metric, so it is keyed
+# out of the header namespace: POWER_W's floor is per architecture and the renderers
+# need to know which card produced a reading.
+MODEL_KEY = "__model__"
+
+
 def window_query(spec: MetricSpec, uuids: List[str], duration: int,
                  clip: Optional[str] = None) -> str:
     """PromQL that reduces ``spec`` over a ``duration``-second window for ``uuids``.
@@ -280,7 +286,7 @@ def _jobid_query(record: JobRecord) -> str:
 
 def discover_gpus(record: JobRecord, client: PrometheusClient,
                   timeout: Optional[float]) -> List[dict]:
-    """The GPUs that ran a job, as ``{uuid, node, minor}`` sorted by (node, minor).
+    """The GPUs that ran a job, as ``{uuid, node, minor, model}``, by (node, minor).
 
     Empty for CPU-only jobs or when no GPU samples exist. Joins via
     ``nvidia_gpu_jobId``, the same mapping jobstats uses.
@@ -298,7 +304,9 @@ def discover_gpus(record: JobRecord, client: PrometheusClient,
         if uuid:
             gpus.append({"uuid": uuid,
                          "node": metric.get("host", "?").split(":")[0],
-                         "minor": str(metric.get("minor_number", "?"))})
+                         "minor": str(metric.get("minor_number", "?")),
+                         # For the per-model POWER_W floor; "" falls back to global.
+                         "model": metric.get("name", "")})
     gpus.sort(key=lambda g: (g["node"], gpu_minor_key(g["minor"])))
     return gpus
 
@@ -317,7 +325,7 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
         found = client.query(_jobid_query(record), record.end, timeout)
     except Exception:
         return {}, {}
-    gpus, uuids = [], []
+    gpus, uuids, models = [], [], {}
     for series in found:
         metric = series["metric"]
         uuid = metric.get("uuid")
@@ -325,6 +333,7 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
             gpus.append((metric.get("host", "?").split(":")[0],
                          str(metric.get("minor_number", "?")), uuid))
             uuids.append(uuid)
+            models[uuid] = metric.get("name", "")
     if not uuids:
         return {}, {}
 
@@ -344,7 +353,13 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
             except (TypeError, ValueError):
                 pass
 
-    per_gpu = {(node, minor): per_uuid.get(uuid, {}) for node, minor, uuid in gpus}
+    per_gpu = {}
+    for node, minor, uuid in gpus:
+        values = per_uuid.get(uuid, {})
+        # The card's model rides along with its metrics: POWER_W's floor is per
+        # architecture, and this is the only place that knows which card it was.
+        values[MODEL_KEY] = models.get(uuid, "")
+        per_gpu[(node, minor)] = values
     overall: Dict[str, float] = {}
     for spec in specs:
         # Aggregated across UUIDs rather than per_gpu keys: per_gpu is keyed by

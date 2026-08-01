@@ -10,6 +10,7 @@ from jobscope.dcgm import (
     DEFAULT_SPECS,
     GPU_SUMMARY_SPECS,
     METRICS,
+    MODEL_KEY,
     SPEC_BY_HEADER,
     columns_for,
     compute_dcgm,
@@ -120,7 +121,7 @@ def _client():
 def test_discover_gpus_sorted(gpu_record):
     gpus = discover_gpus(gpu_record, _client(), None)
     assert [g["minor"] for g in gpus] == ["0", "1"]
-    assert gpus[0] == {"uuid": "UUID-A", "node": "node01", "minor": "0"}
+    assert gpus[0] == {"uuid": "UUID-A", "node": "node01", "minor": "0", "model": ""}
 
 
 def test_dcgm_for_job_scales_and_aggregates(gpu_record):
@@ -218,11 +219,14 @@ def test_dcgm_for_job_metric_error_keeps_gpu(gpu_record):
     # GPU% and the GMEM columns survive because the blob supplies them.
     assert set(overall) == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "GMEM%"}
     assert set(per_gpu) == {("node01", "0")}
-    assert set(per_gpu[("node01", "0")]) == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "GMEM%"}
+    assert set(per_gpu[("node01", "0")]) == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "GMEM%",
+                                             MODEL_KEY}
 
 
 def test_dcgm_for_job_metric_error_on_a_running_job_yields_nothing(gpu_record):
     running = dataclasses.replace(gpu_record, state="RUNNING", stats={})
     overall, per_gpu = dcgm_for_job(running, DEFAULT_SPECS, _DiscoveryOnlyClient(), None)
     assert overall == {}
-    assert per_gpu == {("node01", "0"): {}}
+    # The model rides with the row even when no metric survived: it identifies the
+    # card, and POWER_W's floor depends on which one it was.
+    assert per_gpu == {("node01", "0"): {MODEL_KEY: ""}}

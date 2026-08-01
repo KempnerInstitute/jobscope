@@ -443,7 +443,11 @@ things, while the DCGM catalog would add a dozen near-duplicates.
 
 ### Power, the one metric that is not a percentage
 
-`POWER_W` is graded in watts against `[thresholds] power_w` (default 100). Before
+`POWER_W` is graded in watts against `[thresholds] power_w` (default 100), or against
+`[thresholds.power_w_by_model][<model>]` where a site has set one: idle draw is a
+property of the card, running 27 W to 165 W across one fleet, so an idle RTX PRO
+6000 outdraws a working V100. The model is read from the exporter's `name` label on
+the ownership query both paths already make. Before
 that existed it fell through to the `%` default of 15 -- 15 *watts* -- so every
 power cell graded green, in the table and in `jobscope plot`.
 

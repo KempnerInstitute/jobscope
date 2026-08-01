@@ -2036,9 +2036,18 @@ def test_the_category_is_the_best_metric_not_the_worst():
 
     The same rule as "every metric is below X", read from the other end.
     """
-    busy = {"GPU%": 0.0, "SM_ACT%": 0.0, "TENSOR%": 0.0, "DRAM%": 45.0}
-    assert report.classify(busy, None, 100) == ("good", False)
-    assert report.classify({m: 0.0 for m in busy}, None, 100) == ("wasteful", False)
+    assert report.classify({"GPU%": 0.0, "SM_ACT%": 0.0, "DRAM%": 45.0}) == "good"
+    assert report.classify({"GPU%": 0.0, "SM_ACT%": 0.0, "DRAM%": 0.0}) == "wasteful"
+
+
+def test_power_plays_no_part_in_the_category():
+    """It is graded in watts against a floor that depends on the card -- 27 W idle on
+    a V100, 165 W on an RTX PRO 6000 -- so it cannot join a rule expressed in percent
+    without picking one number for every architecture."""
+    import inspect
+    assert list(inspect.signature(report.classify).parameters) == ["values"]
+    assert report.classify({"GPU%": 0.0}) == "wasteful"     # whatever the watts
+    assert report.classify({"GPU%": 45.0}) == "good"
 
 
 def test_gmem_takes_no_part_in_the_verdict():
@@ -2046,29 +2055,6 @@ def test_gmem_takes_no_part_in_the_verdict():
     assert "GMEM%" not in report.classify_metrics(
         ["JOBID", "GPU%", "GMEM%", "SM_ACT%", "POWER_W", "GMEM_GB"])
     assert report.classify_metrics(["GPU%", "GMEM%", "SM_ACT%"]) == ["GPU%", "SM_ACT%"]
-
-
-def test_power_below_the_floor_demotes_to_wasteful():
-    """Whatever the percentages said."""
-    busy = {"GPU%": 45.0, "SM_ACT%": 40.0}
-    assert report.classify(busy, 300, 100) == ("good", False)
-    assert report.classify(busy, 73, 100) == ("wasteful", True)
-
-
-def test_power_above_the_floor_never_promotes():
-    """A real job: 0% on every metric while drawing 118 W -- a card held warm.
-
-    Drawing power is not evidence of work, so watts may argue a job down but never up.
-    """
-    idle = {"GPU%": 0.0, "SM_ACT%": 0.0, "TENSOR%": 0.0}
-    assert report.classify(idle, 118, 100) == ("wasteful", False)
-    assert report.classify(idle, 500, 100) == ("wasteful", False)
-
-
-def test_the_floor_comes_from_config():
-    busy = {"GPU%": 45.0}
-    assert report.classify(busy, 150, 100)[0] == "good"      # above a 100 W floor
-    assert report.classify(busy, 150, 200)[0] == "wasteful"  # below a 200 W one
 
 
 def _classify_rows(jobs):
@@ -2096,7 +2082,6 @@ def test_the_report_names_the_metrics_it_judged_on():
     """--dcgm widens the set, so 'best of' means something different per run."""
     text = _classify({"1": {"GPU%": 50, "SM_ACT%": 40, "GMEM%": 90, "POWER_W": 300}})
     assert "by best of GPU%, SM_ACT%" in text and "GMEM%" not in text.splitlines()[0]
-    assert "below 100 W forces wasteful" in text
 
 
 def test_good_collapses_unless_asked_for():
@@ -2108,7 +2093,7 @@ def test_good_collapses_unless_asked_for():
 
 def test_the_categories_are_listed_worst_first():
     jobs = {"1": {"GPU%": 90, "SM_ACT%": 90, "GMEM%": 1, "POWER_W": 400},
-            "2": {"GPU%": 0.5, "SM_ACT%": 0.1, "GMEM%": 1, "POWER_W": 300},
+            "2": {"GPU%": 0.5, "SM_ACT%": 0.1, "GMEM%": 1, "POWER_W": 70},
             "3": {"GPU%": 15, "SM_ACT%": 12, "GMEM%": 1, "POWER_W": 300}}
     text = _classify(jobs)
     order = [ln.strip().split(" (")[0] for ln in text.splitlines()
@@ -2138,3 +2123,85 @@ def test_the_csv_reports_metrics_the_verdict_did_not_use():
 def test_a_series_with_no_percentages_cannot_be_classified():
     with pytest.raises(JobscopeError, match="no %-metrics"):
         _classify({"1": {"POWER_W": 300}}, columns=("POWER_W",))
+
+
+# --- the POWER_W floor follows the card -------------------------------------
+
+_FLOORS = {"NVIDIA RTX PRO 6000 Blackwell Server Edition": 330,
+           "NVIDIA H100 80GB HBM3": 130,
+           "Tesla V100-PCIE-32GB": 45}
+
+
+def _per_model_thresholds():
+    from jobscope.config import Thresholds
+    return Thresholds(red=10, power_w=100, power_w_by_model=_FLOORS)
+
+
+def _per_model_options(**kw):
+    return RenderOptions(view="all", color=True, thresholds=_per_model_thresholds(), **kw)
+
+
+RTX = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+
+
+@pytest.mark.parametrize("model,watts,band", [
+    # An idle RTX (165 W) draws more than a working V100 (60 W): the same reading
+    # means opposite things, which is the whole reason the floor is per card.
+    (RTX, 165, "red"),                          # under its 330 W floor
+    (RTX, 450, "yellow"),                       # over the floor, under twice it
+    (RTX, 700, "green"),
+    ("NVIDIA H100 80GB HBM3", 118, "red"),      # p90 idle for this card, floor 130
+    ("NVIDIA H100 80GB HBM3", 300, "green"),
+    ("Tesla V100-PCIE-32GB", 30, "red"),        # under its 45 W floor
+    ("Tesla V100-PCIE-32GB", 60, "yellow"),     # busy, and under every other floor
+])
+def test_power_is_graded_against_its_own_card(model, watts, band):
+    assert report.cell_band(_per_model_options(), "POWER_W", watts, model) == band
+
+
+def test_the_same_reading_bands_differently_per_card():
+    """165 W: idle on an RTX, working on a V100. The reason for the whole change."""
+    options = _per_model_options()
+    assert report.cell_band(options, "POWER_W", 165, RTX) == "red"
+    assert report.cell_band(options, "POWER_W", 165, "Tesla V100-PCIE-32GB") == "green"
+
+
+def test_an_unknown_model_uses_the_global_floor():
+    options = _per_model_options()
+    assert report.cell_band(options, "POWER_W", 118, "") == "yellow"     # 100 W global
+    assert report.cell_band(options, "POWER_W", 118, "NVIDIA H100 80GB HBM3") == "red"
+
+
+def test_only_power_is_judged_per_model():
+    """Percentages mean the same thing on every card."""
+    options = _per_model_options()
+    for model in ("Tesla V100-PCIE-32GB", "NVIDIA H100 80GB HBM3", ""):
+        assert report.cell_band(options, "GPU%", 50, model) == "green"
+        assert report.cell_band(options, "GPU%", 5, model) == "red"
+
+
+def test_a_jobs_model_is_its_cards_when_they_agree():
+    same = {("n1", "0"): {report.MODEL_KEY: "NVIDIA A40"},
+            ("n1", "1"): {report.MODEL_KEY: "NVIDIA A40"}}
+    assert report.job_model(same) == "NVIDIA A40"
+
+
+def test_a_job_spanning_models_falls_back_to_the_global_floor():
+    """No honest single answer -- the highest over-flags, the lowest under-flags."""
+    mixed = {("n1", "0"): {report.MODEL_KEY: "NVIDIA A40"},
+             ("n2", "0"): {report.MODEL_KEY: "Tesla V100-PCIE-32GB"}}
+    assert report.job_model(mixed) == ""
+    assert report.job_model({("n1", "0"): {}}) == ""            # nothing reported
+
+
+def test_the_power_tally_judges_each_job_on_its_own_hardware():
+    """One selection spans hardware, so the floor cannot live on the tally."""
+    tally = report.EfficiencyTally("POWER_W", _per_model_thresholds(),
+                                   "GPU-hours", "h", 3600.0, absolute=True,
+                                   value_unit="W")
+    # 165 W: idle for an RTX, busy for a V100. Same reading, opposite verdicts.
+    tally.add("1", "alice", 165.0, 3600.0, model=RTX)
+    tally.add("2", "bob", 165.0, 3600.0, model="Tesla V100-PCIE-32GB")
+    assert tally.bands["red"][0] == 1 and tally.bands["green"][0] == 1
+    assert tally.waste_of(165.0, 3600.0, "Tesla V100-PCIE-32GB") == 0.0
+    assert tally.waste_of(165.0, 3600.0, RTX) == 3600.0

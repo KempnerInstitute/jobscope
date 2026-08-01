@@ -33,6 +33,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 from .dcgm import (
     ALL_SPECS,
     DEFAULT_SPECS,
+    MODEL_KEY,
     MetricSpec,
     applicable_derived,
     columns_for,
@@ -66,6 +67,10 @@ class Gpu(NamedTuple):
     host: str
     minor: int
     label: str          # display form, e.g. "GPU 2" or "MIG 2.0"
+    # The exporter's model string, e.g. "NVIDIA H100 80GB HBM3". Carried because the
+    # POWER_W floor is per architecture: idle draw runs 27 W to 165 W across a fleet.
+    # Defaulted, so a series without the label degrades to the global floor.
+    model: str = ""
 
     @property
     def csv_id(self) -> str:
@@ -332,13 +337,14 @@ def discover_gpus(client: PrometheusClient, jobs: Dict[int, LiveJob],
         if not uuid or minor is None:
             continue
         try:
-            found.append((uuid, jobid, labels.get("host", "").split(":")[0], int(minor)))
+            found.append((uuid, jobid, labels.get("host", "").split(":")[0], int(minor),
+                          labels.get("name", "")))
         except ValueError:
             continue
 
-    display = gpu_labels(found)
-    return {uuid: Gpu(uuid, jobid, host, minor, display[uuid])
-            for uuid, jobid, host, minor in found}
+    display = gpu_labels([f[:4] for f in found])
+    return {uuid: Gpu(uuid, jobid, host, minor, display[uuid], model)
+            for uuid, jobid, host, minor, model in found}
 
 
 def _uuid_regex(uuids) -> str:
@@ -599,6 +605,7 @@ def per_gpu_by_node_minor(metrics: LiveMetrics, gpus: Dict[str, Gpu],
             continue
         by_header = {spec.header: keyed[spec.key] for spec in specs if spec.key in keyed}
         by_header.update({d.header: keyed[d.key] for d in derived if d.key in keyed})
+        by_header[MODEL_KEY] = gpu.model     # for the per-architecture POWER_W floor
         out[gpu.jobid][(gpu.host, str(gpu.minor))] = by_header
     return out
 

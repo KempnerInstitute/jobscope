@@ -386,7 +386,16 @@ each entry reads `jobid:value:wasted(elapsed)`. **A job that ran over three hour
 printed in red**: a brief bad job costs little, whereas hours of idle hardware do not
 come back.
 
-`POWER_W` is graded in **watts**, not percent: below `[thresholds] power_w`
+`POWER_W` is graded in **watts**, not percent, and against a floor that can differ
+per GPU model (`[thresholds.power_w_by_model]`). Idle draw is hardware: measured on one
+cluster it ran from **27 W on a V100 to 165 W on an RTX PRO 6000**, so an idle RTX draws
+more than a working V100 and no single number can judge both. The model comes from the
+exporter's own label, on a query jobscope already makes, so it costs nothing.
+
+Pick a floor by measuring *both* sides -- idle 90th percentile against busy 10th -- not
+just the idle one: on that cluster a flat 150 W would have called busy H200s (10th
+percentile 122 W) idle. `jobscope config --example` carries the method and a worked
+table. Below `[thresholds] power_w`
 (default 100) a GPU counts as idle, so its waste is the GPU-hours held while below
 that floor. Watts are the one idle signal a duty cycle cannot fake -- a job holding
 a trivial kernel resident reads busy on `GPU%` while drawing idle watts. On the day
@@ -810,12 +819,10 @@ five bands rather than a second notion of idle. `GMEM%` sits out: reserving 80GB
 computing nothing is still computing nothing. The header names the metrics actually
 used, since `--dcgm` widens the set.
 
-**`POWER_W` demotes but never promotes.** Below the `[thresholds] power_w` floor forces
-`wasteful` whatever the percentages say; above it, power changes nothing, and a `!`
-marks any job the floor pushed down. The direction is the point: on one partition a job
-sat at **0% on every metric while drawing 118 W** -- a card held warm and busy with
-nothing. Watts are evidence of a GPU being awake, not of it working, so they are not
-allowed to argue a job upward.
+**`POWER_W` plays no part in the category.** It is graded on its own terms, in watts
+against a floor that depends on the card -- see below -- and folding a per-model
+quantity into a rule expressed in percent could only be done by picking one number for
+every architecture, which is the thing that does not work.
 
 `good` collapses to a count by default, since on a healthy partition it is most of the
 output and none of the point; `--all-categories` lists it. `--stats-per-node`

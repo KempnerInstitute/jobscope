@@ -40,11 +40,43 @@ red = 10
 
 # POWER_W is graded in WATTS, not percent: a GPU drawing less than this counts as
 # idle. That is the one idle signal a duty cycle cannot fake -- a job spinning on a
-# trivial kernel reads busy on GPU% while drawing idle watts. Measured on one GPU
-# partition, idle jobs drew 73-74 W (with GPU% 0 and SM_ACT% 0.0), the next values
-# were 99-101 W, and the median was 289 W against a 573 W maximum. Raise it for
-# hardware with a higher idle draw.
+# trivial kernel reads busy on GPU% while drawing idle watts.
+#
+# This value is the fallback, used for any model not listed below.
 power_w = 100
+
+# Idle draw is a property of the hardware, so one number cannot serve a mixed fleet.
+# Keys are the model string the exporter itself reports (the `name` label on
+# nvidia_gpu_*, `modelName` on DCGM_FI_*); jobscope matches it exactly, so copy it
+# verbatim -- `jobscope <job> --per-gpu` shows which cards a job ran on.
+#
+# HOW TO CHOOSE A VALUE. A floor belongs between what a model draws idle and what it
+# draws working, so measure both: take every GPU of that model at one instant, split
+# on whether its duty cycle is zero, and put the floor between the idle 90th
+# percentile and the busy 10th. Measuring only the idle side gives a number that
+# flags working cards -- on the fleet below, a flat 150 W would have called busy
+# H200s (10th percentile 122 W) idle.
+#
+# Measured on one cluster, for illustration -- these are not defaults, and hardware
+# elsewhere will differ:
+#
+#   model                            idle p90   busy p10   floor
+#   NVIDIA RTX PRO 6000 Blackwell      288 W      373 W      330
+#   NVIDIA H100 80GB HBM3              121 W      141 W      130
+#   NVIDIA H200                        117 W      122 W      120
+#   NVIDIA A100-SXM4-80GB               98 W       99 W      100
+#   NVIDIA A100-SXM4-40GB               55 W      121 W       90
+#   NVIDIA A40                          35 W         --        40
+#   Tesla V100-PCIE-32GB                39 W         --        45
+#
+# Note the spread: an idle RTX PRO 6000 draws more than a working V100, so a single
+# floor is wrong at one end or the other whatever value it takes.
+#
+# [thresholds.power_w_by_model]
+# "NVIDIA RTX PRO 6000 Blackwell Server Edition" = 330
+# "NVIDIA H100 80GB HBM3" = 130
+# "NVIDIA H200" = 120
+# "Tesla V100-PCIE-32GB" = 45
 
 [defaults]
 # Default number of concurrent Prometheus query-sets for the GPU view.

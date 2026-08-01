@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from .blob import GIB, blob_capacity, blob_detail, blob_metrics
-from .config import DEFAULT_THRESHOLDS, Thresholds
+from .config import DEFAULT_THRESHOLDS, Thresholds, grade_band
 from .dcgm import (
     ALL_SPECS,
     DCGM_BLOB_HEADERS,
@@ -23,6 +23,7 @@ from .dcgm import (
     DEFAULT_SPECS,
     DERIVED_COLUMNS,
     DESCRIPTIONS,
+    MODEL_KEY,
     MetricSpec,
     applicable_derived,
     columns_for,
@@ -225,7 +226,20 @@ def cell_value(cell) -> Optional[float]:
         return None
 
 
-def cell_band(options: "RenderOptions", header: str, cell) -> str:
+def job_model(per_gpu: dict) -> str:
+    """The GPU model a job ran on, or ``""`` when its cards disagree.
+
+    Slurm allocates from one partition, so in practice a job's GPUs are one model and
+    this is exact. When they are not there is no honest single floor -- the highest
+    over-flags, the lowest under-flags -- so it says nothing and the global value is
+    used instead of an invented rule.
+    """
+    models = {v.get(MODEL_KEY, "") for v in per_gpu.values() if isinstance(v, dict)}
+    models.discard("")
+    return models.pop() if len(models) == 1 else ""
+
+
+def cell_band(options: "RenderOptions", header: str, cell, model: str = "") -> str:
     """The grade for a rendered cell, or ``""`` when it is not a graded metric.
 
     Shared by the per-job table and ``--per-gpu`` so the two cannot disagree about a
@@ -235,11 +249,19 @@ def cell_band(options: "RenderOptions", header: str, cell) -> str:
     The trailing ``%`` matters: the detail view writes its cells as "11.4%" where the
     summary writes "11", and a bare ``float()`` rejects the former -- which is why
     those columns were silently the only untinted ones.
+
+    ``model`` names the GPU whose cell this is, for ``POWER_W`` alone: its floor is
+    hardware, so an idle RTX PRO 6000 at 165 W and a working V100 at 60 W cannot be
+    judged by one number. Empty means "unknown", which falls back to the global.
     """
     if not options.color or options.thresholds is None:
         return ""
     value = cell_value(cell)
-    return "" if value is None else options.thresholds.grade(header, value)
+    if value is None:
+        return ""
+    if header == "POWER_W" and model:
+        return grade_band(value, options.thresholds.floor_for(model))
+    return options.thresholds.grade(header, value)
 
 
 BAR_WIDTH = 34
@@ -554,15 +576,21 @@ class EfficiencyTally:
         self.worst: List["WorstJob"] = []
 
     def add(self, jobid: str, user: str, value: Optional[float], weight: float,
-            runtime: str = "-", duration: Optional[int] = None) -> None:
-        band = self.thresholds.grade(self.header, value)
+            runtime: str = "-", duration: Optional[int] = None,
+            model: str = "") -> None:
+        # The floor is resolved per call, not per tally: one selection spans hardware,
+        # and POWER_W's cutoff is a property of the card rather than of the column.
+        floor = self.cutoff(model)
+        band = ("" if value is None or floor is None
+                else grade_band(value, floor)) if self.absolute \
+            else self.thresholds.grade(self.header, value)
         if not band or weight <= 0:
             # Ungraded (no measurement) or unweighable: counting it would either
             # invent a utilization or give it no resource to account for.
             return
         self.bands[band][0] += 1
         self.bands[band][1] += weight
-        wasted = self.waste_of(value, weight)
+        wasted = self.waste_of(value, weight, model)
         # Used is whatever was not wasted, for both kinds of metric. For a percentage
         # that is (value/100) * weight, exactly as before. For POWER_W it is the
         # resource-time at or above the floor, which is the only reading of "used"
@@ -578,7 +606,7 @@ class EfficiencyTally:
             self.worst.sort(key=lambda item: -item[0])
             del self.worst[self.WORST:]
 
-    def waste_of(self, value: float, weight: float) -> float:
+    def waste_of(self, value: float, weight: float, model: str = "") -> float:
         """Resource-time this job wasted, in the units the weight is in.
 
         For a percentage, the unused fraction of what it held. For an absolute
@@ -589,11 +617,17 @@ class EfficiencyTally:
         does, and watts are not utilization.
         """
         if self.absolute:
-            return weight if value < self.cutoff() else 0.0
+            return weight if value < self.cutoff(model) else 0.0
         return (1 - value / 100.0) * weight
 
-    def cutoff(self) -> float:
-        """The red threshold for this column, from the site config."""
+    def cutoff(self, model: str = "") -> Optional[float]:
+        """The red threshold for this column, from the site config.
+
+        For POWER_W that depends on ``model``: watts are hardware, and the same
+        reading means idle on one card and busy on another.
+        """
+        if self.absolute and model:
+            return self.thresholds.floor_for(model)
         return self.thresholds.cutoff(self.header)
 
     def graded(self) -> int:
@@ -954,10 +988,11 @@ class SummaryRenderer:
                         value = dcgm_data.get(jid, ({}, {}))[0].get(header)
                     if value is not None:
                         values[header] = value
+                model = job_model(dcgm_data.get(jid, ({}, {}))[1])
                 for header, tally in self.tallies.items():
                     tally.add(jid, row["USER"], values.get(header),
                               weights[tally.weight_key], row["RUNTIME"],
-                              record.duration if record else None)
+                              record.duration if record else None, model=model)
                 self._note_waste(jid, row["USER"], values, weights,
                                  row["RUNTIME"], record.duration if record else None)
             if options.csv:
@@ -1286,11 +1321,11 @@ class DetailRenderer:
         self.matched = 0
         self._started = False
 
-    def _line(self, cells) -> str:
+    def _line(self, cells, model: str = "") -> str:
         """One per-GPU row, graded like the per-job table above it."""
         return " ".join(
             tint(c.fmt.format(str(cells[c.index])),
-                 cell_band(self.options, c.header, cells[c.index]))
+                 cell_band(self.options, c.header, cells[c.index], model))
             for c in self.columns)
 
     def _start(self) -> None:
@@ -1346,8 +1381,9 @@ class DetailRenderer:
                 header_line = self._line(DETAIL_HEADER)
                 print("  " + header_line, file=self.out)
                 print("  " + "-" * len(header_line), file=self.out)
+                model = job_model(dcgm_data.get(jid, ({}, {}))[1])
                 for row in rows:
-                    print("  " + self._line(row), file=self.out)
+                    print("  " + self._line(row, model), file=self.out)
                 for line in self._unit_charts(rows):
                     print(line, file=self.out)
                 print(file=self.out)
@@ -1599,23 +1635,16 @@ def classify_metrics(columns) -> List[str]:
     return [c for c in columns if c.endswith("%") and c not in CLASSIFY_SKIP]
 
 
-def classify(values: Dict[str, float], power: Optional[float],
-             floor: Optional[float]) -> Tuple[str, bool]:
-    """``(category, demoted)`` for one unit's mean values.
+def classify(values: Dict[str, float]) -> str:
+    """The category for one unit's mean values: the band of its *best* metric.
 
-    The band of the unit's *best* metric. That is the same rule as "every metric is
-    below X", just read from the other end -- so this generalises the AND used by the
-    ``Worst all`` row rather than introducing a second notion of idle.
-
-    ``POWER_W`` below the floor forces ``wasteful`` and can only ever demote. Drawing
-    power is not evidence of doing work: on one partition a job sat at 0% on every
-    metric while pulling 118 W, a card held warm and busy with nothing. Letting watts
-    argue upward would have cleared it.
+    Power plays no part. It is graded on its own terms elsewhere -- in watts, against a
+    floor that depends on the card, since idle draw runs from 27 W on a V100 to 165 W
+    on an RTX PRO 6000. Folding a quantity with a per-model scale into a rule expressed
+    in percent could only be done by picking one number for every architecture, which
+    is the thing that does not work.
     """
-    name = band_of(max(values.values()) if values else 0.0)
-    if floor and power is not None and power < floor and name != WASTEFUL:
-        return WASTEFUL, True
-    return name, False
+    return band_of(max(values.values()) if values else 0.0)
 TS_STAT_TAIL = ("METRIC", "N", "MIN", "MEAN", "MAX", "LAST")
 
 
@@ -1647,7 +1676,6 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     metrics = classify_metrics(columns)
     if not metrics:
         raise JobscopeError("no %-metrics in this series to classify")
-    power_floor = options.thresholds.power_w if options.thresholds else None
     unit = {"gpu": "GPUs", "node": "nodes"}.get(level, "jobs")
 
     reported = [c for c in columns if c not in TS_ID_COLUMNS]
@@ -1660,8 +1688,7 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         means = {m: sum(v) / len(v) for m, v in found["values"].items()}
         judged = {m: v for m, v in means.items() if m in metrics}
         power = means.get("POWER_W")
-        name, demoted = classify(judged, power, power_floor)
-        verdicts.append((name, key, found, means, power, demoted))
+        verdicts.append((classify(judged), key, found, means, power))
 
     if options.csv:
         # jobid, user, every metric the series carried, then the label. Wider than
@@ -1671,7 +1698,7 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         if options.header:
             writer.writerow(["JOBID", "USER"] + reported + ["LABEL"])
         order = {name: i for i, (name, _l, _c) in enumerate(CATEGORIES)}
-        for name, key, found, means, _power, _demoted in sorted(
+        for name, key, found, means, _power in sorted(
                 verdicts, key=lambda v: (order[v[0]], v[1])):
             writer.writerow([key[0], found["user"]]
                             + ["%.1f" % means[m] if m in means else "" for m in reported]
@@ -1682,8 +1709,6 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     if options.header:
         print("  %d %s, by best of %s" % (len(verdicts), unit, ", ".join(metrics)),
               file=out)
-        if power_floor:
-            print("  (POWER_W below %g W forces %s)" % (power_floor, WASTEFUL), file=out)
         print(file=out)
 
     # Widths from the content: usernames run from 5 to 16 characters here, and a
@@ -1703,13 +1728,12 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
             # Most of a healthy partition, and none of what the report is for.
             print("    (--all-categories to list them)", file=out)
             continue
-        for _n, key, group, means, power, demoted in sorted(found, key=lambda v: v[1]):
+        for _n, key, group, means, power in sorted(found, key=lambda v: v[1]):
             cells = " ".join("%s %.1f" % (m, means[m]) for m in metrics if m in means)
-            print("    %-*s %-*s %d GPU  %s  POWER_W %s%s"
+            print("    %-*s %-*s %d GPU  %s  POWER_W %s"
                   % (id_width, key[0], user_width, group["user"],
                      len(group["gpus"]), cells,
-                     "-" if power is None else "%.0f" % power,
-                     " !" if demoted else ""), file=out)
+                     "-" if power is None else "%.0f" % power), file=out)
         print(file=out)
     out.flush()
 

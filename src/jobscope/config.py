@@ -12,7 +12,7 @@ import importlib.util
 import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
@@ -57,6 +57,21 @@ class Thresholds:
 
     red: float
     power_w: float = DEFAULT_THRESHOLDS["power_w"]
+    # Per-GPU-model watt floors, keyed by the exporter's own model string. Idle draw
+    # is hardware, not policy: measured on one cluster it ran from 27 W on a V100 to
+    # 165 W on an RTX PRO 6000, so a single number is wrong at one end or the other.
+    # Empty by default -- see config.example.toml for how to derive a site's values.
+    power_w_by_model: Mapping[str, float] = field(default_factory=dict)
+
+    def floor_for(self, model: Optional[str]) -> float:
+        """The watt floor for ``model``, or the global one.
+
+        Matched on the exporter's exact string, which is what is available where the
+        grading happens; normalising model names would be a second thing to get wrong.
+        """
+        if model:
+            return float(self.power_w_by_model.get(model, self.power_w))
+        return self.power_w
 
     def cutoff(self, header: str) -> Optional[float]:
         """``header``'s red cutoff, or None when the metric is not graded.
@@ -157,6 +172,8 @@ def load_config(path: Optional[str] = None,
     thresholds = Thresholds(
         red=float(thr.get("red", DEFAULT_THRESHOLDS["red"])),
         power_w=float(thr.get("power_w", DEFAULT_THRESHOLDS["power_w"])),
+        power_w_by_model={str(k): float(v)
+                          for k, v in (thr.get("power_w_by_model") or {}).items()},
     )
     defaults = Defaults(
         workers=int(dfl.get("workers", DEFAULT_WORKERS)),

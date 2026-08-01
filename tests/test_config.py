@@ -225,3 +225,39 @@ def test_a_config_still_setting_the_old_per_metric_keys_is_told(tmp_path, capsys
     err = capsys.readouterr().err
     assert "gpu, mem no longer apply" in err and "'red'" in err
     assert cfg.thresholds.red == 10          # and the uniform cutoff is what applies
+
+
+# --- per-architecture POWER_W floor -----------------------------------------
+
+def test_the_power_floor_can_differ_per_gpu_model():
+    """Idle draw is hardware, not policy: 27 W on a V100, 165 W on an RTX PRO 6000.
+
+    One number is wrong at one end or the other, so the floor is looked up per model.
+    """
+    t = Thresholds(red=10, power_w=100, power_w_by_model={
+        "NVIDIA RTX PRO 6000 Blackwell Server Edition": 330,
+        "Tesla V100-PCIE-32GB": 45})
+    assert t.floor_for("NVIDIA RTX PRO 6000 Blackwell Server Edition") == 330
+    assert t.floor_for("Tesla V100-PCIE-32GB") == 45
+
+
+@pytest.mark.parametrize("model", ["NVIDIA H100 80GB HBM3", None, ""])
+def test_an_unlisted_or_unknown_model_falls_back_to_the_global_floor(model):
+    t = Thresholds(red=10, power_w=100, power_w_by_model={"Tesla V100-PCIE-32GB": 45})
+    assert t.floor_for(model) == 100
+
+
+def test_the_per_model_table_is_read_from_config(tmp_path, monkeypatch):
+    path = tmp_path / "c.toml"
+    path.write_text('[thresholds]\nred = 10\npower_w = 100\n\n'
+                    '[thresholds.power_w_by_model]\n"NVIDIA A40" = 40\n')
+    cfg = config_module.load_config(path=str(path))
+    assert cfg.thresholds.floor_for("NVIDIA A40") == 40
+    assert cfg.thresholds.floor_for("NVIDIA A100-SXM4-40GB") == 100
+
+
+def test_no_per_model_table_is_not_an_error(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("[thresholds]\nred = 10\npower_w = 100\n")
+    loaded = config_module.load_config(path=str(path))
+    assert loaded.thresholds.floor_for("anything") == 100
