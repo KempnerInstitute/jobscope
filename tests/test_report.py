@@ -2041,14 +2041,31 @@ def test_the_category_is_the_best_metric_not_the_worst():
     assert report.classify({"GPU%": 0.0, "SM_ACT%": 0.0, "DRAM%": 0.0}) == "wasteful"
 
 
-def test_power_plays_no_part_in_the_category():
-    """It is graded in watts against a floor that depends on the card -- 27 W idle on
-    a V100, 165 W on an RTX PRO 6000 -- so it cannot join a rule expressed in percent
-    without picking one number for every architecture."""
-    import inspect
-    assert list(inspect.signature(report.classify).parameters) == ["values"]
+def test_power_is_ignored_without_a_floor_to_check_it_against():
+    """The old, power-blind call shape: no power/floor args means no cap at all."""
     assert report.classify({"GPU%": 0.0}) == "wasteful"     # whatever the watts
     assert report.classify({"GPU%": 45.0}) == "good"
+    assert report.classify({"GPU%": 45.0}, power=50.0) == "good"     # floor missing
+    assert report.classify({"GPU%": 45.0}, floor=100.0) == "good"    # power missing
+
+
+@pytest.mark.parametrize("verdict,best", [
+    ("good", 45.0), ("average", 25.0), ("needs improvement", 15.0),
+])
+def test_idle_power_caps_a_healthy_verdict_at_inefficient(verdict, best):
+    """A duty-cycle-style metric can read busy while the card draws idle watts."""
+    assert report.classify({"GPU%": best}) == verdict          # uncapped, for contrast
+    assert report.classify({"GPU%": best}, power=67.0, floor=100.0) == "inefficient"
+
+
+def test_idle_power_never_upgrades_an_already_worse_verdict():
+    """The cap only pushes a verdict down; it cannot promote wasteful to inefficient."""
+    assert report.classify({"GPU%": 1.0}, power=67.0, floor=100.0) == "wasteful"
+
+
+def test_power_at_or_above_the_floor_does_not_cap():
+    assert report.classify({"GPU%": 45.0}, power=100.0, floor=100.0) == "good"
+    assert report.classify({"GPU%": 45.0}, power=219.5, floor=100.0) == "good"
 
 
 def test_gmem_takes_no_part_in_the_verdict():
@@ -2158,6 +2175,45 @@ RTX = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
 ])
 def test_power_is_graded_against_its_own_card(model, watts, band):
     assert report.cell_band(_per_model_options(), "POWER_W", watts, model) == band
+
+
+def test_classify_caps_using_the_per_model_floor():
+    """--classify's cap follows the card, the same as the table views' POWER_W cell."""
+    rows = [
+        {"JOBID": "1", "USER": "alice", "NODE": "n1", "GPU": "0", "MODEL": RTX,
+         "GPU%": "45", "POWER_W": "165"},                              # idle for an RTX
+        {"JOBID": "2", "USER": "bob", "NODE": "n2", "GPU": "0",
+         "MODEL": "Tesla V100-PCIE-32GB", "GPU%": "45", "POWER_W": "165"},  # busy for a V100
+    ]
+    out = io.StringIO()
+    report.timeseries_classify(
+        rows, ["JOBID", "USER", "NODE", "GPU", "MODEL", "GPU%", "POWER_W"],
+        _per_model_options(csv=True), out=out, level="job", show_all=True)
+    verdicts = {row.split(",")[0]: row.split(",")[-1]
+                for row in out.getvalue().strip().splitlines()[1:]}
+    assert verdicts["1"] == "inefficient"    # 165 W < 330 W RTX floor
+    assert verdicts["2"] == "good"           # 165 W >= 45 W V100 floor -- uncapped
+
+
+def test_only_a_sustained_low_mean_caps_not_a_momentary_dip():
+    """Job 36643729's own numbers: mean 219.5 W (well above the 100 W floor), min 67 W.
+
+    Gating on the mean (not the min) is what keeps a single low sample from capping an
+    otherwise-healthy job; only power that stays low across the window should.
+    """
+    brief_dip = [{"JOBID": "1", "USER": "u", "NODE": "n1", "GPU": "0",
+                 "GPU%": "33", "POWER_W": p} for p in ("67", "220", "220", "220", "220")]
+    sustained_idle = [{"JOBID": "2", "USER": "u", "NODE": "n1", "GPU": "0",
+                       "GPU%": "33", "POWER_W": p} for p in ("67", "70", "68", "72", "69")]
+    out = io.StringIO()
+    report.timeseries_classify(
+        brief_dip + sustained_idle, ["JOBID", "USER", "NODE", "GPU", "GPU%", "POWER_W"],
+        RenderOptions(view="all", csv=True, thresholds=_thresholds()),
+        out=out, level="job", show_all=True)
+    verdicts = {row.split(",")[0]: row.split(",")[-1]
+                for row in out.getvalue().strip().splitlines()[1:]}
+    assert verdicts["1"] == "average"        # mean 189.4 W, above the 100 W floor
+    assert verdicts["2"] == "inefficient"    # mean 69.2 W, sustained below the floor
 
 
 def test_the_same_reading_bands_differently_per_card():

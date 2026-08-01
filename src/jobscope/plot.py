@@ -18,7 +18,7 @@ from .errors import JobscopeError
 from .report import cell_value, in_columns, terminal_width
 
 ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
-           "#GPU", "DUR_S", "RUNTIME", "EPOCH", "TIME"}
+           "#GPU", "DUR_S", "RUNTIME", "EPOCH", "TIME", "MODEL"}
 
 # Summary footers, keyed on the JOBID cell. Not job rows, so parse_csv skips them.
 # Every footer label the summary view has ever emitted: the retired Mean rows stay

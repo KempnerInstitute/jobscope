@@ -209,7 +209,7 @@ def no_such_node(nodename: str, seen) -> JobscopeError:
 # The identity block every --ts row carries, before the metric columns. USER is here
 # so a partition-wide report can name whose job is idle; plot.ID_COLS already lists it,
 # so charts ignore it as an identity column.
-TS_ID_COLUMNS = ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU"]
+TS_ID_COLUMNS = ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU", "MODEL"]
 
 
 def cell_value(cell) -> Optional[float]:
@@ -1515,12 +1515,12 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         if not gpus:
             print("warn: job %s has no GPU samples" % jid, file=sys.stderr)
             continue
-        uuid_to = {g["uuid"]: (g["node"], g["minor"]) for g in gpus}
+        uuid_to = {g["uuid"]: (g["node"], g["minor"], g.get("model", "")) for g in gpus}
         if options.nodename:
             # Before the queries, not after: dropping the other nodes' UUIDs here
             # shrinks the regex, so a 4-node job costs a quarter of the range queries
             # instead of fetching three nodes' samples to throw them away.
-            nodes_seen.update(node for node, _ in uuid_to.values())
+            nodes_seen.update(node for node, _minor, _model in uuid_to.values())
             uuid_to = {u: nm for u, nm in uuid_to.items() if nm[0] == options.nodename}
             if not uuid_to:
                 continue
@@ -1545,7 +1545,7 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
                     except (TypeError, ValueError):
                         pass
         rows = []  # (node, minor_sort, ts, csv_row)
-        for uuid, (node, minor) in uuid_to.items():
+        for uuid, (node, minor, model) in uuid_to.items():
             for stamp in sorted(series[uuid]):
                 cells = series[uuid][stamp]
                 # Recomputed per timestamp, so a ratio like GMEM% tracks growth.
@@ -1555,7 +1555,7 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
                 rows.append((node, gpu_minor_key(minor), stamp,
                              [jid, record.user, stamp,
                               time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
-                              node, minor]
+                              node, minor, model]
                              + [format_number(cells.get(h), d, missing="")
                                 for _k, h, d in columns]))
         for _, _, _, row in sorted(rows, key=lambda x: (x[0], x[1], x[2])):
@@ -1625,16 +1625,28 @@ def classify_metrics(columns) -> List[str]:
     return [c for c in columns if c.endswith("%") and c not in CLASSIFY_SKIP]
 
 
-def classify(values: Dict[str, float]) -> str:
-    """The category for one unit's mean values: the band of its *best* metric.
+_VERDICT_ORDER = {name: i for i, (name, _label, _colour) in enumerate(CATEGORIES)}
 
-    Power plays no part. It is graded on its own terms elsewhere -- in watts, against a
-    floor that depends on the card, since idle draw runs from 27 W on a V100 to 165 W
-    on an RTX PRO 6000. Folding a quantity with a per-model scale into a rule expressed
-    in percent could only be done by picking one number for every architecture, which
-    is the thing that does not work.
+
+def classify(values: Dict[str, float], power: Optional[float] = None,
+            floor: Optional[float] = None) -> str:
+    """The category for one unit's mean values: the band of its *best* metric,
+    capped by sustained idle power.
+
+    The percentage vote is charitable on purpose -- one busy measure is enough to call
+    a unit not-idle. But a duty-cycle-style metric can read busy while the card draws
+    idle watts (a kernel that touches the GPU without loading it), so when the unit's
+    own mean POWER_W sits below its floor -- graded per GPU model, since idle draw runs
+    from 27 W on a V100 to 165 W on an RTX PRO 6000 -- the verdict is capped at
+    "inefficient" no matter how high the percentage metrics claim to be. The cap only
+    ever pushes a verdict down: a unit already "wasteful" stays "wasteful". ``power``/
+    ``floor`` default to ``None``, which skips the cap entirely -- the original,
+    power-blind verdict.
     """
-    return band_of(max(values.values()) if values else 0.0)
+    verdict = band_of(max(values.values()) if values else 0.0)
+    if power is not None and floor is not None and power < floor:
+        return CATEGORIES[min(_VERDICT_ORDER[verdict], _VERDICT_ORDER["inefficient"])][0]
+    return verdict
 TS_STAT_TAIL = ("METRIC", "N", "MIN", "MEAN", "MAX", "LAST")
 
 
@@ -1690,11 +1702,13 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     for key, found in groups.items():
         # Every metric is averaged, but only the judged ones vote. Keeping the two
         # apart is what lets the CSV report GMEM% and POWER_W without letting them
-        # decide the label.
+        # decide the label -- POWER_W still caps it, via classify()'s floor check.
         means = {m: sum(v) / len(v) for m, v in found["values"].items()}
         judged = {m: v for m, v in means.items() if m in metrics}
         power = means.get("POWER_W")
-        verdicts.append((classify(judged), key, found, means, power))
+        model = job_model({k: {MODEL_KEY: m} for k, m in found["models"].items()})
+        floor = options.thresholds.floor_for(model) if options.thresholds is not None else None
+        verdicts.append((classify(judged, power, floor), key, found, means, power))
 
     if options.csv:
         # jobid, user, every metric the series carried, then the label. Wider than
@@ -1762,10 +1776,13 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
 
 
 def pool_samples(rows: List[dict], metrics: List[str], level: str) -> Dict[tuple, dict]:
-    """``{key: {values, nodes, gpus, user}}``, pooling the series at ``level``.
+    """``{key: {values, nodes, gpus, user, models}}``, pooling the series at ``level``.
 
     Shared by the stats table and the classification so the two cannot disagree about
-    what a job's mean is: one grouping, read two ways.
+    what a job's mean is: one grouping, read two ways. ``models`` is keyed by
+    ``(node, gpu)``, the same shape :func:`job_model` already reads elsewhere, so a
+    classify verdict can resolve the group's POWER_W floor the same way the table
+    views do.
     """
     groups: Dict[tuple, dict] = {}
     for row in rows:
@@ -1773,9 +1790,12 @@ def pool_samples(rows: List[dict], metrics: List[str], level: str) -> Dict[tuple
         gpu = row.get("GPU", "?")
         key = {"gpu": (jobid, node, gpu), "node": (jobid, node)}.get(level, (jobid,))
         found = groups.setdefault(key, {"values": {}, "nodes": set(), "gpus": set(),
-                                        "user": row.get("USER", "?")})
+                                        "user": row.get("USER", "?"), "models": {}})
         found["nodes"].add(node)
         found["gpus"].add((node, gpu))
+        model = row.get("MODEL")
+        if model:
+            found["models"][(node, gpu)] = model
         for metric in metrics:
             value = cell_value(row.get(metric))
             if value is not None:
@@ -1886,7 +1906,7 @@ def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]
             writer.writerow(
                 [job["jobid"], job.get("user", "?"), epoch,
                  time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(epoch)),
-                 gpu.host, gpu.csv_id]
+                 gpu.host, gpu.csv_id, gpu.model]
                 + [format_number(values.get(key), dec, missing="")
                    for key, _h, dec in columns])
 
