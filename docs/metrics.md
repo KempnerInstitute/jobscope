@@ -336,7 +336,11 @@ carries the same information in the form anyone acts on, and the band cells were
 reduced to job counts for the same reason. Both survive in the CSV.
 
 One cutoff, `[thresholds] red`, covers every percentage metric: red below it,
-yellow below twice it, green above. Uniform on purpose -- the per-metric values it
+yellow below twice it, green above. `POWER_W` is the exception twice over: it is
+graded in watts, and against a *floor*, so it has only two bands -- below is idle,
+at or above is not. Doubling a floor would be meaningless, and on a card whose floor
+is 330 W it would put green beyond the hardware's maximum. Uniform on purpose -- the
+per-metric values it
 replaced were never calibrated against each other, and carrying a different
 threshold for each row is what made the old cutoff column confusing. `POWER_W` has
 its own knob because watts are not a percentage. A three-line legend above the table

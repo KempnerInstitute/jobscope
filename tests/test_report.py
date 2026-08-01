@@ -2148,12 +2148,12 @@ RTX = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
     # An idle RTX (165 W) draws more than a working V100 (60 W): the same reading
     # means opposite things, which is the whole reason the floor is per card.
     (RTX, 165, "red"),                          # under its 330 W floor
-    (RTX, 450, "yellow"),                       # over the floor, under twice it
+    (RTX, 450, "green"),                        # over it -- and no yellow to fall in
     (RTX, 700, "green"),
     ("NVIDIA H100 80GB HBM3", 118, "red"),      # p90 idle for this card, floor 130
     ("NVIDIA H100 80GB HBM3", 300, "green"),
     ("Tesla V100-PCIE-32GB", 30, "red"),        # under its 45 W floor
-    ("Tesla V100-PCIE-32GB", 60, "yellow"),     # busy, and under every other floor
+    ("Tesla V100-PCIE-32GB", 60, "green"),      # busy, and under every other floor
 ])
 def test_power_is_graded_against_its_own_card(model, watts, band):
     assert report.cell_band(_per_model_options(), "POWER_W", watts, model) == band
@@ -2168,7 +2168,7 @@ def test_the_same_reading_bands_differently_per_card():
 
 def test_an_unknown_model_uses_the_global_floor():
     options = _per_model_options()
-    assert report.cell_band(options, "POWER_W", 118, "") == "yellow"     # 100 W global
+    assert report.cell_band(options, "POWER_W", 118, "") == "green"      # 100 W global
     assert report.cell_band(options, "POWER_W", 118, "NVIDIA H100 80GB HBM3") == "red"
 
 

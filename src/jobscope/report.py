@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from .blob import GIB, blob_capacity, blob_detail, blob_metrics
-from .config import DEFAULT_THRESHOLDS, Thresholds, grade_band
+from .config import DEFAULT_THRESHOLDS, Thresholds, floor_band
 from .dcgm import (
     ALL_SPECS,
     DCGM_BLOB_HEADERS,
@@ -260,7 +260,7 @@ def cell_band(options: "RenderOptions", header: str, cell, model: str = "") -> s
     if value is None:
         return ""
     if header == "POWER_W" and model:
-        return grade_band(value, options.thresholds.floor_for(model))
+        return floor_band(value, options.thresholds.floor_for(model))
     return options.thresholds.grade(header, value)
 
 
@@ -582,7 +582,7 @@ class EfficiencyTally:
         # and POWER_W's cutoff is a property of the card rather than of the column.
         floor = self.cutoff(model)
         band = ("" if value is None or floor is None
-                else grade_band(value, floor)) if self.absolute \
+                else floor_band(value, floor)) if self.absolute \
             else self.thresholds.grade(self.header, value)
         if not band or weight <= 0:
             # Ungraded (no measurement) or unweighable: counting it would either
@@ -1165,7 +1165,7 @@ class SummaryRenderer:
     # difference between someone to talk to and a habit.
     STAT_LEGEND = (
         "red below %(red)g%%, yellow below %(yellow)g%%, green above;"
-        " POWER_W red below %(power)g W. Counts are jobs.",
+        " POWER_W red below %(power)g W, green above, no yellow. Counts are jobs.",
         "IDLE is resource-time that went unused -- for POWER_W, the time spent under"
         " that floor.",
         "bands catch pathological jobs, IDLE measures efficiency:"

@@ -32,7 +32,7 @@ JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_
                                             ... 12 more rows ...
 ------------------------------------------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              12     9            80     3       64.9     14.7    0.3      9.5     455
-  red below 10%, yellow below 20%, green above; POWER_W red below 100 W. Counts are jobs.
+  red below 10%, yellow below 20%, green above; POWER_W red below 100 W, green above, no yellow. Counts are jobs.
   IDLE is resource-time that went unused -- for POWER_W, the time spent under that floor.
   bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
 METRIC   IDLE            RED  YELLOW  GREEN
@@ -283,7 +283,7 @@ After the job listing come three numbered sections:
 1. Summary by metric
 ------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              10     6            75   49     66.0  20.6  18.1  14.5
-  red below 10%, yellow below 20%, green above; POWER_W red below 100 W. Counts are jobs.
+  red below 10%, yellow below 20%, green above; POWER_W red below 100 W, green above, no yellow. Counts are jobs.
   IDLE is resource-time that went unused -- for POWER_W, the time spent under that floor.
   bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
 METRIC   IDLE           RED  YELLOW  GREEN

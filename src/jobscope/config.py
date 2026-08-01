@@ -91,7 +91,22 @@ class Thresholds:
         retunes ``[thresholds]`` moves both at once.
         """
         red = None if value is None else self.cutoff(header)
-        return "" if red is None else grade_band(value, red)
+        if red is None:
+            return ""
+        # POWER_W is graded against a floor rather than a target, so it has two bands.
+        return floor_band(value, red) if header == "POWER_W" else grade_band(value, red)
+
+
+def floor_band(value: float, floor: float) -> str:
+    """Band for a metric graded against an absolute floor: red below, green at or above.
+
+    No yellow, deliberately. Yellow means "close to the cutoff", which for a percentage
+    is everything up to twice it -- reasonable when red is 10%. An absolute floor has
+    no such headroom: at a 330 W floor, twice is 660 W and an RTX PRO 6000 tops out
+    around 480, so every one of those cards would read red or yellow forever, idle or
+    flat out. A floor asserts one thing -- below this is idle -- so it answers one.
+    """
+    return "green" if value >= floor else "red"
 
 
 def grade_band(value: float, red: float) -> str:

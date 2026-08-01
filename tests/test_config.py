@@ -8,6 +8,7 @@ from jobscope.config import (
     Defaults,
     Thresholds,
     example_config_text,
+    floor_band,
     grade_band,
     load_config,
     resolve_prometheus,
@@ -185,6 +186,21 @@ def test_one_cutoff_covers_every_percent_metric():
     assert t.cutoff("RUNTIME") is None       # not graded
 
 
+def test_power_has_no_yellow_band():
+    """A floor asserts one thing -- below this is idle -- so it answers one.
+
+    Yellow means "close to the cutoff", which for a percentage is up to twice it.
+    An absolute floor has no such headroom: at 330 W, twice is 660 W and the card
+    that floor exists for tops out near 480, so it could never read green.
+    """
+    t = Thresholds(red=10, power_w=100, power_w_by_model={"RTX": 330})
+    assert {t.grade("POWER_W", w) for w in (0, 99, 135, 289, 700)} == {"red", "green"}
+    assert t.grade("POWER_W", 100) == "green"     # at the floor, not below it
+    assert floor_band(480, 330) == "green"        # the case that had no green at all
+    # Percentages keep all three: there red is a target to clear, not a floor.
+    assert t.grade("GPU%", 15) == "yellow"
+
+
 def test_power_is_graded_in_watts_not_percent():
     """The one graded column that is not a percentage.
 
@@ -193,7 +209,6 @@ def test_power_is_graded_in_watts_not_percent():
     """
     t = Thresholds(red=10, power_w=100)
     assert t.grade("POWER_W", 73) == "red"        # measured idle floor
-    assert t.grade("POWER_W", 135) == "yellow"    # below twice the floor
     assert t.grade("POWER_W", 289) == "green"     # the measured median
     # Without its own cutoff it would fall to `default`, i.e. 15 *watts*, and
     # nothing is ever below that -- every job would read green.
