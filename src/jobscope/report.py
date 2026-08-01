@@ -11,11 +11,13 @@ import sys
 import textwrap
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from .blob import GIB, blob_capacity, blob_detail, blob_metrics
 from .config import DEFAULT_THRESHOLDS, Thresholds
+from .cpu import host_series
 from .dcgm import (
     ALL_SPECS,
     DCGM_BLOB_HEADERS,
@@ -35,6 +37,7 @@ from .dcgm import (
 from .diagnose import LEGEND, diagnose_dcgm
 from .errors import JobscopeError
 from .live import Gpu, LiveJob, build_columns, job_sort_key, range_window
+from .live_blob import host_stats, host_stats_many
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, Selection, format_window
 
@@ -1565,6 +1568,79 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         raise no_such_node(options.nodename, nodes_seen)
 
 
+CPU_TS_HEADERS = ("CPU%", "MEM%")
+
+
+def cpu_timeseries(jobids: List[str], records: Dict[str, JobRecord],
+                   client: PrometheusClient, timeout: Optional[float],
+                   options: RenderOptions, step: Optional[int] = None, out=None) -> None:
+    """Emit the raw per-scrape CPU%/MEM% cgroup series over the job's window as CSV.
+
+    One row per node/timestamp -- there is no GPU dimension, so GPU/MODEL are left
+    blank, keeping the schema :func:`dcgm_timeseries` writes so `jobscope plot`/
+    `--classify`/`--stats-per-job` need no changes to read it. The per-host
+    cpus/total_memory divisors come straight from the job's own stored blob
+    (``record.stats``), which a finished job already has -- no extra Prometheus
+    query needed to resolve them.
+    """
+    out = out or sys.stdout
+    writer = csv.writer(out, lineterminator="\n")
+    sampling_period = client.sampling_period
+    nodes_seen, matched, wrote_header = set(), False, False
+
+    def write(row) -> None:
+        nonlocal wrote_header
+        if options.header and not wrote_header:
+            writer.writerow(TS_ID_COLUMNS + list(CPU_TS_HEADERS))
+            wrote_header = True
+        writer.writerow(row)
+
+    for jid in jobids:
+        record = records.get(jid)
+        nodes = (record.stats or {}).get("nodes") if record else None
+        if not nodes and record and record.jobid_raw and record.duration:
+            # A record here is usually a finished job with its blob already decoded,
+            # but an explicit -j ID can also return a job that is still RUNNING (no
+            # blob yet) -- rebuild just the two divisors from Prometheus, the same
+            # way live_blob.synthesize_stats() rebuilds the whole blob for the live
+            # view (CPU-seconds/RSS themselves still come from our own range query
+            # below, since they need per-timestamp granularity this does not give).
+            nodes = host_stats(record.jobid_raw, record.duration, record.end, client, timeout)
+        if not nodes:
+            print("warn: job %s has no CPU/memory records" % jid, file=sys.stderr)
+            continue
+        cpus_by_host = {h: n.get("cpus") for h, n in nodes.items() if n.get("cpus")}
+        mem_by_host = {h: n.get("total_memory") for h, n in nodes.items()
+                       if n.get("total_memory")}
+        if options.nodename:
+            nodes_seen.update(cpus_by_host)
+            if options.nodename not in cpus_by_host:
+                continue
+            cpus_by_host = {options.nodename: cpus_by_host[options.nodename]}
+            mem_by_host = {options.nodename: mem_by_host[options.nodename]} \
+                if options.nodename in mem_by_host else {}
+            matched = True
+        start, span = range_window(record.start, record.end, options.window,
+                                   sampling_period, step)
+        series = host_series(record.jobid_raw, cpus_by_host, mem_by_host,
+                             start, record.end, span, sampling_period, client, timeout)
+        rows = []  # (host, ts, csv_row)
+        for host in cpus_by_host:
+            for stamp in sorted(series.get(host, {})):
+                cells = series[host][stamp]
+                rows.append((host, stamp,
+                             [jid, record.user, stamp,
+                              time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
+                              host, "", ""]
+                             + [format_number(cells.get(h), 0, missing="")
+                                for h in CPU_TS_HEADERS]))
+        for _, _, row in sorted(rows, key=lambda x: (x[0], x[1])):
+            write(row)
+
+    if options.nodename and not matched:
+        raise no_such_node(options.nodename, nodes_seen)
+
+
 # How each spec's window reducer reads in the --describe output.
 _REDUCER_NAME = {"avg": "mean", "max": "peak", "delta": "delta"}
 
@@ -1615,9 +1691,10 @@ def band_of(best: float) -> str:
         return "average"
     return "good"
 
-# Occupancy of memory is not use of a GPU -- a job can reserve 80GB and compute
-# nothing -- so GMEM% is excluded from the verdict. It still prints.
-CLASSIFY_SKIP = ("GMEM%",)
+# Occupancy of memory is not use of a resource -- a job can reserve 80GB (GPU or
+# host) and compute nothing -- so neither memory column votes on the verdict. Both
+# still print.
+CLASSIFY_SKIP = ("GMEM%", "MEM%")
 
 
 def classify_metrics(columns) -> List[str]:
@@ -1909,6 +1986,94 @@ def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]
                  gpu.host, gpu.csv_id, gpu.model]
                 + [format_number(values.get(key), dec, missing="")
                    for key, _h, dec in columns])
+
+
+def live_cpu_timeseries(jobs: Dict[int, LiveJob], client: PrometheusClient,
+                        timeout: Optional[float], options: RenderOptions,
+                        workers: int, step: Optional[int] = None, out=None) -> None:
+    """Emit the raw per-scrape CPU%/MEM% cgroup series for running jobs as CSV.
+
+    Mirrors :func:`cpu_timeseries`, but for jobs with no stored blob yet: the
+    per-host cpus/total_memory divisors come from one batched
+    :func:`jobscope.live_blob.host_stats_many` call across the whole selection --
+    the same one the summary/detail views use to reconstruct CPU%/MEM% -- and the
+    per-job range queries run concurrently, the same as
+    :func:`jobscope.live.collect_timeseries` does for the GPU/DCGM case.
+    """
+    out = out or sys.stdout
+    writer = csv.writer(out, lineterminator="\n")
+    sampling_period = client.sampling_period
+    at = int(time.time())
+    elapsed_by_job = {raw: job["elapsed_seconds"] for raw, job in jobs.items()
+                      if (job.get("elapsed_seconds") or 0) > 0}
+    divisors = host_stats_many(elapsed_by_job, at, client, timeout)
+
+    tasks = []
+    nodes_seen, matched = set(), False
+    for raw_jobid, job in jobs.items():
+        start, elapsed = job.get("start_epoch"), job.get("elapsed_seconds")
+        if not start or not elapsed or elapsed <= 0:
+            print("note: skipping CPU/MEM series for job %s: unknown runtime" % job["jobid"],
+                  file=sys.stderr)
+            continue
+        by_host = divisors.get(raw_jobid, {})
+        cpus_by_host = {h: n.get("cpus") for h, n in by_host.items() if n.get("cpus")}
+        mem_by_host = {h: n.get("total_memory") for h, n in by_host.items()
+                       if n.get("total_memory")}
+        if not cpus_by_host:
+            print("warn: job %s has no CPU/memory records" % job["jobid"], file=sys.stderr)
+            continue
+        if options.nodename:
+            nodes_seen.update(cpus_by_host)
+            if options.nodename not in cpus_by_host:
+                continue
+            cpus_by_host = {options.nodename: cpus_by_host[options.nodename]}
+            mem_by_host = {options.nodename: mem_by_host[options.nodename]} \
+                if options.nodename in mem_by_host else {}
+            matched = True
+        end = start + elapsed
+        begin, span = range_window(start, end, options.window, sampling_period, step)
+        tasks.append((raw_jobid, cpus_by_host, mem_by_host, begin, end, span))
+    if not tasks:
+        if options.nodename and not matched:
+            raise no_such_node(options.nodename, nodes_seen)
+        return
+
+    def run(task):
+        raw_jobid, cpus_by_host, mem_by_host, begin, end, span = task
+        return raw_jobid, host_series(str(raw_jobid), cpus_by_host, mem_by_host,
+                                      begin, end, span, sampling_period, client, timeout)
+
+    results: Dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(tasks)))) as pool:
+        for raw_jobid, series in pool.map(run, tasks):
+            results[raw_jobid] = series
+    by_jobid = {raw_jobid: (cpus_by_host, mem_by_host)
+               for raw_jobid, cpus_by_host, mem_by_host, _b, _e, _s in tasks}
+
+    wrote_header = False
+    for raw_jobid in sorted(results, key=lambda j: job_sort_key(jobs[j])):
+        job = jobs[raw_jobid]
+        cpus_by_host, _mem_by_host = by_jobid[raw_jobid]
+        series = results[raw_jobid]
+        rows = []  # (host, ts, csv_row)
+        for host in cpus_by_host:
+            for stamp in sorted(series.get(host, {})):
+                cells = series[host][stamp]
+                rows.append((host, stamp,
+                             [job["jobid"], job.get("user", "?"), stamp,
+                              time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
+                              host, "", ""]
+                             + [format_number(cells.get(h), 0, missing="")
+                                for h in CPU_TS_HEADERS]))
+        for _, _, row in sorted(rows, key=lambda x: (x[0], x[1])):
+            if options.header and not wrote_header:
+                writer.writerow(TS_ID_COLUMNS + list(CPU_TS_HEADERS))
+                wrote_header = True
+            writer.writerow(row)
+
+    if options.nodename and not matched:
+        raise no_such_node(options.nodename, nodes_seen)
 
 
 def describe(diagnose_on: bool = False, out=None) -> None:

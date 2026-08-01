@@ -368,9 +368,11 @@ def render_line(columns, rows, args, plt, Console):
         ncols = min(want, fit)
         panel = (available - GRID_GAP * (ncols - 1)) // ncols
         # No y-label either: the row heading above already names the metric, and the
-        # panel is narrow enough that every column of it counts.
+        # panel is narrow enough that every column of it counts. A GPU-less series
+        # (e.g. the CPU/MEM cgroup series) has no real value here -- label the node
+        # instead of a bare "gpu".
         blocks = [build([(None, gcolor[g], gpus[(n, g)], metric)],
-                        "gpu%s" % g, "", height, size=panel)
+                        n if not g or g == "?" else "gpu%s" % g, "", height, size=panel)
                   for n, g in gpu_keys]
         print(metric)
         for line in in_columns(blocks, columns=ncols, gap=GRID_GAP, available=available):

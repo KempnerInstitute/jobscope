@@ -38,7 +38,9 @@ from .prometheus import PrometheusClient, client_from_config
 from .report import (
     RenderOptions,
     context_pairs,
+    cpu_timeseries,
     dcgm_timeseries,
+    live_cpu_timeseries,
     live_timeseries,
     no_such_node,
 )
@@ -311,6 +313,9 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
             _report_no_running(selection)
             return
         client = client_from_config(cfg, timeout)
+        if options.view == "cpu":
+            live_cpu_timeseries(jobs, client, timeout, options, workers, step, out=out)
+            return
         gpus = discover_gpus(client, jobs, timeout)
         if options.nodename:
             # Filter before collect_timeseries, so the other nodes' GPUs are never
@@ -331,4 +336,7 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
         return
     records = fetch(jobids, timeout)
     client = client_from_config(cfg, timeout)
+    if options.view == "cpu":
+        cpu_timeseries(jobids, records, client, timeout, options, step=step, out=out)
+        return
     dcgm_timeseries(jobids, records, specs, client, timeout, options, step=step, out=out)

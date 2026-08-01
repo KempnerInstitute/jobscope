@@ -699,13 +699,16 @@ def handle_report(args) -> None:
         color=_want_color(args), thresholds=cfg.thresholds)
 
     if args.ts:
-        # The series is per-GPU per-scrape and carries no host or advisory columns,
-        # so say what is being dropped rather than ignoring the flags.
-        for flag, on in (("--cpu", view == "cpu"), ("--gpu", view == "gpu"),
-                         ("--diagnose", args.diagnose)):
+        # --cpu switches --ts to the CPU/MEM cgroup series instead of GPU/DCGM, so
+        # it is no longer a dropped flag; --gpu and --diagnose still are, and the
+        # extended DCGM catalog has nothing to widen on a CPU series.
+        for flag, on in (("--gpu", view == "gpu"), ("--diagnose", args.diagnose)):
             if on:
-                print("note: %s does not apply to --ts (a per-GPU metric series)" % flag,
+                print("note: %s does not apply to --ts (a per-scrape metric series)" % flag,
                       file=sys.stderr)
+        if view == "cpu" and args.dcgm:
+            print("note: --dcgm/--ext does not apply to --cpu --ts (no DCGM catalog to widen)",
+                  file=sys.stderr)
         if not (args.plot_ts or args.stats or args.classify):
             emit_timeseries(request, cfg, timeout, workers, specs, args.step, options)
             return

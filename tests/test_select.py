@@ -6,12 +6,14 @@ import time
 from jobscope import select as select_mod
 from jobscope.dcgm import DEFAULT_SPECS
 from jobscope.sacct import TIMESTAMP_FORMAT
+from jobscope.report import RenderOptions
 from jobscope.select import (
     BLOB_SPECS,
     FINISHED,
     JOBIDS,
     RUNNING,
     Request,
+    emit_timeseries,
     resolve,
     sacct_selection,
 )
@@ -132,6 +134,60 @@ def test_explicit_jobids_do_not_stream(monkeypatch, cpu_record):
     selected = resolve(Request(mode=JOBIDS, jobids=["111"], user="alice"),
                        _cfg(), None, 1, None)
     assert [ids for ids, _r, _d in selected.chunks] == [["111"]]
+
+
+def test_emit_timeseries_dispatches_to_cpu_for_a_finished_request(monkeypatch, gpu_record):
+    """--cpu --ts on a historical selection must skip the GPU/DCGM emitter."""
+    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: (["100"], "x"))
+    monkeypatch.setattr(select_mod, "fetch", lambda i, t: {"100": gpu_record})
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: object())
+    calls = []
+    monkeypatch.setattr(select_mod, "cpu_timeseries",
+                        lambda *a, **k: calls.append(("cpu", a, k)))
+
+    def boom(*a, **k):
+        raise AssertionError("the GPU/DCGM emitter must not run for a --cpu --ts request")
+    monkeypatch.setattr(select_mod, "dcgm_timeseries", boom)
+
+    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+                    None, RenderOptions(view="cpu"))
+    assert len(calls) == 1
+
+
+def test_emit_timeseries_still_dispatches_gpu_when_not_cpu_view(monkeypatch, gpu_record):
+    """The existing GPU/DCGM path must stay untouched for every other view."""
+    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: (["100"], "x"))
+    monkeypatch.setattr(select_mod, "fetch", lambda i, t: {"100": gpu_record})
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: object())
+    calls = []
+    monkeypatch.setattr(select_mod, "dcgm_timeseries",
+                        lambda *a, **k: calls.append(("dcgm", a, k)))
+
+    def boom(*a, **k):
+        raise AssertionError("the CPU emitter must not run for a plain --ts request")
+    monkeypatch.setattr(select_mod, "cpu_timeseries", boom)
+
+    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+                    None, RenderOptions(view="all"))
+    assert len(calls) == 1
+
+
+def test_emit_timeseries_dispatches_to_cpu_for_a_running_request(monkeypatch):
+    """--cpu --ts on the live selection must skip GPU discovery entirely."""
+    monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, t: dict(JOBS))
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: object())
+    calls = []
+    monkeypatch.setattr(select_mod, "live_cpu_timeseries",
+                        lambda *a, **k: calls.append(("live_cpu", a, k)))
+
+    def boom(*a, **k):
+        raise AssertionError("GPU discovery must not run for a --cpu --ts request")
+    monkeypatch.setattr(select_mod, "discover_gpus", boom)
+    monkeypatch.setattr(select_mod, "collect_timeseries", boom)
+
+    emit_timeseries(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+                    None, RenderOptions(view="cpu"))
+    assert len(calls) == 1
 
 
 def test_no_matching_jobs_returns_none(monkeypatch, capsys):

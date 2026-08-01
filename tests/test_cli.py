@@ -949,6 +949,30 @@ def test_plot_ts_charts_every_metric_only_with_dcgm(monkeypatch, capsys):
     assert "ENGINE%" in capsys.readouterr().out
 
 
+def test_cpu_ts_no_longer_says_it_does_not_apply(monkeypatch, capsys):
+    """--cpu now switches --ts to the CPU/MEM series instead of being dropped."""
+    _fake_ts(monkeypatch, "")
+    main(["-j", "1", "--cpu", "--ts"])
+    assert "does not apply" not in capsys.readouterr().err
+
+
+def test_gpu_and_diagnose_still_do_not_apply_to_ts(monkeypatch, capsys):
+    _fake_ts(monkeypatch, "")
+    main(["-j", "1", "--gpu", "--ts"])
+    err = capsys.readouterr().err
+    assert "--gpu" in err and "does not apply" in err
+    main(["-j", "1", "--diagnose", "--ts"])
+    err = capsys.readouterr().err
+    assert "--diagnose" in err and "does not apply" in err
+
+
+def test_dcgm_does_not_apply_to_cpu_ts(monkeypatch, capsys):
+    _fake_ts(monkeypatch, "")
+    main(["-j", "1", "--cpu", "--dcgm", "--ts"])
+    err = capsys.readouterr().err
+    assert "--dcgm/--ext does not apply to --cpu --ts" in err
+
+
 def test_plot_ts_refuses_several_jobs(monkeypatch, capsys):
     """Series key on (NODE, GPU) alone, so two jobs on one GPU would become one line."""
     _fake_ts(monkeypatch, _ts_rows(jobids=("100", "101")))

@@ -28,7 +28,7 @@ from jobscope.live import (
     timeseries_step,
 )
 from jobscope.live_blob import host_stats_many, synthesize_stats
-from jobscope.report import RenderOptions, live_timeseries
+from jobscope.report import RenderOptions, live_cpu_timeseries, live_timeseries
 from jobscope.sacct import JobRecord
 
 # squeue -o "%A|%i|%u|%N|%g|%j|%b|%C|%S": raw id, display id, user, nodelist,
@@ -443,6 +443,60 @@ def test_live_timeseries_uses_the_schema_plot_reads():
     assert lines[1].startswith("100_6,alice,1000,")   # USER names whose job it is
     # MEM% is recomputed per timestamp, so it tracks memory growth: 10/80 = 12.5.
     assert lines[1].endswith("12.5")
+
+
+def test_live_cpu_timeseries_uses_the_schema_plot_reads():
+    """The divisors come from one host_stats_many call, the samples from range
+    queries -- the schema still has to match dcgm_timeseries'/live_timeseries'."""
+    class Client:
+        sampling_period = 60
+
+        def query(self, query, at, timeout=None):
+            # host_stats_many resolving the (mostly-constant) cpus/total_memory.
+            if "cgroup_cpus" in query:
+                return [{"metric": {"jobid": "100", "host": "node01:9100"}, "value": [at, "4"]}]
+            if "cgroup_memory_total_bytes" in query:
+                return [{"metric": {"jobid": "100", "host": "node01:9100"},
+                         "value": [at, str(8 * GIB)]}]
+            return []
+
+        def query_range(self, query, start, end, step, timeout=None):
+            if "cgroup_cpu_total_seconds" in query:
+                return [{"metric": {"host": "node01:9100"}, "values": [[1000, "2"]]}]
+            if "cgroup_memory_rss_bytes" in query:
+                return [{"metric": {"host": "node01:9100"}, "values": [[1000, str(4 * GIB)]]}]
+            return []
+
+    jobs = {100: {"jobid": "100_6", "user": "alice", "start_epoch": 940, "elapsed_seconds": 60}}
+    out = io.StringIO()
+    live_cpu_timeseries(jobs, Client(), None, RenderOptions(), workers=1, out=out)
+    lines = out.getvalue().splitlines()
+    assert lines[0] == "JOBID,USER,EPOCH,TIME,NODE,GPU,MODEL,CPU%,MEM%"
+    assert lines[1].startswith("100_6,alice,1000,")
+    # CPU% = 100*2/4 = 50; MEM% = 100*(4 GiB)/(8 GiB) = 50.
+    assert lines[1].split(",")[-2:] == ["50", "50"]
+
+
+def test_live_cpu_timeseries_warns_and_skips_a_job_with_no_divisor():
+    class Client:
+        sampling_period = 60
+
+        def query(self, query, at, timeout=None):
+            return []
+
+        def query_range(self, query, start, end, step, timeout=None):
+            return []
+
+    jobs = {100: {"jobid": "100", "user": "alice", "start_epoch": 940, "elapsed_seconds": 60}}
+    out, err = io.StringIO(), io.StringIO()
+    import sys as _sys
+    old_stderr, _sys.stderr = _sys.stderr, err
+    try:
+        live_cpu_timeseries(jobs, Client(), None, RenderOptions(), workers=1, out=out)
+    finally:
+        _sys.stderr = old_stderr
+    assert out.getvalue() == ""
+    assert "no CPU/memory records" in err.getvalue()
 
 
 def test_live_timeseries_keeps_mig_slices_distinct():

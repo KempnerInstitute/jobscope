@@ -249,6 +249,69 @@ def test_dcgm_timeseries_csv(gpu_record):
     assert rows[0]["EPOCH"] == "1000"
 
 
+class _CpuTimeseriesClient:
+    sampling_period = 60
+
+    def query_range(self, query, start, end, step, timeout=None):
+        if "cgroup_cpu_total_seconds" in query:
+            return [{"metric": {"host": "node02:9100"}, "values": [[1000, "0.5"], [1060, "1.0"]]}]
+        if "cgroup_memory_rss_bytes" in query:
+            return [{"metric": {"host": "node02:9100"},
+                     "values": [[1000, str(2 * GIB)], [1060, str(4 * GIB)]]}]
+        return []
+
+
+def test_cpu_timeseries_csv(cpu_record):
+    """CPU%/MEM% over time, using the job's own stored blob for the divisors.
+
+    cpu_record (conftest.py) is a CPU-only job on node02, cpus=1, total_memory=8GiB:
+    0.5/1.0 cores -> 50%/100% CPU, 2/4 GiB RSS out of 8 GiB -> 25%/50% MEM.
+    """
+    options = RenderOptions(view="cpu", header=True, csv=True)
+    text = _render(report.cpu_timeseries, ["200"], {"200": cpu_record},
+                   _CpuTimeseriesClient(), None, options)
+    columns, rows = plot.parse_csv(io.StringIO(text))
+    assert columns == ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU", "MODEL", "CPU%", "MEM%"]
+    assert rows[0]["NODE"] == "node02" and rows[0]["GPU"] == "" and rows[0]["MODEL"] == ""
+    assert [r["CPU%"] for r in rows] == ["50", "100"]
+    assert [r["MEM%"] for r in rows] == ["25", "50"]
+
+
+def test_cpu_timeseries_falls_back_to_prometheus_for_a_still_running_job():
+    """An explicit -j ID can select a job whose blob is empty because it has not
+    finished yet -- the divisors then come from Prometheus, like the live view."""
+    class _Client(_CpuTimeseriesClient):
+        def query(self, query, at, timeout=None):
+            return [{"metric": {"host": "node02:9100"}, "value": [at, "1"]}] if "cpus" in query \
+                else [{"metric": {"host": "node02:9100"}, "value": [at, str(8 * GIB)]}]
+
+    record = JobRecord(
+        jobid="300", state="RUNNING", name="live", runtime="00:30:00", nodes="1", gpus=0,
+        stats={}, start=2000, end=2100, duration=100, jobid_raw="300", cluster="odyssey",
+        user="carol")
+    options = RenderOptions(view="cpu", header=True, csv=True)
+    text = _render(report.cpu_timeseries, ["300"], {"300": record}, _Client(), None, options)
+    columns, rows = plot.parse_csv(io.StringIO(text))
+    assert rows and [r["CPU%"] for r in rows] == ["50", "100"]
+
+
+def test_cpu_timeseries_warns_and_skips_a_job_with_no_cpu_records():
+    import sys as _sys
+    record = JobRecord(jobid="400", state="COMPLETED", name="old", runtime="00:01:00",
+                       nodes="1", gpus=0, stats={}, start=1, end=2, duration=1,
+                       jobid_raw="400", cluster="odyssey", user="dave")
+    options = RenderOptions(view="cpu", header=True, csv=True)
+    err = io.StringIO()
+    old_stderr, _sys.stderr = _sys.stderr, err
+    try:
+        text = _render(report.cpu_timeseries, ["400"], {"400": record},
+                      _CpuTimeseriesClient(), None, options)
+    finally:
+        _sys.stderr = old_stderr
+    assert text == ""
+    assert "no CPU/memory records" in err.getvalue()
+
+
 def _render_stream(renderer_cls, context, options, chunks):
     out = io.StringIO()
     renderer = renderer_cls(context, options, out)
@@ -2073,6 +2136,12 @@ def test_gmem_takes_no_part_in_the_verdict():
     assert "GMEM%" not in report.classify_metrics(
         ["JOBID", "GPU%", "GMEM%", "SM_ACT%", "POWER_W", "GMEM_GB"])
     assert report.classify_metrics(["GPU%", "GMEM%", "SM_ACT%"]) == ["GPU%", "SM_ACT%"]
+
+
+def test_host_mem_takes_no_part_in_the_verdict_either():
+    """Reserving host RAM and not using it is the same non-argument as GMEM%."""
+    assert "MEM%" not in report.classify_metrics(["JOBID", "CPU%", "MEM%"])
+    assert report.classify_metrics(["CPU%", "MEM%"]) == ["CPU%"]
 
 
 def _classify_rows(jobs):
