@@ -715,6 +715,12 @@ jobscope -j 36441613 --nodename holygpu8a10501 --ts 1h        # 244 rows, not 56
 jobscope -j 36441613 --nodename holygpu8a10501 --plot_ts 30m
 ```
 
+The window lands on the run's own sample grid, so `--ts 1h` returns *exactly* the rows
+a full `--ts` would have -- fetching a window and slicing a whole series agree. That
+alignment is not free: Prometheus anchors a range query's points at its start, so an
+unaligned window relabels every sample, and because a running job's end is "now" its
+grid would drift with the clock between invocations.
+
 It narrows the range *queries*, not the rows afterwards, so an hour of a day-long job
 costs a twenty-fourth of the samples to fetch -- and the step is measured over the span
 actually queried, so a window keeps the native scrape resolution where the whole run

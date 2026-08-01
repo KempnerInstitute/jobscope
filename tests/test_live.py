@@ -23,9 +23,9 @@ from jobscope.live import (
     parse_duration,
     parse_squeue,
     parse_start_time,
+    range_window,
     specs_for,
     timeseries_step,
-    windowed,
 )
 from jobscope.live_blob import host_stats_many, synthesize_stats
 from jobscope.report import RenderOptions, live_timeseries
@@ -175,11 +175,11 @@ def test_timeseries_step_never_finer_than_the_scrape_interval():
 def test_a_window_is_the_end_of_the_run_not_the_start():
     """--ts 1h means the last hour, and narrows the query rather than the rows."""
     start, end = 1000, 1000 + 86400
-    assert windowed(start, end, 3600) == end - 3600
-    assert windowed(start, end, None) == start          # no window: the whole run
-    assert windowed(start, end, 0) == start
+    assert range_window(start, end, 3600, 60)[0] == end - 3600
+    assert range_window(start, end, None, 60)[0] == start     # no window: the whole run
+    assert range_window(start, end, 0, 60)[0] == start
     # A window longer than the run is simply the run, never a start before it.
-    assert windowed(start, end, 999_999) == start
+    assert range_window(start, end, 999_999, 60)[0] == start
 
 
 def test_a_windowed_query_keeps_its_resolution():
@@ -188,6 +188,21 @@ def test_a_windowed_query_keeps_its_resolution():
     week = 7 * 86400
     assert timeseries_step(week, 60) > 60               # the whole run is coarsened
     assert timeseries_step(3600, 60) == 60              # one hour of it is not
+    assert range_window(0, week, 3600, 60)[1] == 60     # and the window is not either
+
+
+def test_a_window_lands_on_the_runs_own_sample_grid():
+    """Prometheus anchors a range query's points at `start`, so an unaligned window
+    relabels every sample -- and on a running job, whose end is "now", the grid then
+    drifts with the clock between invocations. Aligned, --ts 1h returns exactly the
+    rows a full --ts would.
+    """
+    start, step = 1785521696, 60          # a real job start: 1785521696 % 60 == 56
+    for end in range(start + 86400, start + 86400 + step):   # any "now" in one step
+        begin, span = range_window(start, end, 3600, step)
+        assert span == step
+        assert (begin - start) % step == 0                   # on the run's grid
+        assert 3600 <= end - begin < 3600 + step             # never short of the ask
 
 
 # --- catalogs ---------------------------------------------------------------

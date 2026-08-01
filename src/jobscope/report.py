@@ -34,7 +34,7 @@ from .dcgm import (
 )
 from .diagnose import LEGEND, diagnose_dcgm
 from .errors import JobscopeError
-from .live import Gpu, LiveJob, build_columns, job_sort_key, timeseries_step, windowed
+from .live import Gpu, LiveJob, build_columns, job_sort_key, range_window
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, Selection, format_window
 
@@ -1489,11 +1489,10 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
                 continue
             matched = True
         regex = "^(" + "|".join(uuid_to) + ")$"
-        start = windowed(record.start, record.end, options.window)
         # --step wins; otherwise never finer than the scrape interval, and coarse
         # enough to stay under Prometheus' points-per-series cap on a long job.
-        # Measured over the span actually queried, so a window keeps its detail.
-        span = timeseries_step(record.end - start, sampling_period, step)
+        start, span = range_window(record.start, record.end, options.window,
+                                   sampling_period, step)
         series: Dict[str, dict] = {uuid: {} for uuid in uuid_to}
         for spec in ts_specs:
             for result in client.query_range(

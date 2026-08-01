@@ -463,15 +463,28 @@ def timeseries_step(elapsed: int, sampling_period: int,
     return max(sampling_period, elapsed // 10000 + 1)
 
 
-def windowed(start: int, end: int, window: Optional[int]) -> int:
-    """Start of the last ``window`` seconds of ``[start, end]``, or ``start``.
+def range_window(start: int, end: int, window: Optional[int], sampling_period: int,
+                 requested: Optional[int] = None) -> Tuple[int, int]:
+    """``(start, step)`` for a range query over the last ``window`` seconds.
 
-    Clamped to the job's own start, so a window longer than the run is simply the
-    run. Narrowing the *query* rather than filtering rows afterwards is the point:
-    an hour of a day-long job is a twenty-fourth of the samples to fetch, and the
-    chart then spends its columns on the hour asked for.
+    Narrowing the *query* rather than filtering rows afterwards is the point: an hour
+    of a day-long job is a twenty-fourth of the samples to fetch, and the step is
+    measured over the span actually queried, so the window keeps its resolution.
+
+    The start is then snapped back onto the run's own sample grid, which matters more
+    than it looks. Prometheus anchors a range query's points at ``start``, so moving
+    the start moves *every* timestamp: an unaligned window returns the same scrapes
+    under different labels, and because a running job's ``end`` is "now", its grid
+    drifts with the clock between invocations. Aligned, ``--ts 1h`` returns exactly
+    the rows a full ``--ts`` would have, so fetching a window and slicing a whole
+    series agree.
     """
-    return max(start, end - window) if window else start
+    begin = max(start, end - window) if window else start
+    step = timeseries_step(end - begin, sampling_period, requested)
+    if window:
+        # Floor, so the window is never shorter than the one asked for.
+        begin = start + ((begin - start) // step) * step
+    return begin, step
 
 
 def collect_timeseries(client: PrometheusClient, jobs: Dict[int, LiveJob],
@@ -500,10 +513,7 @@ def collect_timeseries(client: PrometheusClient, jobs: Dict[int, LiveJob],
             continue
         regex = _uuid_regex(g.uuid for g in job_gpus)
         end = start + elapsed
-        start = windowed(start, end, window)
-        # Step from the span actually queried, not the whole run: a window is asked
-        # for to see detail, and the coarsening exists for long ranges.
-        span = timeseries_step(end - start, client.sampling_period, step)
+        start, span = range_window(start, end, window, client.sampling_period, step)
         for spec in specs:
             tasks.append((jobid, regex, start, end, span, spec))
 
