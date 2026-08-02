@@ -18,7 +18,6 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 from . import metrics
 from .blob import GIB, blob_capacity, blob_detail, blob_metrics
 from .config import (
-    DEFAULT_VOTE_CEILING as _DEFAULT_CEILING,
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
     EDGE_KEYS,
@@ -26,6 +25,9 @@ from .config import (
     Palette,
     Thresholds,
     parse_duration,
+)
+from .config import (
+    DEFAULT_VOTE_CEILING as _DEFAULT_CEILING,
 )
 
 # A job running longer than this, and still on a Wasteful row, is the expensive
@@ -37,7 +39,6 @@ from .dcgm import (
     ALL_SPECS,
     DCGM_BLOB_HEADERS,
     DCGM_HEADERS,
-    DEFAULT_SPECS,
     DESCRIPTIONS,
     MODEL_KEY,
     MetricSpec,
@@ -1278,14 +1279,13 @@ class SummaryRenderer:
         # POWER_W drops out on the `%` test -- it is watts, and a raw wattage in the
         # ballot would win the comparison outright whatever the GPU was doing. It
         # lowers the verdict instead, as a floor.
-        ballot = {h: v for h, v in self._last_values.items()
-                  if h in metrics.votable(self._last_values)}
+        voting = classify_metrics(list(self._last_values), thresholds)
+        ballot = {h: self._last_values[h] for h in voting if h in self._last_values}
         if not ballot:
             return
         thresholds = thresholds.for_model(self._last_model)
         floor_readings = {h: self._last_values.get(h) for h in thresholds.floors}
-        verdict = classify(ballot, thresholds, floor_readings,
-                           columns=metrics.votable(self._last_values))
+        verdict = classify(ballot, thresholds, floor_readings, columns=voting)
         categories = CATEGORIES
         judged = metrics.in_catalog_order(ballot)
         role = next((r for n, r in categories if n == verdict), "")
@@ -1985,13 +1985,22 @@ CATEGORIES = tuple((name, name) for name, _key in TIERS)
 # "this job wasted its allocation", which is the reading that gets someone an email.
 NO_DATA = "no-data"
 
-def classify_metrics(columns) -> List[str]:
-    """The ``%`` columns a verdict is taken over, in CSV order.
+def classify_metrics(columns, thresholds: Optional["Thresholds"] = None) -> List[str]:
+    """The columns a verdict is taken over, in CSV order.
 
-    Memory columns are excluded by their catalog role rather than by name, so a
-    cgroup or GPU memory metric added later cannot quietly start voting -- see
-    jobscope.metrics.MEMORY.
+    Without a configured ``[classify] vote`` this derives the ballot: every graded
+    percentage that is not a capacity reading. Memory is excluded by its catalog role
+    rather than by name, so a cgroup or GPU memory metric added later cannot quietly
+    start voting -- see jobscope.metrics.MEMORY.
+
+    With one, the list narrows to it. That is what lets ``--dcgm`` widen the
+    *columns* from four metrics to fifteen without widening the ballot: a job busy on
+    ENC% alone would otherwise read `good`. A configured name overrides the memory
+    role too -- a site naming GMEM% is making a claim, and explicit beats inferred.
     """
+    allowed = getattr(thresholds, "vote", None)
+    if allowed:
+        return [c for c in columns if c in allowed]
     return metrics.votable(columns)
 
 
@@ -2248,7 +2257,7 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     looking for.
     """
     out = out or sys.stdout
-    voting = classify_metrics(columns)
+    voting = classify_metrics(columns, _bands(options))
     if not voting:
         raise JobscopeError("no %-metrics in this series to classify")
     unit = {"gpu": "GPUs", "node": "nodes"}.get(level, "jobs")

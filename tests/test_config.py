@@ -823,3 +823,127 @@ def test_overriding_a_gpu_builtin_keeps_its_purpose(hermetic_config, tmp_path):
     assert spec.metric == "gpu_busy_percent" and spec.header == "GPU%"
     assert spec.group == "default" and "worst" in spec.roles
     assert metrics.headers_with_role(metrics.RESOURCE) == ("GPU%", "CPU%")
+
+
+# --- [classify]: two roles, vote raises and floor lowers -------------------
+
+def test_vote_narrows_the_ballot(hermetic_config, tmp_path):
+    """What lets --dcgm widen the *columns* from four metrics to fifteen without
+    widening the ballot: a job busy on ENC% alone must not read good."""
+    from jobscope import report
+    cfg = _define(tmp_path, '[classify]\nvote = ["gpu", "sm_act"]\n')
+    t = cfg.thresholds
+    assert t.vote == ("GPU%", "SM_ACT%")
+    assert report.classify_metrics(["GPU%", "SM_ACT%", "ENC%", "CPU%"], t) == \
+        ["GPU%", "SM_ACT%"]
+
+
+def test_no_vote_key_derives_the_ballot(hermetic_config, tmp_path):
+    """Omitted means "every graded percentage that is not memory", which is what
+    keeps a site that configured nothing following the catalog as it grows."""
+    from jobscope import report
+    cfg = _define(tmp_path, "[defaults]\ndays = 1\n")
+    assert cfg.thresholds.vote is None
+    assert report.classify_metrics(["GPU%", "GMEM%", "CPU%"], cfg.thresholds) == \
+        ["GPU%", "CPU%"]
+
+
+def test_a_floor_table_sets_a_per_model_value(hermetic_config, tmp_path):
+    cfg = _define(tmp_path, '[classify.floor.power]\ndefault = 100\n'
+                            '"NVIDIA H100 80GB HBM3" = 130\n')
+    t = cfg.thresholds
+    assert t.floor_of("POWER_W") == 100
+    assert t.floor_of("POWER_W", "NVIDIA H100 80GB HBM3") == 130
+    assert t.floor_of("POWER_W", "NVIDIA A40") == 100      # unlisted -> the default
+
+
+def test_an_empty_floor_table_means_no_cap(hermetic_config, tmp_path):
+    """Legal and documented: it re-opens what the power floor closes, so a job at
+    GPU% 48 drawing 80 W reads good again."""
+    from jobscope import report
+    cfg = _define(tmp_path, "[classify.floor]\n")
+    assert cfg.thresholds.floors == {}
+    assert report.classify({"GPU%": 48.0}, cfg.thresholds,
+                           {"POWER_W": 80.0}, columns=["GPU%"]) == "good"
+
+
+def test_the_old_power_w_spelling_still_caps(hermetic_config, tmp_path):
+    """An existing config must keep working; [classify.floor.power] is the spelling
+    that generalises, not a replacement that breaks the old one."""
+    cfg = _define(tmp_path, "[thresholds]\npower_w = 130\n")
+    assert cfg.thresholds.floor_of("POWER_W") == 130
+
+
+def test_a_ceiling_caps_how_high_a_metric_may_vote(hermetic_config, tmp_path):
+    cfg = _define(tmp_path, '[classify.ceiling]\ncpu = "average"\n')
+    assert cfg.thresholds.vote_ceiling("CPU%") == "average"
+    assert cfg.thresholds.vote_ceiling("GPU%") is None
+
+
+def test_a_metric_cannot_both_vote_and_floor(hermetic_config, tmp_path):
+    """The roles are opposites; naming one in both is a misunderstanding."""
+    with pytest.raises(JobscopeError) as exc:
+        _define(tmp_path, '[classify]\nvote = ["gpu", "power"]\n'
+                          '[classify.floor.power]\ndefault = 100\n')
+    assert "both a vote and a floor" in str(exc.value)
+
+
+def test_an_empty_vote_list_is_rejected(hermetic_config, tmp_path):
+    """It would leave nothing to judge by, and every job would read no-data --
+    indistinguishable from a Prometheus outage."""
+    with pytest.raises(JobscopeError) as exc:
+        _define(tmp_path, "[classify]\nvote = []\n")
+    assert "nothing to judge" in str(exc.value)
+
+
+def test_a_vote_typo_is_rejected_not_ignored(hermetic_config, tmp_path):
+    with pytest.raises(JobscopeError) as exc:
+        _define(tmp_path, '[classify]\nvote = ["gpu", "sm_akt"]\n')
+    assert "SM_AKT%" in str(exc.value)
+
+
+def test_a_floor_without_a_default_is_rejected(hermetic_config, tmp_path):
+    """A card with no entry would then have no floor and never cap."""
+    with pytest.raises(JobscopeError) as exc:
+        _define(tmp_path, '[classify.floor.power]\n"NVIDIA A40" = 40\n')
+    assert "needs a `default`" in str(exc.value)
+
+
+def test_a_ceiling_must_name_a_tier(hermetic_config, tmp_path):
+    with pytest.raises(JobscopeError) as exc:
+        _define(tmp_path, '[classify.ceiling]\ncpu = "meh"\n')
+    assert "is not a tier" in str(exc.value)
+
+
+def test_an_unknown_classify_key_is_rejected(hermetic_config, tmp_path):
+    with pytest.raises(JobscopeError) as exc:
+        _define(tmp_path, '[classify]\nvotes = ["gpu"]\n')
+    assert "votes" in str(exc.value) and "vote, floor, ceiling" in str(exc.value)
+
+
+# --- metric_header resolves through the catalog ----------------------------
+
+@pytest.mark.parametrize("key,header", [
+    ("gpu", "GPU%"), ("GPU", "GPU%"), ("GPU%", "GPU%"),
+    ("sm_act", "SM_ACT%"), ("cpu", "CPU%"),
+    # Not percentages: appending "%" produced POWER% and ENERGY%, columns nothing
+    # answers to -- the silent drop the stray-key note exists to catch.
+    ("power", "POWER_W"), ("energy", "ENERGY_kWh"),
+    # Family-qualified names resolve to the same header as the bare form.
+    ("dcgm-sm_act", "SM_ACT%"), ("cgroup-cpu", "CPU%"), ("nvml-gpu", "GPU%"),
+])
+def test_metric_header_resolves_through_the_catalog(key, header):
+    assert config_module.metric_header(key) == header
+
+
+def test_mem_means_host_memory_not_gpu_memory():
+    """`mem` is a key in both catalogs -- cgroup's is host RSS, DCGM's is a card's
+    memory. A site writing `mem` under [thresholds] means the MEM% column it can see,
+    so the host wins; GPU memory is `gmem`."""
+    assert config_module.metric_header("mem") == "MEM%"
+    assert config_module.metric_header("gmem") == "GMEM%"
+
+
+def test_an_unknown_name_still_falls_through_to_the_guess():
+    """So the stray-key note still fires on a genuine typo rather than raising."""
+    assert config_module.metric_header("gpuu") == "GPUU%"

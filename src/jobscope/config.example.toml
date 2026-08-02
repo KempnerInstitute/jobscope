@@ -5,6 +5,50 @@
 # falls back to the built-in defaults shown here. Print this template any time
 # with: jobscope config --example
 
+# [classify] -- how a job's metrics become a verdict.
+#
+# Two roles, and the difference is the whole model:
+#
+#   vote   best-of-N. One busy measure is enough to call a job not-idle, so a vote
+#          can only ever RAISE a verdict.
+#   floor  can only LOWER one. A metric that must pull a verdict down cannot be a
+#          vote: under best-of-N a low reading is simply outvoted.
+#
+# POWER_W is the floor that ships. A job spinning on a trivial kernel reads busy on
+# GPU% and draws idle watts, and watts are the one signal a duty cycle cannot fake --
+# measured here, 8 GPU jobs in 94 looked healthy on their percentages while the board
+# sat below its idle floor.
+#
+# [classify]
+# vote = ["gpu", "sm_act", "tensor", "dram", "cpu"]
+#   Omit `vote` and jobscope derives it: every graded percentage that is not a
+#   capacity reading. That is usually what you want, because it follows the catalog
+#   as it grows. Set it to stop --dcgm widening the ballot from four metrics to
+#   fifteen -- a job busy on ENC% alone would otherwise read good.
+#
+# [classify.floor.power]
+# default = 100                        # watts; below this, cap the verdict at
+#                                      # `inefficient` however good the percentages
+# "NVIDIA H100 80GB HBM3" = 130        # per card, matched on the exporter's own
+# "Tesla V100-PCIE-32GB"  = 45         # model string. Idle draw is hardware: it runs
+#                                      # from 27 W on a V100 to 165 W on an
+#                                      # RTX PRO 6000, so one number is wrong at one
+#                                      # end or the other.
+#
+# Write a bare `[classify.floor]` with nothing under it for NO floors. That is legal
+# and it re-opens what the floor closes: a job at GPU% 48 drawing 80 W goes back to
+# reading `good`. ([thresholds] power_w still works as the older spelling.)
+#
+# [classify.ceiling]
+# cpu = "inefficient"                  # the best tier this metric may vote for
+#   A ceiling caps how high a metric votes without stopping it voting. CPU%'s is
+#   built in at `inefficient`: a busy host is not evidence the cards were needed, so
+#   CPU% lifts a GPU-idle job off `wasteful` but never calls it healthy. It still
+#   BANDS and COLOURS on the ordinary ladder -- a job at CPU% 50 is genuinely half
+#   used and paints green. Two different questions about one number.
+#   The ceiling lifts when nothing else could carry a verdict, so a --cpu view and a
+#   genuinely CPU-only job are judged on their own terms.
+
 # [site] -- the label conventions your exporters use.
 #
 # Only needed when porting jobscope to a cluster whose Prometheus labels series

@@ -227,12 +227,46 @@ def parse_duration(text: str) -> int:
 def metric_header(key: str) -> str:
     """Config spelling of a metric -> its column header.
 
-    ``gpu``, ``GPU`` and ``"GPU%"`` all mean ``GPU%``; ``sm_act`` means ``SM_ACT%``.
-    Sites write the short lowercase form, which is how the metrics get talked about,
-    and the tables are keyed on the header the rest of the tool uses.
+    ``gpu``, ``GPU`` and ``"GPU%"`` all mean ``GPU%``; ``sm_act`` means ``SM_ACT%``;
+    ``power`` means ``POWER_W``. Sites write the short lowercase form, which is how
+    the metrics get talked about, and the tables are keyed on the header the rest of
+    the tool uses.
+
+    Resolved through the catalogs, not guessed. Appending ``%`` to an upper-cased key
+    is right for a percentage and wrong for everything else -- ``power`` became
+    ``POWER%``, a column nothing answers to, which is exactly the silent-drop the
+    stray-key note was invented to catch. The guess survives only as the fallback for
+    a name no catalog knows, so that note still fires on a genuine typo.
     """
-    header = str(key).strip().upper()
+    text = str(key).strip()
+    # A family-qualified name resolves to the same header as the bare one, so a site
+    # may write either -- `dcgm-sm_act` where it wants to be explicit, `sm_act` where
+    # the short name is unambiguous.
+    family, _, rest = text.partition("-")
+    if rest and family.lower() in ("dcgm", "nvml", "cgroup"):
+        text = rest
+    for spec in _lookup(text):
+        return spec.header
+    header = text.upper()
     return header if header.endswith("%") else header + "%"
+
+
+def _lookup(name: str):
+    """The catalog spec ``name`` refers to, as a 0-or-1 iterable.
+
+    **Host catalog first, and that ordering is load-bearing.** ``mem`` is a key in
+    both: the cgroup one is host RSS (``MEM%``), the GPU one is a card's memory
+    (``GMEM_GB``). A site writing ``mem = 3`` under ``[thresholds]`` means the MEM%
+    column it can see in the summary table, so the host wins; GPU memory is ``gmem``.
+    Resolving GPU-first silently re-pointed such a config at a different quantity.
+
+    Deferred imports for the usual reason -- at module scope either would close the
+    cycle config -> dcgm/cpu -> prometheus -> config.
+    """
+    from .cpu import spec_named as cgroup_named
+    from .dcgm import spec_named as gpu_named
+    found = cgroup_named(name) or gpu_named(name)
+    return (found,) if found is not None else ()
 
 
 @dataclass(frozen=True)
@@ -269,6 +303,15 @@ class Thresholds:
     # would be a second thing to get wrong.
     floors: Mapping[str, Mapping[str, float]] = field(
         default_factory=lambda: {POWER_HEADER: {"": DEFAULT_POWER_W}})
+    # Which metrics may vote at all. ``None`` means derive it -- every graded
+    # percentage that is not a capacity reading -- which is what keeps a site that
+    # has configured nothing following the catalog as it grows. A list narrows it,
+    # and is how ``--dcgm`` can widen the *columns* without widening the ballot from
+    # four metrics to fifteen.
+    vote: Optional[Tuple[str, ...]] = None
+    # ``{header: best tier it may vote for}``. See :data:`DEFAULT_VOTE_CEILING`.
+    ceilings: Mapping[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_VOTE_CEILING))
 
     def __post_init__(self) -> None:
         # Fill any edge the caller left out, so a partial ``defaults`` -- a TOML that
@@ -368,7 +411,7 @@ class Thresholds:
         :data:`DEFAULT_VOTE_CEILING`. CPU% bands and colours on the ordinary ladder
         while being unable to vote a job healthy.
         """
-        return DEFAULT_VOTE_CEILING.get(header)
+        return self.ceilings.get(header)
 
     def edges(self, header: str = "") -> Tuple[float, ...]:
         """``header``'s four edges in tier order -- what validation checks."""
@@ -420,6 +463,145 @@ class Thresholds:
         if header == "POWER_W":
             return floor_band(value, self.power_w)
         return BUCKET_OF.get(self.tier(header, value), "")
+
+
+def _classify(table: Mapping, power_w: float,
+              by_model: Mapping[str, float]) -> Tuple:
+    """``[classify]`` -> ``(vote, floors, ceilings)`` for the band tables.
+
+    Three keys, and the difference between the first two is the whole model:
+
+    * ``vote`` -- a list. Best-of-N, so a metric here can only ever *raise* a
+      verdict. Omitted means "derive it" -- every graded percentage that is not a
+      capacity reading -- which is what lets the catalog grow without editing config.
+    * ``floor`` -- a table per metric, ``[classify.floor.<metric>]``. A floor can
+      only *lower* a verdict, and that is why it is not a vote: under best-of-N a low
+      reading is simply outvoted. Omitted keeps the built-in POWER_W floor; written
+      as a bare ``[classify.floor]`` with nothing under it means no floors at all.
+    * ``ceiling`` -- how high a metric may vote, without stopping it voting.
+
+    ``floor`` is a table rather than a list-plus-values because TOML forbids a key
+    being both, and one concept beats two near-identical names.
+
+    ``[thresholds] power_w`` still feeds POWER_W's floor when ``[classify.floor]``
+    says nothing, so an existing config keeps working.
+    """
+    known = ("vote", "floor", "ceiling")
+    unknown = sorted(set(table) - set(known))
+    if unknown:
+        raise JobscopeError("[classify] has no %s; it takes %s"
+                            % (", ".join(repr(k) for k in unknown), ", ".join(known)))
+
+    vote = _metric_list("[classify] vote", table.get("vote"))
+    if vote is not None and not vote:
+        raise JobscopeError(
+            "[classify] vote is empty, which leaves nothing to judge a job by. Omit "
+            "it to use every graded percentage, or name at least one metric.")
+    resolved = tuple(metric_header(n) for n in vote) if vote else None
+
+    floor_table = table.get("floor")
+    if floor_table is None:
+        floors = power_floors(power_w, by_model)
+    elif not isinstance(floor_table, Mapping):
+        raise JobscopeError(
+            "[classify] floor must be a table per metric, e.g.\n"
+            "  [classify.floor.power]\n  default = 100\n"
+            "-- not %r. Write a bare [classify.floor] for no floors at all."
+            % (floor_table,))
+    else:
+        # An explicit table replaces the built-in, so an empty one really means "no
+        # metric caps a verdict" -- which re-opens what the power floor closes.
+        floors = {metric_header(name): _floor_table(
+            "[classify.floor.%s]" % name, body, power_w)
+            for name, body in floor_table.items()}
+
+    ceilings = dict(DEFAULT_VOTE_CEILING)
+    for name, tier in (table.get("ceiling") or {}).items():
+        if str(tier) not in TIER_NAMES:
+            raise JobscopeError(
+                "[classify.ceiling] %s = %r is not a tier; the tiers are %s"
+                % (name, tier, ", ".join(TIER_NAMES)))
+        ceilings[metric_header(name)] = str(tier)
+
+    both = sorted(set(resolved or ()) & set(floors))
+    if both:
+        raise JobscopeError(
+            "[classify] names %s as both a vote and a floor. A vote can only raise a "
+            "verdict and a floor can only lower it, so a metric cannot be both -- "
+            "pick one." % ", ".join(both))
+
+    _check_classify_names("[classify] vote", resolved)
+    _check_classify_names("[classify] floor", tuple(floors) if floor_table else None)
+    _check_classify_names("[classify.ceiling]",
+                          tuple(metric_header(n) for n in (table.get("ceiling") or {})))
+    return resolved, floors, ceilings
+
+
+def _check_classify_names(where: str, headers: Optional[Tuple[str, ...]]) -> None:
+    """Reject a name no metric answers to.
+
+    Named rather than ignored, and this one matters more than most: a typo in
+    ``vote`` silently empties the ballot, and every job then reports ``no-data``
+    while looking exactly like a Prometheus outage.
+    """
+    if not headers:
+        return
+    known = _known_percent_headers() | _all_headers()
+    strays = sorted(h for h in headers if h not in known)
+    if strays:
+        raise JobscopeError(
+            "%s names no metric %s. Use the short names 'jobscope doctor --metrics' "
+            "lists, e.g. gpu, sm_act, cpu, power."
+            % (where, ", ".join(repr(h) for h in strays)))
+
+
+def _all_headers() -> frozenset:
+    """Every column header in the catalogs, percentage or not.
+
+    Wider than :func:`_known_percent_headers` because a floor metric is typically
+    *not* a percentage -- POWER_W being the case that ships.
+    """
+    from .cpu import CGROUP_METRICS
+    from .dcgm import ALL_SPECS, DERIVED_COLUMNS
+    return frozenset([s.header for s in ALL_SPECS]
+                     + [d.header for d in DERIVED_COLUMNS]
+                     + [s.header for s in CGROUP_METRICS])
+
+
+def _metric_list(where: str, raw) -> Optional[list]:
+    """A ``[classify]`` metric list, or None when the key is absent."""
+    if raw is None:
+        return None
+    if isinstance(raw, Mapping):
+        # `[classify.floor.power]` tables make `floor` a table as well as a list; the
+        # list form is what names which of them are active.
+        return sorted(raw)
+    if not isinstance(raw, (list, tuple)):
+        raise JobscopeError("%s must be a list of metric names, not %r" % (where, raw))
+    if not all(isinstance(n, str) and n.strip() for n in raw):
+        raise JobscopeError("%s must contain metric names" % where)
+    return [n.strip() for n in raw]
+
+
+def _floor_table(where: str, body, fallback: float) -> dict:
+    """One ``[classify.floor.<metric>]`` table -> ``{"": default, model: value}``."""
+    if body is None:
+        return {"": float(fallback)}
+    if not isinstance(body, Mapping):
+        raise JobscopeError("%s must be a table, e.g.\n  %s\n  default = 100"
+                            % (where, where))
+    table = {}
+    for key, value in body.items():
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise JobscopeError("%s: %s = %r is not a number" % (where, key, value))
+        table["" if key == "default" else str(key)] = number
+    if "" not in table:
+        raise JobscopeError(
+            "%s needs a `default`, the floor for hardware it does not name -- "
+            "otherwise a card with no entry has no floor and never caps" % where)
+    return table
 
 
 def power_floors(default: float = DEFAULT_POWER_W,
@@ -646,7 +828,8 @@ def load_config(path: Optional[str] = None,
               " views grade differently -- %s keeps the built-in edges (nothing is"
               " inherited between them). 'jobscope config' prints both."
               % (named[0], other, other), file=sys.stderr)
-    bands = {view: _band_table(thr.get(view) or {}, view, power_w, by_model)
+    vote, floors, ceilings = _classify(data.get("classify") or {}, power_w, by_model)
+    bands = {view: _band_table(thr.get(view) or {}, view, floors, vote, ceilings)
              for view in BAND_VIEWS}
 
     defaults = Defaults(
@@ -966,8 +1149,8 @@ def _known_percent_headers() -> frozenset:
                         if spec.header.endswith("%")])
 
 
-def _band_table(table: Mapping, view: str, power_w: float,
-                by_model: Mapping[str, float]) -> Thresholds:
+def _band_table(table: Mapping, view: str, floors: Mapping,
+                vote: Optional[Tuple[str, ...]], ceilings: Mapping) -> Thresholds:
     """One view's ``[thresholds.<view>]`` block -> a :class:`Thresholds`.
 
     Each ``[thresholds.<view>.<edge>]`` sub-table gives that edge a ``default`` plus
@@ -1017,8 +1200,8 @@ def _band_table(table: Mapping, view: str, power_w: float,
         for stray in strays:
             del by_metric[stray]
 
-    bands = Thresholds(defaults=defaults, by_metric=by_metric,
-                       floors=power_floors(power_w, by_model))
+    bands = Thresholds(defaults=defaults, by_metric=by_metric, floors=floors,
+                       vote=vote, ceilings=ceilings)
     _check_order(bands, where)
     return bands
 
