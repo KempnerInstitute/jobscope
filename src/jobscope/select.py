@@ -97,7 +97,7 @@ class Request:
     # finished job as well as a running one. The blob is a fast path -- one free
     # sacct field against several range queries -- so it stays preferred by
     # default; this exists to compare the two, and to be what a site without
-    # jobstats runs on. See jobscope.doctor's --validate.
+    # jobstats runs on. See jobscope.probe's --validate.
     no_blob: bool = False
 
     @property
@@ -370,7 +370,7 @@ def _fill_running(records, jobids, cfg, timeout, workers, client, force=False):
                 raise JobscopeError(
                     "--no-blob reads every metric from Prometheus, and no endpoint is\n"
                     "configured. Drop --no-blob to use the stored jobstats blob, or see\n"
-                    "'jobscope doctor' for how to configure one.")
+                    "'jobscope probe' for how to configure one.")
             note_offline_gap(records, jobids)
             return None
     fill_running(records, jobids, client, timeout, workers, force)

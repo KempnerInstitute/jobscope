@@ -9,7 +9,7 @@ and get an answer rather than a shrug.
 
 Deliberately *not* a fallback. If Prometheus is thin the report says so; silently
 substituting Slurm's numbers would make the columns unattributable, and the two do
-not always agree -- see the module tests and ``doctor --validate``.
+not always agree -- see the module tests and ``probe --validate``.
 
 Four things the sacct data model makes easy to get wrong, each of which produced a
 wrong number before it was pinned down:

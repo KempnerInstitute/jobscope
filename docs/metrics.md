@@ -740,7 +740,7 @@ nvidia_gpu_duty_cycle{uuid="GPU-..."}
 
 The endpoint is resolved from configuration (see the README) and commonly embeds a
 credential, so jobscope never prints it; URLs reaching help text or error messages
-are masked. `jobscope doctor` is the one command that must name the endpoint, and
+are masked. `jobscope probe` is the one command that must name the endpoint, and
 it masks the credential too (`https://***@host/path`), so its output is safe to
 paste into a ticket.
 

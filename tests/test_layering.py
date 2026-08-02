@@ -14,7 +14,7 @@ Layers, bottom up:
       slurm, running, timeseries,
       extra_metric, job_ave_stats
     report, plot                   render -- turn numbers into text
-    select, cli, doctor            orchestration -- wire the above together
+    select, cli, probe             orchestration -- wire the above together
 
 Only two rules are enforced, because only two of them have ever been broken:
 a collector must not reach up into rendering, and rendering must not reach down
@@ -60,7 +60,7 @@ def module_stems():
 def test_every_module_is_placed_in_a_layer():
     """A new module has to be classified here, or the rules below skip it silently."""
     placed = (LEAVES | POLICY | COLLECTORS | RENDER
-              | {"prometheus", "select", "cli", "doctor"})
+              | {"prometheus", "select", "cli", "probe"})
     assert set(module_stems()) == placed
 
 

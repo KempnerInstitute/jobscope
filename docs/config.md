@@ -14,7 +14,7 @@ prints both band tables, the metric lists, and every default, after all override
 The URL often embeds a credential (a Grafana Cloud token, say). Prefer
 `$JOBSCOPE_PROM_URL` so the secret never lands in a file; a `url` in the config is
 used only when that variable is unset. jobscope masks the credential wherever it
-prints the endpoint — `jobscope doctor` shows `https://***@host/path`.
+prints the endpoint — `jobscope probe` shows `https://***@host/path`.
 
 If your site already runs jobstats, you usually need nothing here: jobscope finds the
 `config.py` next to the `jobstats` binary on your `PATH` and reads `PROM_SERVER` from
@@ -27,7 +27,7 @@ one of these fails **silently** when wrong: read the wrong host label and every 
 shows as `?`, the cgroup divisor lookup misses, and CPU%/MEM% come back blank with no
 error at all.
 
-`jobscope doctor` checks each against the live server for exactly that reason. Run it
+`jobscope probe` checks each against the live server for exactly that reason. Run it
 before editing anything here — it names the label your server actually uses.
 
 ## Metric families, and which you can do without
@@ -48,8 +48,8 @@ nvidia-exporter cannot currently attribute GPU metrics to jobs at all; it would 
 different join series set as `[site] gpu_job_join`.
 
 There is no "families" switch, because there does not need to be one: leave a family's
-metrics out of `[metrics]` and they are never queried. `jobscope doctor` reports which
-exporters answer on your cluster, and `jobscope doctor --metrics` lists every series
+metrics out of `[metrics]` and they are never queried. `jobscope probe` reports which
+exporters answer on your cluster, and `jobscope probe --metrics` lists every series
 they carry for a real job.
 
 ## `[thresholds]` — the band edges
@@ -185,8 +185,8 @@ it re-opens what the floor closes: a job at GPU% 48 drawing 80 W goes back to re
 
 ## `[metrics]` — defining or repointing a metric
 
-Run `jobscope doctor --metrics` first: it lists every series your server carries for a
-real job and marks `new` the ones with no jobscope name. `jobscope doctor --toml`
+Run `jobscope probe --metrics` first: it lists every series your server carries for a
+real job and marks `new` the ones with no jobscope name. `jobscope probe --toml`
 emits that as an editable config block.
 
 A defined metric joins the **extended** catalog, so it appears under `--dcgm` or in any

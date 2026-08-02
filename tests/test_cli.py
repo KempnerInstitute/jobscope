@@ -56,6 +56,15 @@ def test_a_jobid_needs_no_mode_word():
 
 # --- the modes ---------------------------------------------------------------
 
+def test_doctor_was_renamed_to_probe(capsys):
+    """It is in RETIRED for the same reason as the others: without an entry the word
+    falls through as a would-be JOBID and Slurm answers "Bad job/step specified"."""
+    with pytest.raises(SystemExit):
+        main(["doctor"])
+    err = capsys.readouterr().err
+    assert "renamed" in err and "'probe'" in err
+
+
 def test_an_old_subcommand_is_now_an_ordinary_word():
     """summary/detail/dcgm/live used to be rewritten to flags with a note.
 
@@ -828,7 +837,7 @@ def test_the_top_level_help_is_untouched(capsys):
     with pytest.raises(SystemExit):
         main(["--help"])
     body = capsys.readouterr().out
-    assert "{running,finished,plot,describe,config,doctor}" in body
+    assert "{running,finished,plot,describe,config,probe}" in body
     assert "hiding" not in body
 
 

@@ -1,10 +1,10 @@
-"""Tests for `jobscope doctor` -- the naming convention, the probes, and the report."""
+"""Tests for `jobscope probe` -- the naming convention, the probes, and the report."""
 
 import io
 
 import pytest
 
-from jobscope import doctor
+from jobscope import probe
 from jobscope.config import redact_url
 
 # --- the name mapping config depends on ------------------------------------
@@ -12,46 +12,46 @@ from jobscope.config import redact_url
 def test_a_catalogued_series_keeps_its_curated_short_name():
     """Not the mechanical derivation: `dcgm-sm_act` is the name already written in
     people's [thresholds] and [metrics], and SM_ACTIVE would derive `sm_active`."""
-    assert doctor.simple_name("DCGM_FI_PROF_SM_ACTIVE") == "dcgm-sm_act"
-    assert doctor.simple_name("nvidia_gpu_duty_cycle") == "nvml-gpu"
-    assert doctor.simple_name("cgroup_cpu_total_seconds") == "cgroup-cpu"
+    assert probe.simple_name("DCGM_FI_PROF_SM_ACTIVE") == "dcgm-sm_act"
+    assert probe.simple_name("nvidia_gpu_duty_cycle") == "nvml-gpu"
+    assert probe.simple_name("cgroup_cpu_total_seconds") == "cgroup-cpu"
 
 
 def test_an_uncatalogued_series_is_named_mechanically():
-    assert doctor.simple_name("cgroup_memsw_used_bytes") == "cgroup-memsw_used_bytes"
-    assert doctor.simple_name("DCGM_FI_DEV_XID_ERRORS") == "dcgm-xid_errors"
-    assert doctor.simple_name("nvidia_gpu_temperature_celsius") == "nvml-temperature_celsius"
+    assert probe.simple_name("cgroup_memsw_used_bytes") == "cgroup-memsw_used_bytes"
+    assert probe.simple_name("DCGM_FI_DEV_XID_ERRORS") == "dcgm-xid_errors"
+    assert probe.simple_name("nvidia_gpu_temperature_celsius") == "nvml-temperature_celsius"
 
 
 def test_a_series_in_no_known_family_gets_no_name():
     """Naming it would imply jobscope knows how to join it to a job. It does not."""
-    assert doctor.simple_name("node_load1") is None
-    assert doctor.simple_name("up") is None
+    assert probe.simple_name("node_load1") is None
+    assert probe.simple_name("up") is None
 
 
 def test_nvml_and_dcgm_are_split_by_which_uuid_label_they_use():
     """The two families both describe GPUs and both export a duty cycle, so the
     split has to come from the catalog rather than from the metric name."""
-    assert doctor.family_of("nvidia_gpu_duty_cycle") == "nvml"
-    assert doctor.family_of("DCGM_FI_DEV_GPU_UTIL") == "dcgm"
-    assert doctor.catalog()["nvidia_gpu_duty_cycle"][0] == "nvml"
-    assert doctor.catalog()["DCGM_FI_PROF_SM_ACTIVE"][0] == "dcgm"
+    assert probe.family_of("nvidia_gpu_duty_cycle") == "nvml"
+    assert probe.family_of("DCGM_FI_DEV_GPU_UTIL") == "dcgm"
+    assert probe.catalog()["nvidia_gpu_duty_cycle"][0] == "nvml"
+    assert probe.catalog()["DCGM_FI_PROF_SM_ACTIVE"][0] == "dcgm"
 
 
 def test_the_longer_dcgm_prefixes_strip_before_the_bare_one():
     """DCGM_FI_PROF_ and DCGM_FI_DEV_ must win over DCGM_FI_, or every name keeps
     a stray `prof_`/`dev_`."""
-    assert doctor.simple_name("DCGM_FI_PROF_NEW_THING") == "dcgm-new_thing"
-    assert doctor.simple_name("DCGM_FI_DEV_NEW_THING") == "dcgm-new_thing"
+    assert probe.simple_name("DCGM_FI_PROF_NEW_THING") == "dcgm-new_thing"
+    assert probe.simple_name("DCGM_FI_DEV_NEW_THING") == "dcgm-new_thing"
 
 
 def test_every_catalogued_series_yields_a_name():
-    for raw in doctor.catalog():
-        assert doctor.simple_name(raw), raw
+    for raw in probe.catalog():
+        assert probe.simple_name(raw), raw
 
 
 def test_names_are_unique_so_config_cannot_be_ambiguous():
-    names = [doctor.simple_name(raw) for raw in doctor.catalog()]
+    names = [probe.simple_name(raw) for raw in probe.catalog()]
     assert len(names) == len(set(names))
 
 
@@ -79,7 +79,7 @@ def test_redact_url_leaves_a_credential_free_url_alone(url):
 
 
 def test_the_endpoint_is_redacted_in_the_report(monkeypatch):
-    """The regression guard for the leak: doctor is the only thing that prints the
+    """The regression guard for the leak: probe is the only thing that prints the
     endpoint, and prometheus.py's contract is that it is never logged."""
     secret = "glc_averysecrettoken"
 
@@ -90,11 +90,11 @@ def test_the_endpoint_is_redacted_in_the_report(monkeypatch):
         def query(self, query, at, timeout=None):
             return [{"metric": {}, "value": [at, "1"]}]
 
-    monkeypatch.setattr(doctor, "_flavor", lambda url, timeout: "Grafana Mimir")
+    monkeypatch.setattr(probe, "_flavor", lambda url, timeout: "Grafana Mimir")
     monkeypatch.setattr("jobscope.prometheus.client_from_config",
                         lambda cfg, timeout: FakeClient())
     out = io.StringIO()
-    doctor.check_prometheus(out, object(), 30)
+    probe.check_prometheus(out, object(), 30)
     assert secret not in out.getvalue()
     assert "***@prom.grafana.net/api/prom" in out.getvalue()
 
@@ -123,16 +123,16 @@ class LadderClient:
 
 def test_probe_retention_reports_the_deepest_age_that_answered(monkeypatch):
     client = LadderClient(depth_days=200)
-    monkeypatch.setattr(doctor.time, "time", lambda: client.now)
-    assert doctor.probe_retention(client, None) == 180
+    monkeypatch.setattr(probe.time, "time", lambda: client.now)
+    assert probe.probe_retention(client, None) == 180
 
 
 def test_probe_retention_stops_at_the_first_hit(monkeypatch):
     """Deepest-first and short-circuiting: the misses are ~0.1s while a hit costs
     2-3s against long-term storage, so the walk must not continue past one."""
     client = LadderClient(depth_days=200)
-    monkeypatch.setattr(doctor.time, "time", lambda: client.now)
-    doctor.probe_retention(client, None)
+    monkeypatch.setattr(probe.time, "time", lambda: client.now)
+    probe.probe_retention(client, None)
     assert client.asked == [730, 365, 180]
 
 
@@ -140,14 +140,14 @@ def test_a_gap_yields_a_conservative_answer_not_a_wrong_one(monkeypatch):
     """This site really does answer at 60/90/180d but not 45d. A gap must cost
     depth, never invent it."""
     client = LadderClient(depth_days=200, gaps={180})
-    monkeypatch.setattr(doctor.time, "time", lambda: client.now)
-    assert doctor.probe_retention(client, None) == 90
+    monkeypatch.setattr(probe.time, "time", lambda: client.now)
+    assert probe.probe_retention(client, None) == 90
 
 
 def test_probe_retention_returns_none_when_nothing_answers(monkeypatch):
     client = LadderClient(depth_days=-1)
-    monkeypatch.setattr(doctor.time, "time", lambda: client.now)
-    assert doctor.probe_retention(client, None) is None
+    monkeypatch.setattr(probe.time, "time", lambda: client.now)
+    assert probe.probe_retention(client, None) is None
 
 
 def test_probe_retention_survives_a_query_that_raises(monkeypatch):
@@ -159,8 +159,8 @@ def test_probe_retention_survives_a_query_that_raises(monkeypatch):
             return super().query(query, at, timeout)
 
     client = Boom(depth_days=200)
-    monkeypatch.setattr(doctor.time, "time", lambda: client.now)
-    assert doctor.probe_retention(client, None) == 180
+    monkeypatch.setattr(probe.time, "time", lambda: client.now)
+    assert probe.probe_retention(client, None) == 180
 
 
 # --- the job sample ---------------------------------------------------------
@@ -173,38 +173,38 @@ SAMPLE = [
 
 
 def test_recent_gpu_job_picks_one_with_gpus():
-    assert doctor._recent_gpu_job(SAMPLE) == "102"
+    assert probe._recent_gpu_job(SAMPLE) == "102"
 
 
 def test_recent_gpu_job_is_none_when_the_sample_has_no_gpu_jobs():
-    assert doctor._recent_gpu_job([("101", "cpu=8", "")]) is None
-    assert doctor._recent_gpu_job([]) is None
-    assert doctor._recent_gpu_job(None) is None
+    assert probe._recent_gpu_job([("101", "cpu=8", "")]) is None
+    assert probe._recent_gpu_job([]) is None
+    assert probe._recent_gpu_job(None) is None
 
 
 def test_check_blob_counts_the_blobs_present():
     out = io.StringIO()
-    assert doctor.check_blob(out, SAMPLE) is True
+    assert probe.check_blob(out, SAMPLE) is True
     assert "2 of 3" in out.getvalue()
 
 
 def test_check_blob_says_so_when_a_site_has_no_jobstats():
     """Not a failure -- it costs the offline view and one oracle, nothing else."""
     out = io.StringIO()
-    assert doctor.check_blob(out, [("101", "cpu=8", "")]) is False
+    assert probe.check_blob(out, [("101", "cpu=8", "")]) is False
     text = out.getvalue()
-    assert doctor.ABSENT in text and "Prometheus" in text
+    assert probe.ABSENT in text and "Prometheus" in text
 
 
 def test_check_blob_distinguishes_sacct_failing_from_a_quiet_cluster():
     unavailable, quiet = io.StringIO(), io.StringIO()
-    doctor.check_blob(unavailable, None)
-    doctor.check_blob(quiet, [])
+    probe.check_blob(unavailable, None)
+    probe.check_blob(quiet, [])
     assert "could not query sacct" in unavailable.getvalue()
     assert "no finished jobs" in quiet.getvalue()
 
 
-# --- doctor --toml: the editable name table ---------------------------------
+# --- probe --toml: the editable name table ---------------------------------
 
 class TomlClient:
     """Serves a fixed set of series names per family selector."""
@@ -228,7 +228,7 @@ class TomlClient:
 
 def _emit(by_family, record):
     out = io.StringIO()
-    doctor.emit_toml(out, TomlClient(by_family), record.jobid, None,
+    probe.emit_toml(out, TomlClient(by_family), record.jobid, None,
                      [(record.jobid, "gres/gpu=1", "JS1:x")])
     return out.getvalue()
 
@@ -272,11 +272,11 @@ def test_a_cgroup_count_is_not_given_an_invented_denominator(gpu_record, monkeyp
     ("cgroup_memsw_used_bytes", "gauge", "total_memory"),
 ])
 def test_a_cgroup_shape_is_inferred_from_the_suffix(raw, kind, denom):
-    assert doctor._cgroup_fields(raw) == (kind, denom)
+    assert probe._cgroup_fields(raw) == (kind, denom)
 
 
 def test_a_cgroup_count_has_no_shape():
-    assert doctor._cgroup_fields("cgroup_memory_fail_count") is None
+    assert probe._cgroup_fields("cgroup_memory_fail_count") is None
 
 
 @pytest.mark.parametrize("raw,scale", [
@@ -284,13 +284,13 @@ def test_a_cgroup_count_has_no_shape():
     ("DCGM_FI_DEV_GPU_UTIL", 1),            # already a percentage
 ])
 def test_a_gpu_scale_is_inferred_where_it_is_reliable(raw, scale):
-    assert doctor._gpu_scale(raw)[0] == scale
+    assert probe._gpu_scale(raw)[0] == scale
 
 
 def test_an_unfamiliar_gpu_metric_says_to_check_its_units():
     """A wrong scale reads as a plausible number, so it is flagged rather than
     guessed."""
-    _scale, note = doctor._gpu_scale("DCGM_FI_DEV_ROW_REMAP_FAILURE")
+    _scale, note = probe._gpu_scale("DCGM_FI_DEV_ROW_REMAP_FAILURE")
     assert "CHECK" in note
 
 
@@ -314,7 +314,7 @@ def test_the_other_sources_are_reference_only(gpu_record, monkeypatch):
 
 def test_the_output_is_a_loadable_config(gpu_record, monkeypatch, tmp_path,
                                         hermetic_config):
-    """The whole point: `doctor --toml >> config.toml` has to produce a config file,
+    """The whole point: `probe --toml >> config.toml` has to produce a config file,
     and the live blocks have to take effect."""
     from jobscope import config as config_module
     from jobscope import dcgm
@@ -334,5 +334,5 @@ def test_the_output_is_a_loadable_config(gpu_record, monkeypatch, tmp_path,
 
 def test_no_job_to_probe_yields_a_comment_not_a_crash(gpu_record):
     out = io.StringIO()
-    assert doctor.emit_toml(out, TomlClient({}), None, None, []) == 1
+    assert probe.emit_toml(out, TomlClient({}), None, None, []) == 1
     assert out.getvalue().lstrip().startswith("#")

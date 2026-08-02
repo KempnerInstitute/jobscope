@@ -96,16 +96,16 @@ uv run --extra dev pytest     # run the test suite
 
 ## Configuration
 
-### Start with `jobscope doctor`
+### Start with `jobscope probe`
 
 Before configuring anything, ask the cluster what it has:
 
 ```bash
-jobscope doctor              # can jobscope reach Slurm and Prometheus, and how far back
-jobscope doctor --metrics    # every metric this server carries for a real job
+jobscope probe              # can jobscope reach Slurm and Prometheus, and how far back
+jobscope probe --metrics    # every metric this server carries for a real job
 ```
 
-`doctor` reads nothing but your cluster and writes nothing at all, and each check
+`probe` reads nothing but your cluster and writes nothing at all, and each check
 fails independently -- so it is useful precisely when jobscope does *not* yet
 work. It reports which Slurm accounting sources are populated, whether jobstats
 blobs are being written, how far back Prometheus actually holds data, and whether
@@ -120,8 +120,8 @@ A metric jobscope names but your cluster lacks would otherwise just render blank
 forever.
 
 ```bash
-jobscope doctor --toml               # the same, as an editable [metrics] block
-jobscope doctor --validate           # do the exporters agree with the scheduler?
+jobscope probe --toml               # the same, as an editable [metrics] block
+jobscope probe --validate           # do the exporters agree with the scheduler?
 ```
 
 `--toml` turns that listing into config. It prints one
@@ -130,7 +130,7 @@ names are visible and renameable, and anything jobscope has no name for **live**
 a redirect is the only step:
 
 ```bash
-jobscope doctor --toml >> ~/.config/jobscope/config.toml
+jobscope probe --toml >> ~/.config/jobscope/config.toml
 ```
 
 The table key *is* the config name, so renaming a metric is editing that key. Stdout
@@ -168,7 +168,7 @@ many jobs is worth chasing.
 
 The GPU columns, and every column for a running job, need a Prometheus endpoint
 serving the DCGM, `nvidia_gpu_*` and `cgroup_*` series. (`finished --cpu`, and
-everything under `describe`, `config` and the non-metric half of `doctor`, need
+everything under `describe`, `config` and the non-metric half of `probe`, need
 nothing.) Provide it one of these ways.
 
 ```bash
@@ -213,7 +213,7 @@ silent regrade.
 
 The Prometheus URL commonly embeds a credential, so jobscope treats it as a
 secret: no command prints it, and a `config.toml` in a repo checkout is
-git-ignored. The single exception is `jobscope doctor`, which has to name the
+git-ignored. The single exception is `jobscope probe`, which has to name the
 endpoint it is talking to and shows it with the credential replaced --
 `https://***@prometheus.example.net/api/prom` -- so its output stays safe to
 paste into a ticket. On sites already running jobstats,
@@ -847,7 +847,7 @@ which is how one list serves files with different columns.
 | `jobscope plot` | render `--csv` output as a terminal chart |
 | `jobscope describe` | plain-English column and metric reference (`--dcgm` for the catalog) |
 | `jobscope config` | show the config path or print an example |
-| `jobscope doctor` | check what this cluster exposes and whether jobscope can read it |
+| `jobscope probe` | check what this cluster exposes and whether jobscope can read it |
 
 ## Running jobs
 

@@ -550,7 +550,7 @@ def _check_classify_names(where: str, headers: Optional[Tuple[str, ...]]) -> Non
     strays = sorted(h for h in headers if h not in known)
     if strays:
         raise JobscopeError(
-            "%s names no metric %s. Use the short names 'jobscope doctor --metrics' "
+            "%s names no metric %s. Use the short names 'jobscope probe --metrics' "
             "lists, e.g. gpu, sm_act, cpu, power."
             % (where, ", ".join(repr(h) for h in strays)))
 
@@ -748,7 +748,7 @@ class Site:
     label their series, and getting one wrong fails *silently*. A stock Prometheus
     calls the scrape target ``instance`` where jobstats' exporter calls it ``host``;
     read the wrong one and every node reads ``?``, the cgroup divisor lookup misses,
-    and CPU%/MEM% come back blank with no error at all. ``jobscope doctor`` checks
+    and CPU%/MEM% come back blank with no error at all. ``jobscope probe`` checks
     each of these against the live server for exactly that reason.
 
     ``cgroup_selector`` is the matcher appended to every ``cgroup_*`` query. It pins
@@ -1142,7 +1142,7 @@ def _query(where: str, body: Mapping) -> str:
     raw = body.get("query")
     if not isinstance(raw, str) or not raw.strip():
         raise JobscopeError("%s needs query = \"<prometheus series>\" -- the series "
-                            "name exactly as 'jobscope doctor --metrics' lists it" % where)
+                            "name exactly as 'jobscope probe --metrics' lists it" % where)
     return raw.strip()
 
 

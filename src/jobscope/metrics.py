@@ -73,7 +73,7 @@ def rebuild() -> None:
 
     ``[metrics.<family>.<name>]`` can add or replace entries at config-load time,
     which is after this module was imported. Without this the site metric would be
-    invisible here -- no role lookup, no ``label``, and ``doctor`` would still call
+    invisible here -- no role lookup, no ``label``, and ``probe`` would still call
     it unnamed -- while working perfectly everywhere else, which is the confusing
     kind of half-broken.
     """

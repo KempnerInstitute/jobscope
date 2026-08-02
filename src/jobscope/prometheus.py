@@ -2,7 +2,7 @@
 
 Only the GPU and DCGM views reach the network; the CPU-only and offline blob
 views never construct a client. The endpoint (which may carry a credential) is
-resolved from configuration and never logged -- ``jobscope doctor`` is the sole
+resolved from configuration and never logged -- ``jobscope probe`` is the sole
 caller that shows it, and passes it through :func:`jobscope.config.redact_url`
 first.
 """

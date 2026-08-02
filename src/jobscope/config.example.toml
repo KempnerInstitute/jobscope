@@ -35,7 +35,7 @@ sampling_period = 60
 
 # [site] -- only when porting to a cluster that labels series differently. Each of
 # these fails SILENTLY when wrong (every node reads "?", CPU%/MEM% come back blank),
-# so run 'jobscope doctor' first: it names the labels your server actually uses.
+# so run 'jobscope probe' first: it names the labels your server actually uses.
 #
 # [site]
 # host_label      = "host"       # a stock Prometheus usually calls this "instance"
@@ -84,8 +84,8 @@ long_running = "3h"
 #   dcgm     SM_ACT%, TENSOR%, DRAM%, ...  droppable -- no dcgm-exporter
 #
 # There is no families switch and none is needed: a metric you leave out of the lists
-# below is never queried. 'jobscope doctor' reports which exporters answer here, and
-# 'jobscope doctor --metrics' lists every series they carry for a real job.
+# below is never queried. 'jobscope probe' reports which exporters answer here, and
+# 'jobscope probe --metrics' lists every series they carry for a real job.
 
 [metrics]
 # Which GPU/DCGM metrics each view collects and shows. GPU-side only: the CPU side is
@@ -260,15 +260,15 @@ long_running = "red"
 
 # --- Defining or repointing a metric -------------------------------------------
 #
-# Run 'jobscope doctor --metrics' first: it marks "new" every series your server
-# carries that has no jobscope name. 'jobscope doctor --toml' emits them as a block
+# Run 'jobscope probe --metrics' first: it marks "new" every series your server
+# carries that has no jobscope name. 'jobscope probe --toml' emits them as a block
 # like this one, ready to edit.
 #
 # The family says how the series joins to a job: dcgm and nvml are GPU metrics
 # (uppercase UUID and lowercase uuid), cgroup is per-job host metrics.
 #
 # [metrics.dcgm.gpu_util]              # -> the config name "gpu_util"
-# query    = "DCGM_FI_DEV_GPU_UTIL"    # the series, exactly as doctor lists it
+# query    = "DCGM_FI_DEV_GPU_UTIL"    # the series, exactly as probe lists it
 # header   = "GPU_UTIL%"               # column heading (default: the name, upper)
 # decimals = 0
 # reducer  = "avg"                     # over the window: avg | max | delta

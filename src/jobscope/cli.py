@@ -11,7 +11,7 @@ column flags answer *how to show them* and are shared by all three, which the
 earlier per-view subcommands could not do -- ``live`` had no ``--cpu``, the
 historical views had no ``--min-elapsed``, and so on.
 
-``plot``, ``describe``, ``config`` and ``doctor`` are utilities and take the first
+``plot``, ``describe``, ``config`` and ``probe`` are utilities and take the first
 slot too.
 """
 
@@ -22,7 +22,7 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
-from . import __version__, config, doctor, plot
+from . import __version__, config, plot, probe
 from .dcgm import DCGM_HEADERS
 from .errors import JobscopeError
 from .running import format_duration, parse_duration
@@ -40,7 +40,7 @@ from .slurm import DEFAULT_STATE, default_user
 from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
 
 MODES = (RUNNING, FINISHED)
-UTILITIES = ("plot", "describe", "config", "doctor")
+UTILITIES = ("plot", "describe", "config", "probe")
 
 # Flags an explicit JOBID makes inert -- the IDs are the selection, so there is
 # nothing left for a window or a filter to narrow. build_request names these in its
@@ -61,6 +61,10 @@ _JOBID_IGNORES = (
 # as a would-be JOBID and the user gets "sacct: fatal: Bad job/step specified: dcgm",
 # which says nothing about what to type instead.
 RETIRED = {
+    # Renamed rather than retired, but it lands here for the same reason: without an
+    # entry the word falls through as a would-be JOBID and Slurm answers
+    # "sacct: fatal: Bad job/step specified: doctor".
+    "doctor": "probe",
     "summary": "the default (jobscope finished ...)",
     "detail": "--per-gpu",
     "dcgm": "--dcgm",
@@ -257,19 +261,19 @@ def build_parser():
                           help="print the config path jobscope would read")
     p_config.set_defaults(func=handle_config)
 
-    p_doctor = subparsers.add_parser(
-        "doctor", parents=[base],
+    p_probe = subparsers.add_parser(
+        "probe", parents=[base],
         help="check what this cluster exposes and whether jobscope can read it")
-    p_doctor.add_argument("--metrics", nargs="?", const="", metavar="JOBID",
+    p_probe.add_argument("--metrics", nargs="?", const="", metavar="JOBID",
                           help="also list the metrics the server carries for a job "
                                "(a recent GPU job if none is named)")
-    p_doctor.add_argument("--toml", nargs="?", const="", metavar="JOBID",
+    p_probe.add_argument("--toml", nargs="?", const="", metavar="JOBID",
                           help="print the discovered metrics as an editable [metrics] "
                                "block, to append to a config file")
-    p_doctor.add_argument("--validate", nargs="?", const="", metavar="JOBID",
+    p_probe.add_argument("--validate", nargs="?", const="", metavar="JOBID",
                           help="compare one job's utilization across Prometheus, the "
                                "jobstats blob and Slurm's own accounting")
-    p_doctor.set_defaults(func=handle_doctor)
+    p_probe.set_defaults(func=handle_probe)
 
     return parser, subparsers
 
@@ -479,8 +483,10 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
     # A silently wrong chart is worse than no chart.
     retired = [j for j in jobids if str(j) in RETIRED]
     if retired:
-        raise JobscopeError("'%s' is no longer a subcommand; use %s"
-                            % (retired[0], RETIRED[str(retired[0])]))
+        first = str(retired[0])
+        raise JobscopeError(
+            "'%s' was renamed; use '%s'" % (first, RETIRED[first]) if first == "doctor"
+            else "'%s' is no longer a subcommand; use %s" % (first, RETIRED[first]))
     listy = [j for j in jobids if "," in str(j)]
     if listy:
         hint = (" Did you mean --gpuid %s? --gpu selects the GPU columns and takes no"
@@ -787,11 +793,11 @@ def handle_describe(args) -> None:
         describe()
 
 
-def handle_doctor(args) -> None:
+def handle_probe(args) -> None:
     cfg = _apply_config(args)
     # Each flag is None when absent, "" when given bare, and the job ID when given
     # one -- so the bare form means "pick a recent job for me".
-    status = doctor.run(sys.stdout, cfg, args.config_path, cfg.defaults.timeout,
+    status = probe.run(sys.stdout, cfg, args.config_path, cfg.defaults.timeout,
                         metrics=args.metrics is not None,
                         validate=args.validate is not None,
                         toml=args.toml is not None,

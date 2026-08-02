@@ -192,7 +192,7 @@ silently would be undebuggable. Name `cpu` explicitly to keep a different value.
 
 Not exhaustive; the breaking change above is the only one that needs action.
 
-- `jobscope doctor` — what this cluster exposes and whether jobscope can read it,
+- `jobscope probe` — what this cluster exposes and whether jobscope can read it,
   with `--metrics` to list the server's series against jobscope's names,
   `--toml` to emit those names as an editable config block, and `--validate` to
   cross-check Slurm accounting, the jobstats blob and Prometheus on one job.
