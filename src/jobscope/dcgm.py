@@ -598,7 +598,8 @@ def discover_gpus(record: JobRecord, client: PrometheusClient,
 
 def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusClient,
                  timeout: Optional[float],
-                 gpus_found: Optional[List[dict]] = None) -> Tuple[dict, dict]:
+                 gpus_found: Optional[List[dict]] = None,
+                 nodename: Optional[str] = None, gpu_ids=()) -> Tuple[dict, dict]:
     """``(overall, per_gpu)`` metric dicts for one job over ``specs``.
 
     ``({}, {})`` when the job has no GPUs or no samples. ``overall`` is keyed by
@@ -610,6 +611,11 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
     itself, which is what every caller does today -- the parameter exists so a
     caller that already knows (a future batched discovery, or a test) need not
     re-ask.
+
+    ``nodename``/``gpu_ids`` narrow the cards, for ``--nodename``/``--gpuid`` on the
+    summary. Applied after discovery but before the metric queries, so a filtered
+    card costs one entry in a regex rather than a window of samples fetched and
+    discarded -- the same ordering the time-series path uses.
     """
     if not (record.gpus and record.jobid_raw and record.duration):
         return {}, {}
@@ -619,6 +625,11 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
         except Exception:
             return {}, {}
         gpus_found = [g for g in (_gpu_from_series(s["metric"]) for s in found) if g]
+    if nodename:
+        gpus_found = [g for g in gpus_found if g["node"] == nodename]
+    if gpu_ids:
+        wanted = {str(x) for x in gpu_ids}
+        gpus_found = [g for g in gpus_found if str(g["minor"]) in wanted]
     gpus = [(g["node"], g["minor"], g["uuid"]) for g in gpus_found]
     uuids = [g["uuid"] for g in gpus_found]
     models = {g["uuid"]: g["model"] for g in gpus_found}
@@ -731,7 +742,9 @@ def _add_derived(specs: List[MetricSpec], per_gpu: Dict[Tuple[str, str], dict],
 
 def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],
                  specs: List[MetricSpec], client: PrometheusClient,
-                 timeout: Optional[float], workers: int) -> Dict[str, Tuple[dict, dict]]:
+                 timeout: Optional[float], workers: int,
+                 nodename: Optional[str] = None,
+                 gpu_ids=()) -> Dict[str, Tuple[dict, dict]]:
     """Run :func:`dcgm_for_job` over every GPU job, concurrently.
 
     The per-job queries are network I/O-bound, so a thread pool overlaps them and
@@ -761,12 +774,14 @@ def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],
         return {}
 
     workers = max(1, min(workers, len(gpu_jobs)))
+    narrow = {"nodename": nodename, "gpu_ids": gpu_ids}
     if workers == 1:
-        return {jid: dcgm_for_job(records[jid], specs, client, timeout)
+        return {jid: dcgm_for_job(records[jid], specs, client, timeout, **narrow)
                 for jid in gpu_jobs}
     results: Dict[str, Tuple[dict, dict]] = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(dcgm_for_job, records[jid], specs, client, timeout): jid
+        futures = {executor.submit(dcgm_for_job, records[jid], specs, client, timeout,
+                                   **narrow): jid
                    for jid in gpu_jobs}
         for future, jid in futures.items():
             try:

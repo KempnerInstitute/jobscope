@@ -446,6 +446,23 @@ def cols_for(columns: List[Column], view: str, dcgm: bool = False) -> List[Colum
     return out
 
 
+def narrowing_pairs(nodename: Optional[str], gpu_ids) -> List[Tuple[str, str]]:
+    """Header lines naming a ``--nodename`` / ``--gpuid`` narrowing, if any.
+
+    Load-bearing rather than decorative. On ``--per-gpu`` and ``--ts`` a filter is
+    self-evident -- the rows that remain carry the node and the card. The summary has
+    no such row: narrowed, it prints one line of numbers that looks exactly like the
+    whole job's, and a reader who scrolled past the command would have no way to tell
+    that GPU% 43 is one node of two. So the narrowing says so.
+    """
+    pairs = []
+    if nodename:
+        pairs.append(("Node", "%s only" % nodename))
+    if gpu_ids:
+        pairs.append(("GPUs", "%s only (per node)" % ", ".join(str(g) for g in gpu_ids)))
+    return pairs
+
+
 def context_pairs(selection: Selection, desc: str,
                   records: Dict[str, JobRecord]) -> List[Tuple[str, str]]:
     """Context lines for the header block.

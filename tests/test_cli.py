@@ -704,12 +704,21 @@ def test_node_is_accepted_as_an_alias(monkeypatch):
                         monkeypatch).nodename == "n1"
 
 
-def test_nodename_without_a_per_gpu_view_is_rejected(capsys):
-    """The per-job table's NODE column is a count, so there is no name to match."""
-    with pytest.raises(SystemExit):
-        main(["-j", "1", "--nodename=n1"])
-    err = capsys.readouterr().err
-    assert "needs --per-gpu or --ts" in err
+def test_nodename_and_gpuid_reach_resolve_on_the_summary(monkeypatch):
+    """They used to be rejected here: the per-job table has no row to filter.
+
+    It has numbers to narrow instead -- select.py restricts the stats the summary is
+    computed from -- so the flags apply to every view now, and the header says so.
+    """
+    seen = {}
+
+    def fake_resolve(request, cfg, timeout, workers, specs, nodename=None, gpu_ids=()):
+        seen["nodename"], seen["gpu_ids"] = nodename, gpu_ids
+        return None
+
+    monkeypatch.setattr(cli, "resolve", fake_resolve)
+    main(["-j", "1", "--nodename=n1", "--gpuid", "0,1"])
+    assert seen == {"nodename": "n1", "gpu_ids": ("0", "1")}
 
 
 def test_nodename_reaches_the_timeseries_emitter(monkeypatch):
@@ -1332,7 +1341,4 @@ def test_a_comma_in_a_jobid_is_caught_and_points_at_gpuid(capsys):
     assert "not a job ID" in err and "--gpuid" not in err
 
 
-def test_gpuid_needs_a_view_with_one_row_per_gpu(capsys):
-    with pytest.raises(SystemExit):
-        main(["-j", "123", "--gpuid", "0"])
-    assert "--gpuid needs --ts or --plot_ts" in capsys.readouterr().err
+

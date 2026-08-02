@@ -705,16 +705,10 @@ def handle_report(args) -> None:
     if args.classify and args.plot_ts:
         # The plot branch wins below, so say so rather than drop it silently.
         print("note: --plot_ts draws the series; ignoring --classify", file=sys.stderr)
-    if args.nodename and not (args.per_gpu or args.ts):
-        # The per-job table's NODE column is a count of nodes, not a name, so there is
-        # nothing there to match; say so rather than filtering nothing.
-        raise JobscopeError("--nodename needs --per-gpu or --ts, the views whose rows "
-                            "carry a node name")
-    if args.gpuid and not args.ts:
-        # Only the time series has a row per GPU. The per-job table aggregates across
-        # them and --per-gpu addresses its rows by position, so neither can narrow.
-        raise JobscopeError("--gpuid needs --ts or --plot_ts, the views with one row "
-                            "per GPU")
+    # --nodename and --gpuid apply everywhere now. On --per-gpu and --ts they filter
+    # rows, which have a node and a GPU on them; on the summary there is no row to
+    # filter, so select.py narrows the numbers the summary is computed *from*. Both
+    # end up describing the same subset.
     view = args.view or "all"
     show_dcgm = view in ("all", "gpu")
     # Which metrics each view collects, from [metrics] -- the built-in lists when a
@@ -780,7 +774,8 @@ def handle_report(args) -> None:
 
     # The detail granularity renders the fixed DETAIL_COLUMNS, so it takes no spec
     # list; the per-job one splices the profiling block from whichever was chosen.
-    selected = resolve(request, cfg, timeout, workers, specs if show_dcgm else None)
+    selected = resolve(request, cfg, timeout, workers, specs if show_dcgm else None,
+                       nodename=args.nodename, gpu_ids=options.gpu_ids)
     if selected is None:
         return
     renderer = (DetailRenderer(selected.context, options) if args.per_gpu

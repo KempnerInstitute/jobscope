@@ -63,6 +63,25 @@ carrying it has empty metric cells rather than zeros, so a monitoring outage no 
 reads as a fleet of wasteful jobs. Anything that treats an unrecognised `LABEL` as an
 error should be taught this one.
 
+### `--nodename` and `--gpuid` now work on the summary too
+
+They used to be rejected there — the per-job table has no row per unit to filter.
+It has numbers to *narrow*, though: the stored blob is per node and per GPU already,
+so restricting it before anything reads it makes the row, the per-metric table, the
+bars and the verdict all describe the subset.
+
+```
+$ jobscope -j 36770231                              GPU%=28   #GPU=8  NODE=2
+$ jobscope -j 36770231 --nodename holygpu8a15401    GPU%=43   #GPU=4  NODE=1
+```
+
+The DCGM columns are narrowed to the same cards, or the row would mix one node's
+GPU% with every node's SM_ACT%. A narrowed summary looks exactly like a whole-job
+one, so the header now names the filter (`Node: … only`).
+
+GPU ids are per node: nodes number their cards from 0, so `--gpuid 0` on a two-node
+job keeps two cards, not one.
+
 ### New: `--gpuid`, and `--gpu 0,1` is no longer silently wrong
 
 `jobscope plot` has always taken `--gpu 0,1` to chart particular cards, so that is

@@ -15,10 +15,10 @@ them" as independent choices.
 """
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 
-from . import config
+from . import blob, config
 from .dcgm import BLOB_BACKED_KEYS, DEFAULT_SPECS, MetricSpec, compute_dcgm
 from .errors import JobscopeError
 from .running import (
@@ -40,6 +40,7 @@ from .report import (
     RenderOptions,
     combined_timeseries,
     context_pairs,
+    narrowing_pairs,
     cpu_timeseries,
     dcgm_timeseries,
     running_combined_timeseries,
@@ -112,7 +113,8 @@ class Resolved(NamedTuple):
 
 
 def resolve(request: Request, cfg: config.Config, timeout: Optional[float],
-            workers: int, specs: Optional[List[MetricSpec]]) -> Optional[Resolved]:
+            workers: int, specs: Optional[List[MetricSpec]],
+            nodename: Optional[str] = None, gpu_ids=()) -> Optional[Resolved]:
     """Select jobs and their metrics, or ``None`` when nothing matched.
 
     ``specs`` of ``None`` means the caller wants no DCGM columns (the ``--cpu``
@@ -125,8 +127,8 @@ def resolve(request: Request, cfg: config.Config, timeout: Optional[float],
     running equivalent is pure dict work over values already collected.
     """
     if request.running:
-        return _resolve_running(request, cfg, timeout, workers, specs)
-    return _resolve_historical(request, cfg, timeout, workers, specs)
+        return _resolve_running(request, cfg, timeout, workers, specs, nodename, gpu_ids)
+    return _resolve_historical(request, cfg, timeout, workers, specs, nodename, gpu_ids)
 
 
 # --- squeue -----------------------------------------------------------------
@@ -172,7 +174,9 @@ def _report_no_running(selection) -> None:
 
 
 def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[float],
-                     workers: int, specs: Optional[List[MetricSpec]]) -> Optional[Resolved]:
+                     workers: int, specs: Optional[List[MetricSpec]],
+                     nodename: Optional[str] = None,
+                     gpu_ids=()) -> Optional[Resolved]:
     """One chunk from squeue plus Prometheus, shaped like a sacct chunk.
 
     ``running_records`` synthesizes the blob Slurm has not written yet, so the records
@@ -235,7 +239,8 @@ def sacct_selection(request: Request) -> Selection:
 
 
 def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[float],
-                        workers: int, specs: Optional[List[MetricSpec]]
+                        workers: int, specs: Optional[List[MetricSpec]],
+                        nodename: Optional[str] = None, gpu_ids=()
                         ) -> Optional[Resolved]:
     """Streaming sacct chunks, each enriched with DCGM metrics as it arrives.
 
@@ -243,6 +248,7 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
     mid-stream failure can therefore surface after a partial table. Explicit
     JOBIDs render in one pass, because their context header names every owner.
     """
+    narrowing = narrowing_pairs(nodename, gpu_ids)
     selection = sacct_selection(request)
     jobids, desc = select_jobs(selection, timeout)
     if not jobids:
@@ -253,34 +259,93 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
 
     if selection.jobids:
         records = fetch(jobids, timeout)
-        context = context_pairs(selection, desc, records)
+        context = context_pairs(selection, desc, records) + narrowing
         chunks: Iterator[Tuple[List[str], Dict[str, JobRecord]]] = iter([(jobids, records)])
     else:
-        context = context_pairs(selection, desc, {})  # the window branch reads no records
+        context = context_pairs(selection, desc, {}) + narrowing  # window: no records
         chunks = fetch_chunks(jobids, timeout)
 
     return Resolved(context, _enrich(chunks, cfg, timeout, workers, specs,
-                                     no_blob=request.no_blob))
+                                     no_blob=request.no_blob,
+                                     nodename=nodename, gpu_ids=gpu_ids))
 
 
 def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
-            specs: Optional[List[MetricSpec]],
-            no_blob: bool = False) -> Iterator[Chunk]:
+            specs: Optional[List[MetricSpec]], no_blob: bool = False,
+            nodename: Optional[str] = None, gpu_ids=()) -> Iterator[Chunk]:
     """Attach DCGM metrics and fill running jobs' blobs, chunk by chunk.
 
     The client is built lazily and at most once: a selection with no GPU jobs, or a
     --cpu report over finished ones, never contacts Prometheus.
+
+    ``nodename``/``gpu_ids`` narrow both halves to the same cards -- the blob the
+    summary's CPU%/MEM%/GPU%/GMEM% come from, and the DCGM queries. Both, or the row
+    would mix one node's GPU% with every node's SM_ACT%.
     """
     client: Optional[PrometheusClient] = None
     for chunk_ids, records in chunks:
+        # Before the blob is read and before the queries: narrowing the record is what
+        # makes every downstream figure -- row, per-metric table, bars, verdict --
+        # describe the subset without any of them knowing a filter was applied.
+        if nodename or gpu_ids:
+            _narrow_records(records, chunk_ids, nodename, gpu_ids)
         dcgm_data: DcgmData = {}
         if specs and any(j in records and records[j].gpus for j in chunk_ids):
             if client is None:
                 client = client_from_config(cfg, timeout)
-            dcgm_data = compute_dcgm(records, chunk_ids, specs, client, timeout, workers)
+            dcgm_data = compute_dcgm(records, chunk_ids, specs, client, timeout, workers,
+                                     nodename=nodename, gpu_ids=gpu_ids)
         client = _fill_running(records, chunk_ids, cfg, timeout, workers, client,
                                force=no_blob)
         yield chunk_ids, records, dcgm_data
+
+
+def _narrow_records(records, jobids, nodename: Optional[str], gpu_ids) -> None:
+    """Restrict each record's stats to ``nodename``/``gpu_ids``, in place.
+
+    Raises when nothing in the selection matched, naming what was there -- the same
+    rule the time-series filters follow, and for the same reason: an empty or
+    silently-whole-job summary is indistinguishable from a correct one.
+
+    A record whose stats are empty afterwards keeps them empty; it renders as "-"
+    rather than as zeros, which is what a job that never touched the named node is.
+    """
+    # Two separate questions, because narrow_stats keeps a node's CPU/memory entry
+    # even when --gpuid removed all of its cards -- --gpuid says nothing about cores.
+    # So a surviving `stats` does not mean a surviving *card*, and checking only the
+    # former let `--gpuid 9` report the whole job's CPU% under a heading claiming
+    # otherwise.
+    seen_nodes, seen_gpus, hit_gpus = set(), set(), set()
+    matched_node = False
+    for jid in jobids:
+        record = records.get(jid)
+        if record is None:
+            continue
+        seen_nodes |= blob.nodes_in(record.stats)
+        seen_gpus |= blob.gpu_ids_in(record.stats)
+        stats = blob.narrow_stats(record.stats, nodename, gpu_ids)
+        if stats:
+            matched_node = True
+        hit_gpus |= blob.gpu_ids_in(stats)
+        records[jid] = replace(
+            record, stats=stats,
+            nodes=str(len(blob.nodes_in(stats))) if stats else "0",
+            # #GPU drives the GPU% denominator's "was this job allocated cards" and
+            # the GPU-hours weighting, so it has to shrink with the cards -- counted
+            # per card rather than per distinct minor, since nodes number from 0.
+            gpus=blob.gpu_count(stats) if record.gpus else record.gpus)
+    if nodename and not matched_node:
+        raise JobscopeError("no data for node %r in this selection; it ran on: %s"
+                            % (nodename, ", ".join(sorted(seen_nodes)) or "(none)"))
+    # Every id that matched nothing, not just the case where none did: in --gpuid 0,9
+    # it is the 9 you need told about, and a shorter summary looks like a correct one.
+    # Skipped entirely when the selection had no cards -- a CPU-only job narrowed by
+    # --gpuid has nothing to match and nothing to complain about either.
+    missing = [g for g in gpu_ids if str(g) not in hit_gpus]
+    if gpu_ids and seen_gpus and missing:
+        raise JobscopeError("no data for GPU %s in this selection; it used: %s"
+                            % (", ".join(repr(g) for g in missing),
+                               ", ".join(sorted(seen_gpus))))
 
 
 def _fill_running(records, jobids, cfg, timeout, workers, client, force=False):

@@ -79,6 +79,68 @@ def blob_capacity(stats: dict) -> Tuple[int, int]:
             sum(n.get("total_memory", 0) or 0 for n in nodes))
 
 
+# The three per-GPU maps a node entry carries, each keyed by minor number as a string.
+_GPU_MAPS = ("gpu_utilization", "gpu_used_memory", "gpu_total_memory")
+
+
+def narrow_stats(stats: dict, nodename: Optional[str] = None, gpu_ids=()) -> dict:
+    """``stats`` restricted to one node and/or a set of GPU minor numbers.
+
+    What makes ``--nodename`` and ``--gpuid`` work on the *summary*, where there is
+    no row per unit to filter: narrow the numbers the summary is computed from, and
+    every figure downstream -- the row, the per-metric table, the bars, the verdict --
+    follows without knowing a filter happened.
+
+    The arithmetic stays correct under narrowing because every figure in the blob is
+    per node or per GPU already: CPU% is one node's CPU-seconds over its own cores x
+    elapsed, and GPU% is the mean over whichever cards remain. Nothing here is a
+    whole-job total that a subset would misrepresent.
+
+    Returns ``{}`` when the filter matches nothing, which reads downstream as "no
+    data" rather than as zeros -- the caller checks and says which name missed.
+    """
+    if not stats or "nodes" not in stats or not (nodename or gpu_ids):
+        return stats
+    wanted = {str(g) for g in gpu_ids}
+    nodes = {}
+    for host, node in stats["nodes"].items():
+        if nodename and host != nodename:
+            continue
+        if wanted:
+            node = dict(node)
+            for name in _GPU_MAPS:
+                if name in node:
+                    node[name] = {m: v for m, v in node[name].items() if str(m) in wanted}
+            # A node whose cards were all filtered out keeps its CPU/memory entry --
+            # dropping it would silently change CPU% too, and --gpuid says nothing
+            # about cores.
+        nodes[host] = node
+    return dict(stats, nodes=nodes) if nodes else {}
+
+
+def gpu_ids_in(stats: dict) -> set:
+    """Every GPU minor number the stats carry, as strings -- for "it used: ..."."""
+    return {str(m) for node in (stats or {}).get("nodes", {}).values()
+            for name in _GPU_MAPS for m in node.get(name, {})}
+
+
+def gpu_count(stats: dict) -> int:
+    """How many *cards* the stats carry, across nodes.
+
+    Not the number of distinct minor numbers: every node numbers its cards from 0,
+    so a two-node job holding 0-3 on each has eight cards and four distinct minors.
+    Counting minors made ``--gpuid 0,1`` on such a job report two GPUs and weight its
+    GPU-hours by two, understating the pooled row by half.
+    """
+    return sum(len(node.get("gpu_utilization", {}))
+               for node in (stats or {}).get("nodes", {}).values())
+
+
+def nodes_in(stats: dict) -> set:
+    """Every node name the stats carry."""
+    return set((stats or {}).get("nodes", {}))
+
+
 def blob_metrics(stats: dict, gpus: Optional[int] = None) -> JobMetrics:
     """A job's overall CPU%/MEM%/GPU%/GMEM% from its stats dict.
 

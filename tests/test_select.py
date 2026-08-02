@@ -432,3 +432,87 @@ def test_no_blob_without_an_endpoint_is_an_error_not_a_silent_table_of_dashes():
     with pytest.raises(JobscopeError) as exc:
         select_mod._fill_running(records, ["1"], broken, None, 1, None, force=True)
     assert "--no-blob" in str(exc.value)
+
+
+# --- narrowing the summary: --nodename / --gpuid on a view with no row per unit ---
+
+_TWO_NODE_STATS = {
+    "total_time": 100,
+    "nodes": {
+        "n1": {"cpus": 2, "total_time": 100, "used_memory": 4, "total_memory": 8,
+               "gpu_utilization": {"0": 90.0, "1": 90.0},
+               "gpu_used_memory": {"0": 8, "1": 8},
+               "gpu_total_memory": {"0": 10, "1": 10}},
+        "n2": {"cpus": 2, "total_time": 0, "used_memory": 1, "total_memory": 8,
+               "gpu_utilization": {"0": 10.0, "1": 10.0},
+               "gpu_used_memory": {"0": 1, "1": 1},
+               "gpu_total_memory": {"0": 10, "1": 10}},
+    },
+}
+
+
+def _narrowed(nodename=None, gpu_ids=()):
+    from jobscope.blob import blob_metrics
+    from jobscope.select import _narrow_records
+
+    record = JobRecord(jobid="1", state="COMPLETED", name="j", runtime="00:01:40",
+                       nodes="2", gpus=4, stats=_TWO_NODE_STATS, start=0, end=100,
+                       duration=100, jobid_raw="1", cluster="c", user="alice")
+    records = {"1": record}
+    _narrow_records(records, ["1"], nodename, gpu_ids)
+    got = records["1"]
+    return got, blob_metrics(got.stats, got.gpus)
+
+
+def test_narrowing_the_summary_to_one_node_changes_its_numbers():
+    """The point of the feature: n1 is busy and n2 idle, so the whole-job GPU% of 50
+    hides both. Narrowed, each node reports its own."""
+    _whole, metrics = _narrowed()
+    assert metrics.value("GPU%") == 50          # (90 + 90 + 10 + 10) / 4
+
+    record, metrics = _narrowed(nodename="n1")
+    assert metrics.value("GPU%") == 90
+    assert metrics.value("CPU%") == 50          # 100 CPU-s / (100s x 2 cores)
+    assert (record.nodes, record.gpus) == ("1", 2)
+
+    _record, metrics = _narrowed(nodename="n2")
+    assert metrics.value("GPU%") == 10
+    assert metrics.value("CPU%") == 0           # n2 burned no CPU at all
+
+
+def test_gpu_count_is_cards_not_distinct_minors():
+    """Both nodes number their cards from 0, so --gpuid 0 keeps two cards, not one.
+
+    Counting distinct minors made #GPU read 1 here and weighted the pooled row's
+    GPU-hours by one card instead of two, halving it.
+    """
+    record, _metrics = _narrowed(gpu_ids=("0",))
+    assert record.gpus == 2
+    assert record.nodes == "2"                  # both nodes still hold a card
+
+
+def test_gpuid_leaves_the_cpu_side_alone():
+    """--gpuid says nothing about cores, so narrowing cards must not move CPU%."""
+    _whole, before = _narrowed()
+    _record, after = _narrowed(gpu_ids=("0",))
+    assert after.value("CPU%") == before.value("CPU%")
+    assert after.value("GPU%") == 50            # (90 + 10) / 2, card 0 of each node
+
+
+def test_narrowing_names_what_missed():
+    from jobscope.select import _narrow_records
+
+    def narrow(nodename=None, gpu_ids=()):
+        record = JobRecord(jobid="1", state="COMPLETED", name="j", runtime="x",
+                           nodes="2", gpus=4, stats=_TWO_NODE_STATS, start=0, end=100,
+                           duration=100, jobid_raw="1", cluster="c", user="alice")
+        _narrow_records({"1": record}, ["1"], nodename, gpu_ids)
+
+    with pytest.raises(JobscopeError) as excinfo:
+        narrow(nodename="n9")
+    assert "'n9'" in str(excinfo.value) and "n1, n2" in str(excinfo.value)
+
+    # Every miss, not just an all-miss: the 9 is what needs saying in "0,9".
+    with pytest.raises(JobscopeError) as excinfo:
+        narrow(gpu_ids=("0", "9"))
+    assert "'9'" in str(excinfo.value) and "0, 1" in str(excinfo.value)

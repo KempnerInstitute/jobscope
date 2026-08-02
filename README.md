@@ -668,20 +668,41 @@ three. The CSV schema is untouched, so it still pipes to `jobscope plot`; a name
 matches nothing writes no header at all, since a header with no rows under it reads as
 an idle node and gives `plot` nothing to chart.
 
-What `--nodename` does not work with is the per-job table, whose `NODE` column is a
-*count*: there is no name there to match, so asking for one is an error rather than an
-empty report.
-
-`--gpuid` narrows the other dimension, for the `--ts` family only (`--ts`,
-`--plot_ts`, `--stats`, `--classify`) — those are the views with one row per GPU:
+`--gpuid` narrows the other dimension, and both work on **every** view:
 
 ```
-jobscope -j JOBID --nodename NODE --plot_ts --gpuid 0,1     # chart two of four cards
-jobscope -j JOBID --ts 30m --csv --gpuid 2                  # or tabulate one
+jobscope -j JOBID --nodename NODE                    # the summary, one node
+jobscope -j JOBID --nodename NODE --gpuid 0,1        # ... and two of its cards
+jobscope -j JOBID --nodename NODE --plot_ts --gpuid 0,1
+jobscope -j JOBID --ts 30m --csv --gpuid 2
 ```
 
-It filters before the queries as `--nodename` does, and it names **every** id that
-matched nothing rather than quietly charting a shorter list — in `--gpuid 0,9` it is
+On `--per-gpu` and `--ts` they filter rows, which carry a node and a card. The
+summary has no such row, so jobscope narrows the numbers it is computed *from* —
+the stored blob is per node and per GPU already, so CPU% becomes that node's
+CPU-seconds over its own cores, and GPU% the mean over the cards that remain. The
+`NODE` and `#GPU` columns shrink with them.
+
+That is how you find a straggler. On a two-node job:
+
+```
+$ jobscope -j 36770231                              GPU%=28   #GPU=8  NODE=2
+$ jobscope -j 36770231 --nodename holygpu8a15401    GPU%=43   #GPU=4  NODE=1
+```
+
+— half the allocation was doing most of the work, which the whole-job 28 hides.
+
+Because a narrowed summary otherwise looks exactly like a whole-job one, the header
+says what was filtered:
+
+```
+  Node:      holygpu8a15401 only
+  GPUs:      0, 1 only (per node)
+```
+
+GPU ids are per node — nodes number their cards from 0, so `--gpuid 0` on a two-node
+job keeps two cards. Both filters run before the queries, and both name **every** id
+that matched nothing rather than quietly reporting a subset: in `--gpuid 0,9` it is
 the `9` you need told about. MIG instances are addressed as they print, `0.1`.
 
 Note it is `--gpuid`, not `--gpu`: `--gpu` selects the GPU *columns* and takes no
