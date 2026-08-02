@@ -66,7 +66,7 @@ def test_gpus_allocated_but_unsampled_is_unknown_not_na():
     read as 'this job has no GPU'."""
     got = blob_metrics(CPU_STATS, gpus=2)
     assert got.state("GPU%") == models.UNKNOWN
-    assert "no GPU samples" in got.measure("GPU%").reason
+    assert "no GPU samples" in got.by_header["GPU%"].reason
 
 
 def test_blob_metrics_empty():
@@ -82,7 +82,7 @@ def test_a_blob_missing_its_core_count_is_unknown_not_zero():
     got = blob_metrics({"total_time": 100, "nodes": {"n1": {"total_time": 50}}})
     assert got.state("CPU%") == models.UNKNOWN
     assert got.value("CPU%") is None
-    assert "core count" in got.measure("CPU%").reason
+    assert "core count" in got.by_header["CPU%"].reason
 
 
 def test_a_blob_missing_its_memory_allocation_is_unknown_not_zero():

@@ -100,14 +100,6 @@ class JobMetrics:
     def __contains__(self, header: str) -> bool:
         return header in self.by_header
 
-    def measure(self, header: str) -> Optional[Measure]:
-        """The full reading for ``header``, or None if this source never carries it.
-
-        Distinct from a reading of ``unknown``: a DCGM column is not something the
-        blob failed to measure, it is something the blob is not about.
-        """
-        return self.by_header.get(header)
-
     def value(self, header: str) -> Optional[float]:
         """``header``'s number, or None for absent in any of its senses.
 
@@ -119,7 +111,15 @@ class JobMetrics:
         return found.value if found is not None else None
 
     def state(self, header: str) -> str:
-        """``ok``/``na``/``unknown`` for ``header``; ``unknown`` if never collected."""
+        """``ok``/``na``/``unknown`` for ``header``; ``unknown`` if never collected.
+
+        Absent-from-this-source and read-but-unknown deliberately collapse: a DCGM
+        column is not something the blob *failed* to measure, it is something the
+        blob is not about, but no caller needs to tell those apart. What decides a
+        `no-data` verdict is which columns the *series* carries -- see
+        classifier.unceilinged -- and that is asked of the column set, not of one
+        job's readings. Read ``by_header`` directly if you ever need the difference.
+        """
         found = self.by_header.get(header)
         return found.state if found is not None else UNKNOWN
 
@@ -128,30 +128,13 @@ class JobMetrics:
         return {h: m.value for h, m in self.by_header.items()
                 if m.known and m.value is not None}
 
-    def any_known(self, headers=None) -> bool:
-        """Whether anything was measured -- optionally only among ``headers``.
 
-        The test that separates "this job was idle" from "we have nothing on this
-        job": the second must never be classified.
-        """
-        chosen = self.by_header if headers is None else {
-            h: m for h, m in self.by_header.items() if h in headers}
-        return any(m.known for m in chosen.values())
-
-    def reasons(self, headers=None) -> Tuple[str, ...]:
-        """Distinct explanations for the unknowns, in first-seen order.
-
-        Deduplicated because one dead exporter produces the same sentence for
-        every column it served, and a report should say it once.
-        """
-        seen, out = set(), []
-        for header, measure in self.by_header.items():
-            if headers is not None and header not in headers:
-                continue
-            if measure.state == UNKNOWN and measure.reason and measure.reason not in seen:
-                seen.add(measure.reason)
-                out.append(measure.reason)
-        return tuple(out)
+# Measure.reason is still recorded, and blob.py sets it on every unmeasured value --
+# a JobMetrics knows *why* each gap is there. Nothing renders it yet: the planned
+# line was "GPU% unknown -- no samples in window; job ended 2026-01-03, retention
+# begins 2026-02-04", and the aggregator for it (dedupe the sentences, since one dead
+# exporter produces the same one for every column it served) was written before the
+# renderer and removed unused. Read `by_header` when that lands.
 
 
 EMPTY = JobMetrics({})
