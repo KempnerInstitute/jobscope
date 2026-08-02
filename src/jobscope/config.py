@@ -809,6 +809,10 @@ class Config:
     metrics: "Metrics" = field(default_factory=lambda: Metrics())
     palette: Palette = field(default_factory=Palette)
     site: "Site" = field(default_factory=lambda: Site())
+    # Where prometheus_url came from, for `jobscope config` to name. "" when nothing
+    # set it directly, in which case resolve_prometheus may still find one through
+    # jobstats -- endpoint_source() reports that case, since only resolution knows.
+    prometheus_from: str = ""
     report: "Report" = field(default_factory=lambda: Report())
     plot: "Plot" = field(default_factory=lambda: Plot())
 
@@ -899,6 +903,8 @@ def load_config(path: Optional[str] = None,
     )
     return Config(
         prometheus_url=(env.get(PROM_URL_ENV) or prom.get("url")) or None,
+        prometheus_from=("$" + PROM_URL_ENV if env.get(PROM_URL_ENV)
+                         else "[prometheus] url" if prom.get("url") else ""),
         sampling_period=int(prom.get("sampling_period", DEFAULT_SAMPLING_PERIOD)),
         sampling_period_explicit="sampling_period" in prom,
         site_jobstats_config_path=prom.get("site_jobstats_config_path"),
@@ -1419,8 +1425,30 @@ def resolve_prometheus(cfg: Config) -> Tuple[str, int]:
     so callers must never log or print it -- :func:`redact_url` exists for the one
     caller that has to show the user which endpoint it is talking to.
     """
+    url, sampling_period, _source = _resolve_endpoint(cfg)
+    return url, sampling_period
+
+
+def endpoint_source(cfg: Config) -> str:
+    """Where the endpoint came from, for ``jobscope config`` to name.
+
+    A separate view onto :func:`_resolve_endpoint` rather than a third return value,
+    because ``resolve_prometheus``'s 2-tuple is what every caller and eight tests
+    read. Which of the three sources answered matters as much as the value when an
+    endpoint is wrong: editing the config file cannot fix a stale $JOBSCOPE_PROM_URL,
+    and neither touches the jobstats config.py the URL may really be coming from.
+    """
+    try:
+        return _resolve_endpoint(cfg)[2]
+    except JobscopeError:
+        return ""
+
+
+def _resolve_endpoint(cfg: Config) -> Tuple[str, int, str]:
+    """``(url, sampling_period, source)`` -- the one implementation of the search."""
     url = cfg.prometheus_url
     sampling_period = cfg.sampling_period
+    source = cfg.prometheus_from
     if not url:
         explicit = cfg.site_jobstats_config_path
         site_path = explicit or _discover_site_jobstats_dir()
@@ -1428,11 +1456,13 @@ def resolve_prometheus(cfg: Config) -> Tuple[str, int]:
             site_url, site_sp = _import_site_prometheus(site_path, required=bool(explicit))
             if site_url:
                 url = site_url
+                source = "%s/config.py (jobstats%s)" % (
+                    site_path.rstrip("/"), "" if explicit else ", auto-discovered")
                 if site_sp and not cfg.sampling_period_explicit:
                     sampling_period = int(site_sp)
     if not url:
         raise JobscopeError(_no_endpoint_message(cfg))
-    return url, sampling_period
+    return url, sampling_period, source
 
 
 def _import_site_prometheus(config_path: str,

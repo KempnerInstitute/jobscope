@@ -817,6 +817,7 @@ def handle_config(args) -> None:
     exists = os.path.exists(str(path))
     print("config path: %s%s" % (path, "" if exists else " (not present; using built-in defaults)"))
     cfg = config.load_config(str(path)) if exists else config.load_config()
+    _print_endpoint(cfg)
     for view, bands in (("summary", cfg.thresholds),
                         ("timeslice", cfg.timeslice_thresholds)):
         print()
@@ -849,6 +850,28 @@ def handle_config(args) -> None:
     print("  %-13s %s" % ("panels", cfg.plot.panels))
     print()
     print("print an example with: jobscope config --example")
+
+
+def _print_endpoint(cfg) -> None:
+    """The endpoint, redacted, and which of the three sources supplied it.
+
+    First because it is the one setting that has to be right before anything works,
+    and it was the one thing this command did not show -- you could read every band
+    table and still not know which server the numbers would come from.
+
+    Always through redact_url: the URL commonly embeds a Grafana Cloud token, so it
+    is a secret that happens to look like an address.
+    """
+    try:
+        url, scrape = config.resolve_prometheus(cfg)
+    except JobscopeError as exc:
+        print("prometheus:  %s" % str(exc).splitlines()[0])
+        print("             run 'jobscope probe' for the three ways to set it")
+        return
+    print("prometheus:  %s" % config.redact_url(url))
+    source = config.endpoint_source(cfg)
+    print("             %sscrape %ds"
+          % ("from %s, " % source if source else "", scrape))
 
 
 def _print_bands(view: str, bands) -> None:

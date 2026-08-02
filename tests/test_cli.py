@@ -1344,3 +1344,17 @@ def test_a_comma_in_a_jobid_is_caught_and_points_at_gpuid(capsys):
 
 
 
+
+
+def test_config_shows_the_endpoint_redacted(monkeypatch, capsys):
+    """It printed every band table but never the one setting that must be right
+    first. The token is the reason it has to go through redact_url."""
+    secret = "glc_configleaktoken"
+    monkeypatch.setenv("JOBSCOPE_PROM_URL",
+                       "https://1180804:%s@prom.grafana.net/api/prom" % secret)
+    main(["config"])
+    out = capsys.readouterr().out
+    assert secret not in out
+    assert "***@prom.grafana.net/api/prom" in out
+    assert "$JOBSCOPE_PROM_URL" in out       # and where it came from
+    assert "scrape" in out

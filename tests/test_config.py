@@ -1096,3 +1096,48 @@ def test_the_one_view_note_names_edges_when_they_are_set(hermetic_config, tmp_pa
 
     _edges_config(tmp_path, "[thresholds.summary.wasteful]\ndefault = 6\n")
     assert "keeps the built-in edges" in capsys.readouterr().err
+
+
+# --- where the endpoint came from --------------------------------------------
+
+def test_endpoint_source_names_which_of_the_three_answered(hermetic_config, tmp_path,
+                                                           monkeypatch):
+    """Editing the config file cannot fix a stale $JOBSCOPE_PROM_URL, and neither
+    touches the jobstats config.py the URL may really be coming from -- so which
+    source answered matters as much as the value."""
+    from jobscope.config import endpoint_source
+
+    path = tmp_path / "c.toml"
+    path.write_text('[prometheus]\nurl = "http://from-file:9090"\n')
+    cfg = load_config(str(path))
+    assert cfg.prometheus_url == "http://from-file:9090"
+    assert endpoint_source(cfg) == "[prometheus] url"
+
+    monkeypatch.setenv("JOBSCOPE_PROM_URL", "http://from-env:9090")
+    cfg = load_config(str(path))
+    assert cfg.prometheus_url == "http://from-env:9090"      # the env wins
+    assert endpoint_source(cfg) == "$JOBSCOPE_PROM_URL"
+
+
+def test_endpoint_source_marks_an_auto_discovered_jobstats_config(monkeypatch, tmp_path):
+    """The distinction worth drawing: an explicit site_jobstats_config_path is
+    something you set, auto-discovery is something that happened to you."""
+    from jobscope.config import endpoint_source
+
+    site = tmp_path / "bin"
+    site.mkdir()
+    (site / "config.py").write_text('PROM_SERVER = "http://site:9090"\n')
+    monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: str(site))
+    assert "auto-discovered" in endpoint_source(_cfg())
+
+    explicit = endpoint_source(_cfg(site_jobstats_config_path=str(site)))
+    assert "config.py (jobstats)" in explicit and "auto-discovered" not in explicit
+
+
+def test_endpoint_source_is_empty_rather_than_raising_when_unresolved(monkeypatch):
+    """`jobscope config` calls this while reporting the failure; it must not add a
+    second exception to the one already being printed."""
+    from jobscope.config import endpoint_source
+
+    monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: None)
+    assert endpoint_source(_cfg()) == ""
