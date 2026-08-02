@@ -591,6 +591,7 @@ def test_the_shipped_example_reproduces_the_built_in_behaviour():
     """It spells every knob out, so it must spell out exactly the defaults --
     otherwise copying the template silently changes how jobs are graded."""
     import tempfile
+
     from jobscope.config import Metrics, Palette
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
         fh.write(example_config_text())
@@ -662,3 +663,161 @@ def test_a_site_value_must_be_a_non_empty_string(hermetic_config, tmp_path, valu
     path.write_text("[site]\nhost_label = %s\n" % value)
     with pytest.raises(JobscopeError):
         load_config(str(path))
+
+
+# --- [metrics.<family>.<name>]: naming a series jobscope did not ship ------
+
+def _define(tmp_path, body):
+    path = tmp_path / "m.toml"
+    path.write_text(body)
+    config_module.set_config(load_config(str(path)))
+    return config_module.get_config()
+
+
+def test_a_site_can_name_a_series_and_get_it_in_the_extended_view(hermetic_config, tmp_path):
+    """The worked case: DCGM's own duty cycle, which jobscope does not ship because
+    it prefers NVML's. Both exist on the server, so a site may want the other."""
+    from jobscope import dcgm, metrics
+    cfg = _define(tmp_path, '[metrics.dcgm.gpu_util]\n'
+                            'query = "DCGM_FI_DEV_GPU_UTIL"\n'
+                            'header = "GPU_UTIL%"\ndecimals = 0\n')
+    spec = dcgm.spec_named("gpu_util")
+    assert spec is not None and spec.metric == "DCGM_FI_DEV_GPU_UTIL"
+    assert spec.header == "GPU_UTIL%" and spec.decimals == 0
+    # Reachable by every route a built-in is.
+    assert spec in dcgm.ALL_SPECS
+    assert "GPU_UTIL%" in [s.header for s in cfg.metrics.extended]
+    assert metrics.spec_for("GPU_UTIL%") is not None
+    assert "GPU_UTIL%" in config_module._known_percent_headers()
+
+
+def test_a_site_metric_never_joins_the_default_view(hermetic_config, tmp_path):
+    """It is group="all", so defining one cannot silently widen the report every
+    user sees -- or the queries every sweep pays for."""
+    from jobscope import dcgm
+    cfg = _define(tmp_path, '[metrics.dcgm.gpu_util]\nquery = "DCGM_FI_DEV_GPU_UTIL"\n')
+    assert dcgm.spec_named("gpu_util") not in dcgm.DEFAULT_SPECS
+    assert "GPU_UTIL" not in [s.header for s in cfg.metrics.summary]
+    assert dcgm.spec_named("gpu_util") not in dcgm.KEY_SPECS
+
+
+def test_the_header_defaults_to_the_uppercased_name(hermetic_config, tmp_path):
+    from jobscope import dcgm
+    _define(tmp_path, '[metrics.dcgm.xid]\nquery = "DCGM_FI_DEV_XID_ERRORS"\n')
+    assert dcgm.spec_named("xid").header == "XID"
+
+
+def test_nvml_and_dcgm_families_pick_the_right_uuid_label(hermetic_config, tmp_path):
+    """The two GPU families differ only by which label carries the UUID, and getting
+    it wrong yields a response whose rows cannot be attributed to a card."""
+    from jobscope import dcgm
+    _define(tmp_path, '[metrics.dcgm.a]\nquery = "A"\n[metrics.nvml.b]\nquery = "B"\n')
+    assert dcgm.spec_named("a").uuid_label == "UUID"
+    assert dcgm.spec_named("b").uuid_label == "uuid"
+
+
+def test_a_cgroup_definition_takes_denom_and_kind(hermetic_config, tmp_path):
+    from jobscope import cpu
+    _define(tmp_path, '[metrics.cgroup.swap]\nquery = "cgroup_memsw_used_bytes"\n'
+                      'header = "SWAP%"\ndenom = "total_memory"\nkind = "gauge"\n')
+    spec = cpu.spec_named("swap")
+    assert spec.metric == "cgroup_memsw_used_bytes" and spec.denom == "total_memory"
+    assert "cgroup_memsw_used_bytes" in spec.query("7", 300, 60)
+
+
+def test_a_definition_overrides_a_builtin_of_the_same_name(hermetic_config, tmp_path):
+    """How a site whose exporter uses different series names ports without a patch."""
+    from jobscope import cpu
+    _define(tmp_path, '[metrics.cgroup.cpu]\n'
+                      'query = "container_cpu_usage_seconds_total"\n'
+                      'denom = "cpus"\nkind = "rate"\n')
+    assert cpu.spec_named("cpu").metric == "container_cpu_usage_seconds_total"
+    # And the override reaches the default view, which is where it matters.
+    assert "container_cpu_usage_seconds_total" in \
+        cpu.DEFAULT_CGROUP_SPECS[0].query("7", 300, 60)
+
+
+def test_registration_replaces_rather_than_accumulates(hermetic_config, tmp_path):
+    """Loading a config twice -- which `jobscope config` and the tests both do --
+    must yield one copy of each metric, and dropping a table must drop the metric."""
+    from jobscope import dcgm
+    before = len(dcgm.METRICS)
+    _define(tmp_path, '[metrics.dcgm.gpu_util]\nquery = "DCGM_FI_DEV_GPU_UTIL"\n')
+    assert len(dcgm.METRICS) == before + 1
+    _define(tmp_path, '[metrics.dcgm.gpu_util]\nquery = "DCGM_FI_DEV_GPU_UTIL"\n')
+    assert len(dcgm.METRICS) == before + 1
+    _define(tmp_path, "[defaults]\ndays = 1\n")
+    assert len(dcgm.METRICS) == before and dcgm.spec_named("gpu_util") is None
+
+
+def test_a_definition_needs_a_query(hermetic_config, tmp_path):
+    with pytest.raises(JobscopeError) as exc:
+        _define(tmp_path, '[metrics.dcgm.xid]\nheader = "XID"\n')
+    assert "query" in str(exc.value)
+
+
+@pytest.mark.parametrize("body,bad", [
+    ('[metrics.dcgm.x]\nquery = "A"\nreducer = "median"\n', "reducer"),
+    ('[metrics.dcgm.x]\nquery = "A"\nagg = "total"\n', "agg"),
+    ('[metrics.dcgm.x]\nquery = "A"\nscale = "big"\n', "scale"),
+    ('[metrics.dcgm.x]\nquery = "A"\ndecimals = 1.5\n', "decimals"),
+    ('[metrics.cgroup.x]\nquery = "A"\nkind = "counter"\n', "kind"),
+    ('[metrics.cgroup.x]\nquery = "A"\ndenom = "bytes"\n', "denom"),
+    # A key from the other family means the author has the wrong mental model, and
+    # the numbers would be silently wrong rather than absent.
+    ('[metrics.cgroup.x]\nquery = "A"\nscale = 100\n', "scale"),
+    ('[metrics.dcgm.x]\nquery = "A"\ndenom = "cpus"\n', "denom"),
+])
+def test_a_bad_definition_names_the_key(hermetic_config, tmp_path, body, bad):
+    with pytest.raises(JobscopeError) as exc:
+        _define(tmp_path, body)
+    assert bad in str(exc.value)
+
+
+def test_an_unknown_family_is_rejected(hermetic_config, tmp_path):
+    with pytest.raises(JobscopeError) as exc:
+        _define(tmp_path, '[metrics.rocm.busy]\nquery = "A"\n')
+    assert "rocm" in str(exc.value) and "dcgm" in str(exc.value)
+
+
+def test_view_selections_and_definitions_coexist(hermetic_config, tmp_path):
+    """One [metrics] section holds both, told apart by type: a view is a list or
+    "all", a family is a table."""
+    cfg = _define(tmp_path, '[metrics]\nextended = "all"\n'
+                            '[metrics.dcgm.gpu_util]\nquery = "DCGM_FI_DEV_GPU_UTIL"\n')
+    assert "GPU_UTIL" in [s.header for s in cfg.metrics.extended]
+
+
+def test_a_view_can_name_a_site_metric(hermetic_config, tmp_path):
+    """Registration runs before resolution, so a definition is nameable in the same
+    file -- otherwise a site would have to load its config twice."""
+    cfg = _define(tmp_path, '[metrics]\nextended = ["sm_act", "gpu_util"]\n'
+                            '[metrics.dcgm.gpu_util]\nquery = "DCGM_FI_DEV_GPU_UTIL"\n')
+    headers = [s.header for s in cfg.metrics.extended]
+    assert "SM_ACT%" in headers and "GPU_UTIL" in headers
+
+
+def test_an_override_changes_only_what_it_names(hermetic_config, tmp_path):
+    """"My exporter calls that series something else" must not also rename the
+    column, re-tier it, or take it out of the classifier. CPU%'s header is the
+    identity [thresholds], --csv consumers and the classifier's literals key on."""
+    from jobscope import cpu, metrics
+    _define(tmp_path, '[metrics.cgroup.cpu]\n'
+                      'query = "container_cpu_usage_seconds_total"\n')
+    spec = cpu.spec_named("cpu")
+    assert spec.metric == "container_cpu_usage_seconds_total"   # changed
+    assert spec.header == "CPU%"          # inherited, not renamed to "CPU"
+    assert spec.decimals == 0             # inherited, not defaulted to 1
+    assert spec.kind == "rate"            # inherited, not defaulted to gauge
+    assert spec.denom == "cpus"           # inherited
+    assert spec.group == "default"        # still in the default view
+    assert metrics.headers_with_role(metrics.SPLIT) == ("CPU%",)
+
+
+def test_overriding_a_gpu_builtin_keeps_its_purpose(hermetic_config, tmp_path):
+    from jobscope import dcgm, metrics
+    _define(tmp_path, '[metrics.nvml.duty]\nquery = "gpu_busy_percent"\n')
+    spec = dcgm.spec_named("duty")
+    assert spec.metric == "gpu_busy_percent" and spec.header == "GPU%"
+    assert spec.group == "default" and "worst" in spec.roles
+    assert metrics.headers_with_role(metrics.RESOURCE) == ("GPU%", "CPU%")

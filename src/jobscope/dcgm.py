@@ -8,7 +8,7 @@ jobstats uses. Each value is the time-average (or max/delta) over the job's
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 from . import config
@@ -234,6 +234,63 @@ SPEC_ALIASES: Dict[str, MetricSpec] = _alias_table()
 METRIC_NAMES: Tuple[str, ...] = tuple(
     spec.header.lower()[:-1] if spec.header.endswith("%") else spec.key
     for spec in METRICS)
+
+# The built-in catalog, kept so a re-registration starts from it rather than from
+# whatever a previous config added. Site metrics are additive, not cumulative: two
+# loads of the same config must produce one copy of each metric, not two.
+_BUILTIN: Tuple[MetricSpec, ...] = tuple(METRICS)
+
+
+def _rebuild() -> None:
+    """Recompute the tables derived from ``METRICS``.
+
+    Only the ones a site metric can affect. It always joins ``group="all"``, so
+    ``DEFAULT_SPECS``, ``KEY_SPECS``, ``GPU_SUMMARY_SPECS`` and the blob-backed sets
+    are untouched by construction -- a config cannot quietly change what the default
+    view collects, which is why the site form is opt-in per view rather than
+    something that widens every report.
+    """
+    global SPEC_BY_HEADER, ALL_SPECS, SPEC_ALIASES, METRIC_NAMES, _CATALOG_ORDER
+    SPEC_BY_HEADER = {spec.header: spec for spec in METRICS}
+    ALL_SPECS = list(METRICS)
+    SPEC_ALIASES = _alias_table()
+    METRIC_NAMES = tuple(
+        spec.header.lower()[:-1] if spec.header.endswith("%") else spec.key
+        for spec in METRICS)
+    _CATALOG_ORDER = {spec.key: i for i, spec in enumerate(METRICS)}
+
+
+def register(extra: List[MetricSpec]) -> None:
+    """Replace the site-defined additions to the GPU catalog with ``extra``.
+
+    Called once per config load. Resets to the built-ins first, so loading a config
+    twice -- which tests and ``jobscope config`` both do -- does not accumulate
+    duplicates, and dropping a metric from the file actually drops it.
+
+    A spec whose ``key`` matches a built-in **replaces** it, which is how a site
+    whose exporter publishes a different series name for the same quantity ports
+    without a patch -- keeping the built-in's ``group`` and ``roles``, see
+    :func:`_inherit`. Anything else is appended after the built-ins, so catalog order
+    stays stable and site metrics sort last in every view that shows them.
+    """
+    by_key = {spec.key: spec for spec in extra}
+    merged = [_inherit(builtin, by_key.pop(builtin.key, None)) for builtin in _BUILTIN]
+    METRICS[:] = merged + [spec for spec in extra if spec.key in by_key]
+    _rebuild()
+
+
+def _inherit(builtin: MetricSpec, override: Optional[MetricSpec]) -> MetricSpec:
+    """``override`` with the built-in's *purpose* kept, or the built-in unchanged.
+
+    A site overriding ``duty`` means "my exporter calls that series something else",
+    not "take GPU% out of the default view and out of the classifier's ballot". So
+    ``group``, ``roles``, ``show`` and the short label forms come from the built-in;
+    only how to *fetch and scale* the value comes from the config.
+    """
+    if override is None:
+        return builtin
+    return replace(override, group=builtin.group, roles=builtin.roles,
+                   show=builtin.show, slug=builtin.slug, tag=builtin.tag)
 
 
 def spec_named(name: str) -> Optional[MetricSpec]:

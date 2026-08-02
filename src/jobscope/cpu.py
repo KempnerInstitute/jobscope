@@ -21,7 +21,7 @@ lifetime to be worth re-querying per sample. They arrive as the per-node blob di
 itself, so ``denom`` names a blob field.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from . import config
@@ -115,6 +115,47 @@ DEFAULT_CGROUP_SPECS: List[CgroupSpec] = [s for s in CGROUP_METRICS
 CGROUP_HEADERS: Tuple[str, ...] = tuple(spec.header for spec in CGROUP_METRICS)
 CGROUP_NAMES: Tuple[str, ...] = tuple(spec.key for spec in CGROUP_METRICS)
 _ORDER: Dict[str, int] = {spec.key: i for i, spec in enumerate(CGROUP_METRICS)}
+
+# See jobscope.dcgm.register for why the built-ins are kept separately.
+_BUILTIN: Tuple[CgroupSpec, ...] = tuple(CGROUP_METRICS)
+
+
+def _rebuild() -> None:
+    """Recompute the tables derived from ``CGROUP_METRICS``.
+
+    ``DEFAULT_CGROUP_SPECS`` is rebuilt too, unlike the GPU side: a site can
+    legitimately *override* ``cpu`` or ``mem`` -- the two default cgroup metrics --
+    with a differently-named series from its own exporter, and the default view has
+    to pick that up or the override does nothing where it matters most.
+    """
+    global SPEC_BY_KEY, DEFAULT_CGROUP_SPECS, CGROUP_HEADERS, CGROUP_NAMES, _ORDER
+    SPEC_BY_KEY = {spec.key: spec for spec in CGROUP_METRICS}
+    DEFAULT_CGROUP_SPECS = [s for s in CGROUP_METRICS if s.group == "default"]
+    CGROUP_HEADERS = tuple(spec.header for spec in CGROUP_METRICS)
+    CGROUP_NAMES = tuple(spec.key for spec in CGROUP_METRICS)
+    _ORDER = {spec.key: i for i, spec in enumerate(CGROUP_METRICS)}
+
+
+def register(extra: List[CgroupSpec]) -> None:
+    """Replace the site-defined additions to the cgroup catalog with ``extra``."""
+    by_key = {spec.key: spec for spec in extra}
+    merged = [_inherit(builtin, by_key.pop(builtin.key, None)) for builtin in _BUILTIN]
+    CGROUP_METRICS[:] = merged + [spec for spec in extra if spec.key in by_key]
+    _rebuild()
+
+
+def _inherit(builtin: CgroupSpec, override: Optional[CgroupSpec]) -> CgroupSpec:
+    """``override`` with the built-in's *purpose* kept, or the built-in unchanged.
+
+    A site overriding ``cpu`` is saying "my exporter calls that series something
+    else", not "demote CPU% out of the summary and out of the classifier". So
+    ``group`` and ``roles`` come from the built-in: forcing the override's own
+    ``group="all"`` would drop CPU% from the default view entirely, and dropping its
+    ``split`` role would change how every job is classified -- both silently.
+    """
+    if override is None:
+        return builtin
+    return replace(override, group=builtin.group, roles=builtin.roles)
 
 
 def spec_named(name: str) -> Optional[CgroupSpec]:

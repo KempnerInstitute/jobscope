@@ -165,6 +165,43 @@ power_w = 100
 # "NVIDIA H200" = 120
 # "Tesla V100-PCIE-32GB" = 45
 
+# Defining a metric jobscope does not ship, or repointing one it does.
+#
+# Run 'jobscope doctor --metrics' first: it lists every series your server carries
+# for a real job, and marks "new" the ones with no jobscope name. A table here gives
+# one a name, which [metrics] and [thresholds] then accept.
+#
+# The family says how the series joins to a job: dcgm and nvml are GPU metrics
+# (uppercase UUID and lowercase uuid respectively), cgroup is per-job host metrics.
+#
+# [metrics.dcgm.gpu_util]              # -> the config name "gpu_util"
+# query    = "DCGM_FI_DEV_GPU_UTIL"    # the series, exactly as doctor lists it
+# header   = "GPU_UTIL%"               # column heading (default: the name, upper)
+# decimals = 0
+# reducer  = "avg"                     # over the window: avg | max | delta
+# agg      = "mean"                    # across a job's GPUs: mean | sum | max
+# scale    = 1                         # multiplier on the raw value (100 for a
+#                                      # 0-1 fraction shown as a percent)
+#
+# [metrics.cgroup.swap]
+# query  = "cgroup_memsw_used_bytes"
+# header = "SWAP%"
+# denom  = "total_memory"              # cgroup values divide by an allocation:
+#                                      # cpus | total_memory
+# kind   = "gauge"                     # gauge | rate (a counter)
+#
+# A defined metric joins the *extended* catalog, so it appears under --dcgm or in
+# any view that names it. It never joins the default view on its own: defining one
+# cannot silently widen every report, or the queries every sweep pays for.
+#
+# The same table with a BUILT-IN's name overrides it -- how a cluster whose exporter
+# uses different series names ports without patching jobscope. An override changes
+# only what it names; header, tier, group and roles are inherited, so this does not
+# rename the CPU% column or take it out of the classifier:
+#
+# [metrics.cgroup.cpu]
+# query = "container_cpu_usage_seconds_total"
+
 [metrics]
 # Which GPU/DCGM metrics each view collects and shows. GPU-side only: the CPU side
 # is CPU%/MEM% and fixed, because there are exactly two cgroup queries and no

@@ -62,15 +62,23 @@ DEFAULT_CONFIG = config_module.Config(
 def hermetic_config():
     """Pin the process-wide config to known defaults so tests never read ~/.config.
 
-    The palette is reset with it: report._SGR is module state that cli._apply_config
-    installs, so a test that runs a command with a configured [colors] would
-    otherwise leave every later test painting in its colours.
+    Three pieces of module state get reset with it, all installed by a config load:
+
+    * The palette -- ``report._SGR`` is set by ``cli._apply_config``, so a test that
+      runs a command with a configured ``[colors]`` would otherwise leave every
+      later test painting in its colours.
+    * The metric catalogs -- ``[metrics.<family>.<name>]`` appends to ``dcgm.METRICS``
+      and ``cpu.CGROUP_METRICS`` at load time, so a test defining a site metric would
+      otherwise leak it into every test after it, and into the catalog-shape
+      assertions in particular.
     """
     config_module.set_config(DEFAULT_CONFIG)
     report.set_palette(DEFAULT_CONFIG.palette)
+    config_module.register_metrics({})
     yield
     config_module.reset_config()
     report.set_palette(config_module.Palette())
+    config_module.register_metrics({})
 
 
 @pytest.fixture

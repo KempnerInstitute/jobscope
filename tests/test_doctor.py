@@ -34,8 +34,8 @@ def test_nvml_and_dcgm_are_split_by_which_uuid_label_they_use():
     split has to come from the catalog rather than from the metric name."""
     assert doctor.family_of("nvidia_gpu_duty_cycle") == "nvml"
     assert doctor.family_of("DCGM_FI_DEV_GPU_UTIL") == "dcgm"
-    assert doctor.CATALOG["nvidia_gpu_duty_cycle"][0] == "nvml"
-    assert doctor.CATALOG["DCGM_FI_PROF_SM_ACTIVE"][0] == "dcgm"
+    assert doctor.catalog()["nvidia_gpu_duty_cycle"][0] == "nvml"
+    assert doctor.catalog()["DCGM_FI_PROF_SM_ACTIVE"][0] == "dcgm"
 
 
 def test_the_longer_dcgm_prefixes_strip_before_the_bare_one():
@@ -46,12 +46,12 @@ def test_the_longer_dcgm_prefixes_strip_before_the_bare_one():
 
 
 def test_every_catalogued_series_yields_a_name():
-    for raw in doctor.CATALOG:
+    for raw in doctor.catalog():
         assert doctor.simple_name(raw), raw
 
 
 def test_names_are_unique_so_config_cannot_be_ambiguous():
-    names = [doctor.simple_name(raw) for raw in doctor.CATALOG]
+    names = [doctor.simple_name(raw) for raw in doctor.catalog()]
     assert len(names) == len(set(names))
 
 

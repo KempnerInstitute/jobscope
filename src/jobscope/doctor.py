@@ -89,7 +89,16 @@ def _catalog() -> Dict[str, Tuple[str, str]]:
     return found
 
 
-CATALOG: Dict[str, Tuple[str, str]] = _catalog()
+def catalog() -> Dict[str, Tuple[str, str]]:
+    """The catalog as it stands *now*, including anything ``[metrics]`` defined.
+
+    Computed per call rather than cached at import: config-defined metrics are
+    registered at load time, which is after this module is imported, and a stale
+    snapshot would report a metric the site had just named as still unnamed --
+    working everywhere except in the command whose job is to tell you about it.
+    ``--metrics`` runs once per invocation, so there is nothing to cache.
+    """
+    return _catalog()
 
 
 def family_of(raw: str) -> Optional[str]:
@@ -109,7 +118,7 @@ def catalog_name(raw: str) -> Optional[str]:
     real one, and config would reject it as unknown. Only catalogued series have a
     name, so only they get one here.
     """
-    known = CATALOG.get(raw)
+    known = catalog().get(raw)
     return "%s-%s" % known if known else None
 
 
@@ -125,7 +134,7 @@ def simple_name(raw: str) -> Optional[str]:
     None for a series in no known family: naming it would imply jobscope knows how
     to join it to a job, and it does not.
     """
-    known = CATALOG.get(raw)
+    known = catalog().get(raw)
     if known:
         return "%s-%s" % known
     family = family_of(raw)
@@ -457,7 +466,7 @@ def discover_metrics(out, client, jobid: Optional[str], timeout: Optional[float]
         print("  (no GPUs discovered -- CPU-only job, or no samples in its window)", file=out)
 
     catalogued_by_family: Dict[str, List[str]] = {}
-    for raw, (family, _short) in CATALOG.items():
+    for raw, (family, _short) in catalog().items():
         catalogued_by_family.setdefault(family, []).append(raw)
 
     for family, selector in groups:
@@ -470,7 +479,7 @@ def discover_metrics(out, client, jobid: Optional[str], timeout: Optional[float]
         missing = [raw for raw in known if raw not in found]
         print("\n%s -- %d catalogued, %d present, %d not in jobscope's catalog"
               % (family, len(known), len(known) - len(missing),
-                 sum(1 for raw in found if raw not in CATALOG)), file=out)
+                 sum(1 for raw in found if raw not in catalog())), file=out)
         # The name column carries the name **config actually takes**, and nothing
         # else. An uncatalogued series gets NEW rather than a mechanically derived
         # name, because a derived name looks exactly like a real one and is not:
@@ -521,12 +530,38 @@ Write `sm_act`, not `dcgm-sm_act`: the prefixed form is rejected with a note.
 Run `jobscope config` to see how every value actually resolved, which is the
 quickest way to confirm an edit landed.
 
-A row marked "%s" is a series your server exports that jobscope has no name for,
-so nothing above will accept it -- naming one needs a [metrics.<family>.<name>]
-table, which is not implemented yet. Until it is, those rows are informational:
-they say what your cluster could expose, not what you can select today. The ones
-here worth having are the ECC/row-remap counters (hardware faults) and
-cgroup_memory_fail_count (OOM pressure).
+A row marked "%s" is a series your server exports that jobscope has no name for.
+Give it one with a [metrics.<family>.<name>] table -- the family says which label
+carries the GPU UUID (dcgm = UUID, nvml = uuid), and the name becomes the config
+name:
+
+  [metrics.dcgm.gpu_util]              # -> the name "gpu_util"
+  query    = "DCGM_FI_DEV_GPU_UTIL"    # the series, exactly as listed above
+  header   = "GPU_UTIL%%"               # column heading (default: the name, upper)
+  decimals = 0
+  reducer  = "avg"                     # avg (default) | max | delta
+  scale    = 1                         # multiplier on the raw value
+  agg      = "mean"                    # across a job's GPUs: mean | sum | max
+
+  [metrics.cgroup.swap]                # -> "swap"
+  query  = "cgroup_memsw_used_bytes"
+  header = "SWAP%%"
+  denom  = "total_memory"              # cgroup values divide by an allocation
+  kind   = "gauge"                     # gauge | rate (a counter)
+
+A defined metric joins the **extended** catalog, so it shows under --dcgm, or in
+any view that names it: extended = ["sm_act", "gpu_util"]. It never joins the
+default view on its own -- defining one cannot silently widen every report, or
+the queries every sweep pays for.
+
+The same table with a *built-in's* name **overrides** it, which is how a cluster
+whose exporter uses different series names ports without a patch. An override
+changes only what it names -- header, tier, roles and the rest are inherited, so
+pointing cpu at another series does not rename the CPU%% column or take it out of
+the classifier:
+
+  [metrics.cgroup.cpu]
+  query = "container_cpu_usage_seconds_total"
 
 A row marked "%s" is in jobscope's catalog but your server does not carry it --
 usually hardware, e.g. DFMA%% exists on H100 and not on A100. Nothing to do; the

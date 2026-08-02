@@ -368,8 +368,7 @@ class Metrics:
     def __post_init__(self) -> None:
         # Deferred so config stays importable without dcgm (which reaches
         # prometheus, and so back to config) -- see _known_percent_headers.
-        from .dcgm import (ALL_SPECS, BLOB_BACKED_KEYS, DEFAULT_SPECS, KEY_SPECS,
-                           METRICS, specs_named)
+        from .dcgm import ALL_SPECS, BLOB_BACKED_KEYS, DEFAULT_SPECS, KEY_SPECS, METRICS, specs_named
         for name, fallback in (("summary", DEFAULT_SPECS),
                                ("timeseries", KEY_SPECS),
                                ("extended", ALL_SPECS)):
@@ -506,6 +505,12 @@ def load_config(path: Optional[str] = None,
     thr = data.get("thresholds") or {}
     dfl = data.get("defaults") or {}
 
+    # Before anything resolves a metric name: [metrics.<family>.<name>] tables add
+    # to the catalogs, and both the view selections below and [thresholds]' typo
+    # check have to be able to see what a site just defined. Unconditional, because
+    # a config that *removes* a definition has to un-register it too.
+    register_metrics(data.get("metrics") or {})
+
     stale = [key for key in LEGACY_THRESHOLD_KEYS if key in thr]
     if stale:
         # Not silently: a site that set gpu = 25 would otherwise stop taking effect
@@ -606,18 +611,187 @@ def _site(table: Mapping) -> Site:
     return Site(**values)
 
 
+VIEWS = ("summary", "timeseries", "extended")
+
+# The families a [metrics.<family>.<name>] table can define a metric in. `nvml` and
+# `dcgm` share one catalog and differ only by which label carries the GPU UUID, so
+# naming the family is how a site says which -- getting it wrong yields a response
+# whose rows cannot be attributed to a card.
+FAMILIES = ("dcgm", "nvml", "cgroup")
+
+# What a definition may set, per family, beyond the required query/header. Kept
+# explicit so a key that belongs to the other family is rejected rather than
+# silently dropped -- `scale` on a cgroup metric, or `denom` on a DCGM one, means
+# the author has the wrong mental model and the numbers would be wrong.
+_GPU_KEYS = {"query", "header", "reducer", "agg", "scale", "decimals", "unit"}
+_CGROUP_KEYS = {"query", "header", "kind", "denom", "decimals"}
+
+
+def _definitions(table: Mapping) -> Mapping:
+    """The ``[metrics.<family>]`` sub-tables, separated from the view selections.
+
+    Distinguished by type rather than by name: a view is a list or ``"all"``, a
+    family is a table of tables. That keeps ``[metrics] summary = [...]`` and
+    ``[metrics.dcgm.xid]`` in one section without either needing a marker.
+    """
+    return {key: value for key, value in table.items() if isinstance(value, Mapping)}
+
+
+def _builtin_named(family: str, name: str):
+    """The built-in spec ``name`` would override in ``family``, or None.
+
+    Looked up so an override inherits every field it does not mention. Overriding
+    ``cpu`` to point at another exporter's series must not also rename the column
+    from ``CPU%`` to ``CPU`` -- the header is the identity ``[thresholds]``,
+    ``--csv`` consumers and the classifier's own literals all key on.
+    """
+    if family == "cgroup":
+        from .cpu import _BUILTIN
+    else:
+        from .dcgm import _BUILTIN
+    return next((spec for spec in _BUILTIN if spec.key == name), None)
+
+
+def _one_of(where: str, body: Mapping, key: str, allowed, default: str) -> str:
+    raw = body.get(key, default)
+    value = str(raw).strip().lower()
+    if value not in allowed:
+        raise JobscopeError("%s %s must be %s, not %r"
+                            % (where, key, " or ".join(allowed), raw))
+    return value
+
+
+def _gpu_spec(family: str, name: str, body: Mapping):
+    """One ``[metrics.dcgm|nvml.<name>]`` table -> a MetricSpec."""
+    from .dcgm import MetricSpec
+    where = "[metrics.%s.%s]" % (family, name)
+    _check_keys(where, body, _GPU_KEYS)
+    base = _builtin_named(family, name)
+    return MetricSpec(
+        key=name,
+        header=_header(where, body, name, base),
+        metric=_query(where, body),
+        scale=_number(where, body, "scale", base.scale if base else 1.0),
+        decimals=_int(where, body, "decimals", base.decimals if base else 1),
+        # `all` for a new metric: it appears in --dcgm/extended and nowhere else
+        # unless [metrics] names it, so adding one cannot silently widen the default
+        # report -- or the queries every sweep pays for. An override keeps the
+        # built-in's group; see dcgm._inherit, which applies that after this.
+        group="all",
+        reducer=_one_of(where, body, "reducer", ("avg", "max", "delta"),
+                        base.reducer if base else "avg"),
+        agg=_one_of(where, body, "agg", ("mean", "sum", "max"),
+                    base.agg if base else "mean"),
+        # nvml is the lowercase-uuid family, dcgm the uppercase one.
+        uuid_label="uuid" if family == "nvml" else "UUID")
+
+
+def _cgroup_spec(name: str, body: Mapping):
+    """One ``[metrics.cgroup.<name>]`` table -> a CgroupSpec."""
+    from .cpu import CgroupSpec
+    where = "[metrics.cgroup.%s]" % name
+    _check_keys(where, body, _CGROUP_KEYS)
+    base = _builtin_named("cgroup", name)
+    denom = _one_of(where, body, "denom", ("cpus", "total_memory"),
+                    base.denom if base else "total_memory")
+    return CgroupSpec(
+        key=name, header=_header(where, body, name, base), metric=_query(where, body),
+        kind=_one_of(where, body, "kind", ("gauge", "rate"), base.kind if base else "gauge"),
+        denom=denom, decimals=_int(where, body, "decimals", base.decimals if base else 1),
+        group="all")
+
+
+def _check_keys(where: str, body: Mapping, allowed) -> None:
+    stray = sorted(set(body) - set(allowed))
+    if stray:
+        raise JobscopeError("%s does not take %s; it takes %s"
+                            % (where, ", ".join(repr(k) for k in stray),
+                               ", ".join(sorted(allowed))))
+
+
+def _query(where: str, body: Mapping) -> str:
+    raw = body.get("query")
+    if not isinstance(raw, str) or not raw.strip():
+        raise JobscopeError("%s needs query = \"<prometheus series>\" -- the series "
+                            "name exactly as 'jobscope doctor --metrics' lists it" % where)
+    return raw.strip()
+
+
+def _header(where: str, body: Mapping, name: str, base=None) -> str:
+    """The column heading: the config's, else the overridden built-in's, else the name."""
+    raw = body.get("header")
+    if raw is None:
+        return base.header if base is not None else name.upper()
+    if not isinstance(raw, str) or not raw.strip():
+        raise JobscopeError("%s header must be a non-empty string" % where)
+    return raw.strip()
+
+
+def _number(where: str, body: Mapping, key: str, default: float) -> float:
+    raw = body.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise JobscopeError("%s %s must be a number, not %r" % (where, key, raw))
+    return float(raw)
+
+
+def _int(where: str, body: Mapping, key: str, default: int) -> int:
+    raw = body.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise JobscopeError("%s %s must be an integer, not %r" % (where, key, raw))
+    if raw < 0:
+        raise JobscopeError("%s %s must not be negative" % (where, key))
+    return raw
+
+
+def register_metrics(table: Mapping) -> None:
+    """Install the ``[metrics.<family>.<name>]`` definitions into the catalogs.
+
+    Must run *before* the view selections are resolved, since those have to be able
+    to name what was just defined. Registration replaces rather than accumulates, so
+    loading a config twice yields one copy of each metric and removing a table from
+    the file removes the metric.
+    """
+    from . import cpu, dcgm
+    definitions = _definitions(table)
+    stray = sorted(set(definitions) - set(FAMILIES))
+    if stray:
+        raise JobscopeError(
+            "[metrics] has no family %s; the families are %s"
+            % (", ".join(repr(k) for k in stray), ", ".join(FAMILIES)))
+    gpu, cgroup = [], []
+    for family in FAMILIES:
+        for name, body in (definitions.get(family) or {}).items():
+            if not isinstance(body, Mapping):
+                raise JobscopeError(
+                    "[metrics.%s.%s] must be a table, e.g.\n"
+                    '  [metrics.%s.%s]\n  query = "..."' % (family, name, family, name))
+            if family == "cgroup":
+                cgroup.append(_cgroup_spec(name, body))
+            else:
+                gpu.append(_gpu_spec(family, name, body))
+    dcgm.register(gpu)
+    cpu.register(cgroup)
+    # The cross-family views read the catalogs at import, so they need telling.
+    from . import metrics as metrics_module
+    metrics_module.rebuild()
+
+
 def _metrics(table: Mapping) -> Metrics:
     """``[metrics]`` -> resolved spec lists.
 
-    Each key is a list of metric names, or the string ``"all"`` for the whole
+    Each view key is a list of metric names, or the string ``"all"`` for the whole
     catalog. Absent, a view keeps its built-in list (see :meth:`Metrics.__post_init__`).
+    Family sub-tables are metric *definitions* and were consumed by
+    :func:`register_metrics` before this runs.
     """
     from .dcgm import ALL_SPECS, METRIC_NAMES, spec_named, specs_named
-    unknown = [key for key in table if key not in ("summary", "timeseries", "extended")]
+    table = {k: v for k, v in table.items() if k not in _definitions(table)}
+    unknown = [key for key in table if key not in VIEWS]
     if unknown:
         raise JobscopeError(
-            "[metrics] has no %s; it takes summary, timeseries, extended"
-            % ", ".join(sorted(unknown)))
+            "[metrics] has no %s; it takes %s, or a family table such as "
+            "[metrics.dcgm.<name>] to define a metric"
+            % (", ".join(sorted(unknown)), ", ".join(VIEWS)))
     resolved = {}
     for view, names in table.items():
         if isinstance(names, str):

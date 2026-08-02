@@ -60,10 +60,23 @@ def _catalog() -> List:
 
 CATALOG: List = _catalog()
 
-# Every spec that carries at least one role, so the common queries do not walk the
-# full 37-entry catalog. Rebuilt from CATALOG rather than listed, so a role added
-# to a spec is live immediately.
+# Header -> spec, across every family. Flat because headers are unique catalog-wide
+# (there is a test), so a caller never has to know which family it is asking about.
 _BY_HEADER: Dict[str, object] = {spec.header: spec for spec in CATALOG}
+
+
+def rebuild() -> None:
+    """Recompute the cross-family view after the catalogs change.
+
+    ``[metrics.<family>.<name>]`` can add or replace entries at config-load time,
+    which is after this module was imported. Without this the site metric would be
+    invisible here -- no role lookup, no ``label``, and ``doctor`` would still call
+    it unnamed -- while working perfectly everywhere else, which is the confusing
+    kind of half-broken.
+    """
+    global CATALOG, _BY_HEADER
+    CATALOG = _catalog()
+    _BY_HEADER = {spec.header: spec for spec in CATALOG}
 
 
 def spec_for(header: str) -> Optional[object]:
