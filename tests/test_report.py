@@ -405,7 +405,7 @@ def test_a_single_job_lands_in_exactly_one_band_per_metric():
     rows = _stat_rows(records)
     assert rows["GPU%"][1:] == ["0", "0", "1"]                # green
     assert rows["MEM%"][1:] == ["0", "0", "1"]                # 50% -> green
-    assert rows["GPU%"][0].endswith("(10%)")                  # and 10% of it idle
+    assert rows["GPU%"][0].endswith("(90%)")                  # and 90% of it used
 
 
 def test_a_single_job_still_emits_its_stat_rows_in_csv():
@@ -424,9 +424,9 @@ def test_a_single_job_still_emits_its_stat_rows_in_csv():
 
 
 def test_sub_tenth_amounts_are_not_printed_as_zero():
-    """"0h (22%)" reads as nothing idle; the two halves of the cell must agree."""
-    records = {"1": _timed_job("1", 60, gpu_util=78.0)}       # 0.013 GPU-h idle
-    assert _stat_rows(records, view="gpu", time_weighted=True)["GPU%"][0] == "<0.1h (22%)"
+    """"0h (78%)" reads as nothing used; the two halves of the cell must agree."""
+    records = {"1": _timed_job("1", 60, gpu_util=78.0)}       # 0.047 GPU-h used
+    assert _stat_rows(records, view="gpu", time_weighted=True)["GPU%"][0] == "<0.1h (78%)"
 
 
 def test_summary_renderer_all_filtered_empty_message(cpu_record):
@@ -661,14 +661,14 @@ def test_the_bands_are_plain_job_counts():
     """Just how many jobs fell in each band; the shares live in the CSV.
 
     One idle 16-GPU job against four busy 1-GPU jobs. The resource concentration
-    (that one job holds 80% of the GPUs) is what IDLE and the CSV carry now.
+    (that one job holds 80% of the GPUs) is what USED and the CSV carry now.
     """
     records = {"idle": _gpu_job("idle", {str(i): 0.0 for i in range(16)})}
     records.update({str(i): _gpu_job(str(i), {"0": 90.0}) for i in range(4)})
     row = _stat_rows(records)["GPU%"]
     assert row[1:] == ["1", "0", "4"]    # red / yellow / green, jobs only
-    # 16 idle GPUs plus 10% of the 4 busy ones = 16.4 of 20.
-    assert row[0] == "16.4 (82%)"
+    # 90% of the 4 busy GPUs and nothing from the idle 16 = 3.6 of 20.
+    assert row[0] == "3.6 (18%)"
 
 
 def _stat_rows(records, **kw):
@@ -1025,7 +1025,7 @@ def test_the_stat_table_carries_a_legend():
     And "green" means only "not pathological": with a cutoff of 10 a job at 21% is
     green while wasting four fifths of its cores, so a selection can be half idle
     with nearly every job green -- which looks like a contradiction until the legend
-    says IDLE is the efficiency number and the bands only locate the waste.
+    says USED is the efficiency number and the bands only locate the waste.
     """
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
     out = io.StringIO()
@@ -1038,7 +1038,7 @@ def test_the_stat_table_carries_a_legend():
     # ships with its own cutoff of 5; either way the edges are stated, not implied.
     assert "at or below 20%" in text or "CPU% 5/10/20" in text
     assert "POWER_W red below 100 W" in text and "Counts are jobs" in text
-    assert "IDLE measures efficiency" in text
+    assert "USED measures efficiency" in text
     # Directly above the header it explains, and inside the table width.
     lines = text.splitlines()
     assert lines[lines.index(next(ln for ln in lines if ln.startswith("METRIC"))) - 1] \
@@ -1160,25 +1160,25 @@ def test_the_totals_line_reconciles_with_its_own_percentage():
     """used is fractional even in the count form -- it is GPU-equivalents busy.
 
     Rounding it to an integer made the three numbers contradict the percentage:
-    20 allocated and 17.4 used printed as "17 used  3 idle (13%)", and 3/20 is 15%.
+    20 allocated and 17.4 used printed as "17 used  3 idle (13%)", and 17.4/20 is 87%.
     """
     records = {"a": _gpu_job("a", {"0": 90.0}), "b": _gpu_job("b", {"0": 80.0})}
     out = io.StringIO()
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="gpu", header=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    # ALLOC and USED are gone; IDLE still reconciles with its own percentage.
-    assert _stat_rows(records, view="gpu")["GPU%"][0] == "0.3 (15%)"   # 0.3/2 = 15%
+    # ALLOC and IDLE are gone; USED still reconciles with its own percentage.
+    assert _stat_rows(records, view="gpu")["GPU%"][0] == "1.7 (85%)"   # 1.7/2 = 85%
 
 
-def test_the_totals_line_splits_allocation_into_used_and_idle():
+def test_the_used_cell_is_the_share_that_did_work():
     records = {"idle": _gpu_job("idle", {str(i): 0.0 for i in range(3)}),
                "busy": _gpu_job("busy", {"0": 100.0})}
     out = io.StringIO()
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    assert _stat_rows(records)["GPU%"][0] == "3 (75%)"    # 3 of 4 GPUs idle
+    assert _stat_rows(records)["GPU%"][0] == "1 (25%)"    # 1 of 4 GPUs busy
 
 
 def test_every_graded_column_gets_a_row_in_column_order():
@@ -1662,33 +1662,34 @@ def _power_stats(watts):
 
 
 def test_power_gets_a_stats_table_row():
-    """Its IDLE is resource-time spent under the watt floor, not an unused fraction.
+    """Its USED is resource-time spent ABOVE the watt floor, not a used fraction.
 
-    "Used watts" means nothing, but "GPU-hours that drew less than the idle floor" is
-    a real quantity -- and the one a floor actually asserts.
+    "Used watts" means nothing, but "GPU-hours that drew more than the idle floor" is
+    a real quantity -- and the complement of the one a floor actually asserts.
     """
     under = _power_stats(73.0)
     assert "POWER_W" in under and "SM_ACT%" in under
-    assert "(100%)" in under["POWER_W"]          # every GPU-hour below the floor
-    assert under["POWER_W"].split()[1] == "3h"   # 1h + 2h of GPU-time
+    assert "(0%)" in under["POWER_W"]            # no GPU-hour cleared the floor
+    assert under["POWER_W"].split()[1] == "0h"
 
     over = _power_stats(300.0)
-    assert "(0%)" in over["POWER_W"]             # none of it
+    assert "(100%)" in over["POWER_W"]           # all 3h of it
+    assert over["POWER_W"].split()[1] == "3h"    # 1h + 2h of GPU-time
 
 
-def _power_idle(watts):
-    """The IDLE cell of the POWER_W row, as ``"3h (100%)"``."""
+def _power_used(watts):
+    """The USED cell of the POWER_W row, as ``"3h (100%)"``."""
     return " ".join(_power_stats(watts)["POWER_W"].split()[1:3])
 
 
-def test_powers_idle_is_all_or_nothing_not_proportional():
+def test_powers_used_is_all_or_nothing_not_proportional():
     """50 W does not waste twice what 100 W does; watts are not utilization.
 
     The bands still separate them -- 101 W is yellow where 500 W is green -- but the
-    time under the floor is the same nothing either way.
+    time above the floor is the same nothing either way.
     """
-    assert _power_idle(50.0) == _power_idle(99.0) == "3h (100%)"
-    assert _power_idle(101.0) == _power_idle(500.0) == "0h (0%)"
+    assert _power_used(50.0) == _power_used(99.0) == "0h (0%)"
+    assert _power_used(101.0) == _power_used(500.0) == "3h (100%)"
 
 
 def test_a_metric_with_no_red_job_prints_no_worst_row():

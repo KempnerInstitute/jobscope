@@ -307,12 +307,12 @@ printed as zeros, which would read as "nothing used it" instead of "nothing
 measured it".
 
 ```
-METRIC   IDLE            RED  YELLOW  GREEN
-CPU%     10034.5h (95%)  159  158     2
-MEM%     129.6TBh (96%)  307  8       4
-GPU%     408.8h (54%)    5    8       306
-GMEM%    528.9h (70%)    299  9       11
-SM_ACT%  452h (60%)      35   17      373
+METRIC   USED            RED  YELLOW  GREEN
+CPU%     528.1h (5%)     159  158     2
+MEM%     5.4TBh (4%)     307  8       4
+GPU%     348.2h (46%)    5    8       306
+GMEM%    226.7h (30%)    299  9       11
+SM_ACT%  301.3h (40%)    35   17      373
 ```
 
 Each metric is measured against the resource it is a percentage *of*, taken from
@@ -324,17 +324,22 @@ the same `_weights()` the pooled row uses so the two cannot disagree:
 | `MEM%` | allocated host bytes x elapsed | GB-hours, promoted to TB-hours past four digits |
 | `GPU%`, `GMEM%`, every DCGM `%` | allocated GPUs x elapsed | GPU-hours |
 
-The denominators therefore differ by row, deliberately: reading down `IDLE` shows
-which resource a selection actually wasted. Above, the GPUs were 56% idle while
-the cores were 95% idle -- GPU jobs holding cores they never use, which blocks
-other work from those nodes and no GPU row can show.
+The denominators therefore differ by row, deliberately: reading down `USED` shows
+which resource a selection actually wasted. Above, the GPUs ran at 46% while the
+cores managed 5% -- GPU jobs holding cores they never use, which blocks other work
+from those nodes and no GPU row can show.
 
-`IDLE` carries one decimal with trailing `.0` trimmed, in that row's own unit, plus
-its share of the allocation. It is fractional even in the count form -- what is idle
+`USED` carries one decimal with trailing `.0` trimmed, in that row's own unit, plus
+its share of the allocation. It is fractional even in the count form -- what is busy
 is GPU-*equivalents*, not whole GPUs -- so rounding to an integer would make it
-contradict the percentage beside it. `ALLOC` and `USED` were dropped: `IDLE` already
-carries the same information in the form anyone acts on, and the band cells were
-reduced to job counts for the same reason. Both survive in the CSV.
+contradict the percentage beside it.
+
+It reported IDLE until it was noticed that one number was being given three
+readings: the cell said 95%, the pooled row above it said 5, the bar below drew 5,
+and the cell's own colour came from the 5. `ALLOC` and `IDLE` are dropped from the
+table -- the allocation is `USED` over its own percentage, and the idle share is the
+remainder -- and the band cells were reduced to job counts for the same reason. All
+of it survives in the CSV, which still emits `allocated=`, `used=` and `idle=`.
 
 Every percentage metric is banded into five tiers by four edges -- `wasteful`,
 `inefficient`, `improvement`, `average` -- which the table then collapses to three
@@ -352,7 +357,7 @@ structurally below `GPU%` on the same work. A single number had to be wrong for 
 row. `default` catches every metric a site does not name, so the extended catalog
 stays graded without being enumerated.
 
-A three-line legend above the table states the cutoffs, what `IDLE` counts, and why
+A three-line legend above the table states the cutoffs, what `USED` counts, and why
 a green band is not the same as an efficient one. It quotes one pair of numbers
 while every metric in the table agrees on them, and lists them metric by metric once
 they do not -- there is no single true sentence in that case.
@@ -370,10 +375,9 @@ structurally so, since it never constructs a `SummaryRenderer`.
 ### The efficiency bars
 
 Shown by default, omitted with `--no-plot`. One horizontal bar per graded metric: length is the pooled
-utilization, the filled run tinted by the band that value falls in. It is the `IDLE`
-column read the other way round -- bar percent plus `IDLE` percent is 100 for every
-metric, because both derive from `EfficiencyTally.pooled()` -- so a chart and the
-table it sits under cannot disagree.
+utilization, the filled run tinted by the band that value falls in. It draws the
+same number the `USED` column prints -- both are `EfficiencyTally.pooled()` -- so a
+chart and the table it sits under cannot disagree.
 
 It reuses the table's metric list, so the set follows `--cpu` / `--gpu` / `--dcgm`
 and omits whatever no job reported, minus `POWER_W`: it has a row but no bar, since
@@ -395,20 +399,20 @@ be half idle with almost every job green, which reads as a contradiction until t
 two columns are separated:
 
 ```
-METRIC   IDLE        RED  YELLOW  GREEN
-CPU%     84.3 (49%)  0    1       13
+METRIC   USED        RED  YELLOW  GREEN
+CPU%     87.7 (51%)  0    1       13
 ```
 
 Eleven jobs, each using about half its cores (12, 21, 47, 52, 55, 55, 55, 55, 56,
-56, 56). None is below 10, so the red band is empty; pooled, 49% of the cores are
-idle anyway.
+56, 56). None is below 10, so the red band is empty; pooled, the cores still only
+reach 51%.
 
-`IDLE` is the efficiency measure. The bands say *where* the waste sits:
+`USED` is the efficiency measure. The bands say *where* the waste sits:
 
 | pattern | reading |
 |---|---|
 | red band holds a large share of the **resource-time** | concentrated: a few jobs waste a lot, and `Worst` names them |
-| red band empty but `IDLE` high | systemic: every job wastes a little, which is a habit rather than an incident |
+| red band empty but `USED` low | systemic: every job wastes a little, which is a habit rather than an incident |
 
 Measured on one partition, `GPU%` showed the first (4% of jobs, 53% of the
 GPU-hours, red) and `CPU%` the second. The bands are deliberately calibrated to
@@ -430,7 +434,7 @@ Bands are computed from the **stored** value, not the printed one. A job whose
 `OCC%` prints as `15.0` may be 14.96 and therefore red against a cutoff of 15;
 banding the display string would make the report depend on its own formatting.
 
-On a terminal each band cell is printed in its own colour and `IDLE` is tinted by
+On a terminal each band cell is printed in its own colour and `USED` is tinted by
 that metric's pooled grade. Colour is dropped for `--csv`, a non-tty and
 `$NO_COLOR`, and the plain output is the tinted output minus the escapes -- the
 final column is left unpadded so that stays exactly true.
@@ -487,8 +491,8 @@ against r(GPU%, SM_ACT%) = 0.76. It also covers 35 jobs the blob metrics miss (n
 stored blob), though those held only 0.6 of 349.2 GPU-hours.
 
 `POWER_W` does get a stats-table row. "Used watts" has no meaning as a total, but the
-resource-time that drew *less* than the floor does, and that is what its `IDLE` counts
--- all-or-nothing per sample, where a percentage's `IDLE` takes a fraction of each.
+resource-time that drew *more* than the floor does, and that is what its `USED` counts
+-- all-or-nothing per sample, where a percentage's `USED` takes a fraction of each.
 Grading it as a proportion of the cutoff instead would imply 50 W wastes twice what
 100 W does, and watts are not utilization. The bands still separate the near misses:
 a GPU at 119 W is yellow, not red.

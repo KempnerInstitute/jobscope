@@ -63,6 +63,22 @@ carrying it has empty metric cells rather than zeros, so a monitoring outage no 
 reads as a fleet of wasteful jobs. Anything that treats an unrecognised `LABEL` as an
 error should be taught this one.
 
+### The summary block's `IDLE` column is now `USED`
+
+One number was being given three readings in a single screen. For a metric at 27%
+utilization, the pooled `Used/GPU-hr:` row said `27`, the efficiency bar below drew
+`27%`, and the table cell between them said `719.3h (73%)` — while taking its
+*colour* from the 27. Same figure, two complements and one silent inversion.
+
+The cell reports `USED` now: resource-time that did work, and its share of the
+allocation. Everything in the block says the same thing, and the section is titled
+"Average efficiency" either way. For `POWER_W` that means time spent *above* the
+floor rather than below it.
+
+`--csv` is unchanged — `Stat<METRIC>` rows still carry `allocated=`, `used=` and
+`idle=`, so nothing scripted breaks. In the table, the allocation is `USED` over its
+own percentage and the idle share is the remainder.
+
 ### `config.example.toml` reordered, and it no longer regrades on copy
 
 The template is required-first now — Prometheus, then which jobs, then which metrics,

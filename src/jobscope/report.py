@@ -291,7 +291,7 @@ _DEFAULT_BANDS = Thresholds()
 
 # Stand-in header for grading a bare share -- a percentage belonging to no column
 # of its own, so it takes the default edges rather than any metric's. POWER_W's
-# IDLE cell needs one: the share is a percent even though the metric is watts.
+# USED cell needs one: the share is a percent even though the metric is watts.
 _SHARE_HEADER = "%"
 
 
@@ -651,7 +651,7 @@ class EfficiencyTally:
         # Used is whatever was not wasted, for both kinds of metric. For a percentage
         # that is (value/100) * weight, exactly as before. For POWER_W it is the
         # resource-time at or above the floor, which is the only reading of "used"
-        # watts admit. One definition, so IDLE cannot mean two things.
+        # watts admit. One definition, so USED cannot mean two things.
         self.used += weight - wasted
         self.total += weight
         self.waste_total += wasted
@@ -713,7 +713,7 @@ class EfficiencyTally:
         return self.thresholds.for_model(model).grade(self.header, value)
 
     def pooled_band(self) -> str:
-        """The band for the IDLE cell -- always a percentage grade.
+        """The band for the USED cell -- always a percentage grade.
 
         Even for POWER_W. :meth:`pooled` is the share of resource-time that was
         used, which for POWER_W reads "share of GPU-hours at or above the floor" --
@@ -733,7 +733,7 @@ class EfficiencyTally:
         """Utilization over the whole selection, as a percent, or None if unmeasured.
 
         The same number the pooled row prints for this column: used resource-time
-        over allocated. Used to grade the IDLE cell, so a metric that is mostly
+        over allocated. Printed in the USED cell and used to grade it, so a metric
         waste reads red.
         """
         return 100.0 * self.used / self.total if self.total else None
@@ -766,19 +766,21 @@ class EfficiencyTally:
     def stat_row(self) -> List[Tuple[str, str]]:
         """This metric's table row as ``(cell, band)`` pairs; band "" means no tint.
 
-        Two columns and three counts. ALLOC and USED came out because IDLE already
-        carries the same information in the form anyone acts on -- how much went
-        unused, and what share of the allocation that was. The band cells are bare
-        job counts; their resource shares stay in the CSV for scripting.
+        Two columns and three counts. This cell used to report IDLE -- unused
+        resource-time and the unused share -- while carrying the grade of the *used*
+        share and sitting above a bar chart of the used share. One number, three
+        readings: the cell said 73%, the pooled row above said 27, the bar below drew
+        27, and the colour came from the 27. So it reports USED now, which is what
+        the rest of the block already reports and what the section is titled.
+        Allocated and idle amounts stay in --csv, where nothing was ever ambiguous.
 
-        IDLE carries the metric's own pooled grade, so the eye lands on the metrics
-        that wasted their allocation. Each band cell is tinted its own colour, since
-        that is the colour it names.
+        The grade is this metric's own pooled utilization, so the eye lands on what
+        was wasted even though the number counts what was used. Each band cell is
+        tinted its own colour, since that is the colour it names.
         """
-        idle = self.idle()
-        idle_pct = round(100 * idle / self.total) if self.total else 0
+        used_pct = round(self.pooled()) if self.pooled() is not None else 0
         row = [(self.header, ""),
-               ("%s (%d%%)" % (self._amount(idle), idle_pct), self.pooled_band())]
+               ("%s (%d%%)" % (self._amount(self.used), used_pct), self.pooled_band())]
         for band in ("red", "yellow", "green"):
             row.append(("%d" % self.bands[band][0], band))
         return row
@@ -860,8 +862,8 @@ class SummaryRenderer:
         # POWER_W joins them even though it is not a percentage: watts are the one
         # idle signal a duty cycle cannot fake. Weighted by GPU-time like the rest of
         # the GPU family, and banded against a watt floor rather than a percentage,
-        # so its IDLE reads "GPU-hours spent under the floor" -- all-or-nothing per
-        # sample, where a percentage's IDLE is a fraction of each.
+        # so its USED reads "GPU-hours spent above the floor" -- all-or-nothing per
+        # sample, where a percentage's USED takes a fraction of each.
         if "POWER_W" in self.headers:
             self.tallies["POWER_W"] = EfficiencyTally(
                 "POWER_W", thresholds, *_resource_of("POWER_W", hours),
@@ -1155,7 +1157,7 @@ class SummaryRenderer:
         # Every graded metric's own summary, in column order, skipping any that no
         # job reported. The pooled row above shows the utilization as a percentage;
         # these rows add the resource-time behind it, and how that time fell across
-        # the bands. POWER_W is here too: its IDLE is resource-time spent under the
+        # the bands. POWER_W is here too: its USED is resource-time spent above the
         # watt floor, which is a real quantity even though "used watts" is not.
         stats = [self.tallies[h] for h in self.headers
                  if h in self.tallies and self.tallies[h].total]
@@ -1310,14 +1312,14 @@ class SummaryRenderer:
         print(tint(text, role) if options.color and role else text, file=self.out)
 
 
-    STAT_HEADERS = ("METRIC", "IDLE", "RED", "YELLOW", "GREEN")
+    STAT_HEADERS = ("METRIC", "USED", "RED", "YELLOW", "GREEN")
 
     # Three lines of legend. The first states the cutoffs -- one sentence while
     # every metric shares them, and a metric-by-metric list once they do not, since
     # then no single pair of numbers is true of the table. The last is there because
     # "green" means only "not pathological": at a cutoff of 10 a job at 21% is green
     # while wasting four fifths of its cores, so a selection can be half idle with
-    # almost every job green. IDLE is the efficiency number; the bands say whether
+    # almost every job green. USED is the efficiency number; the bands say whether
     # the waste is concentrated in a few jobs or spread across all of them, which is
     # the difference between someone to talk to and a habit.
     STAT_CUTOFFS = ("red at or below %(red)g%%, yellow at or below %(yellow)g%%,"
@@ -1326,10 +1328,10 @@ class SummaryRenderer:
     STAT_LEGEND = (
         "%(cutoffs)s POWER_W red below %(power)g W, green above, no yellow."
         " Counts are jobs.",
-        "IDLE is resource-time that went unused -- for POWER_W, the time spent under"
-        " that floor.",
-        "bands catch pathological jobs, IDLE measures efficiency:"
-        " no red with a high IDLE means every job wastes a little",
+        "USED is resource-time that did work, and its share of the allocation --"
+        " for POWER_W, the time spent above that floor.",
+        "bands catch pathological jobs, USED measures efficiency:"
+        " no red with a low USED means every job wastes a little",
     )
     LEGEND_WIDTH = 128
 
@@ -1432,9 +1434,9 @@ class SummaryRenderer:
     def _eff_bars(self, stats: List["EfficiencyTally"]) -> List[str]:
         """Horizontal utilization bars, one per graded metric.
 
-        The same data as the table's IDLE column, in the form that answers "which
-        resource was wasted" without arithmetic: bar length is the pooled utilization,
-        so bar percent and IDLE percent always sum to 100.
+        The same number as the table's USED column, in the form that answers "which
+        resource was wasted" at a glance: bar length is the pooled utilization, so the
+        bar and the USED percentage are the same figure drawn two ways.
 
         Drawn through :func:`bar_lines`, which the per-GPU charts also use, and with
         this module's own SGR codes rather than rich -- the report path is the common
@@ -2078,7 +2080,7 @@ def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptio
         print("  " + "  ".join(h.ljust(widths[i]) if i < text_cols else h.rjust(widths[i])
                                for i, h in enumerate(headers)), file=out)
     for row, entry in zip(cells, table):
-        # Tint the mean by its band, as the summary table tints IDLE: the column
+        # Tint the mean by its band, as the summary table tints USED: the column
         # anyone reads first should say whether the number is a problem.
         painted = [cell.ljust(widths[i]) if i < text_cols else cell.rjust(widths[i])
                    for i, cell in enumerate(row)]

@@ -71,9 +71,10 @@ Red and yellow flag **pathological** jobs, not merely inefficient ones. At an
 allocation unused. That is the intended calibration — a report where most jobs are red
 gets ignored — but it means the colours are not an efficiency score.
 
-For efficiency, read the **IDLE** column of the summary. For the jobs actually worth
-someone's time, read the Problem-jobs "Wasteful" rows, which use the stricter
-`wasteful` cutoff.
+For efficiency, read the **USED** column of the summary — resource-time that did
+work, and its share of what was allocated. For the jobs actually worth someone's
+time, read the Problem-jobs "Wasteful" rows, which use the stricter `wasteful`
+cutoff.
 
 ### Why two tables, and why nothing is inherited
 

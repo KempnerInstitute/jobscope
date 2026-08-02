@@ -33,18 +33,18 @@ JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_
 ------------------------------------------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              12     9            80     3       64.9     14.7    0.3      9.5     455
   red at or below 10%, yellow at or below 20%, green above; POWER_W red below 100 W, green above, no yellow. Counts are jobs.
-  IDLE is resource-time that went unused -- for POWER_W, the time spent under that floor.
-  bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
-METRIC   IDLE            RED  YELLOW  GREEN
-CPU%     49.3h (88%)     0    17      0
-MEM%     534.4GBh (91%)  15   1       1
-GPU%     1.4h (20%)      0    0       17
-GMEM%    6.9h (97%)      17   0       0
-SM_ACT%  2.5h (35%)      1    0       16
-OCC%     6h (85%)        6    10      1
-TENSOR%  7h (100%)       17   0       0
-DRAM%    6.4h (91%)      14   3       0
-POWER_W  0.4h (6%)       1    2       14
+  USED is resource-time that did work, and its share of the allocation -- for POWER_W, the time spent above that floor.
+  bands catch pathological jobs, USED measures efficiency: no red with a low USED means every job wastes a little
+METRIC   USED            RED  YELLOW  GREEN
+CPU%     6.7h (12%)      0    17      0
+MEM%     52.9GBh (9%)    15   1       1
+GPU%     5.6h (80%)      0    0       17
+GMEM%    0.2h (3%)       17   0       0
+SM_ACT%  4.6h (65%)      1    0       16
+OCC%     1.1h (15%)      6    10      1
+TENSOR%  0h (0%)         17   0       0
+DRAM%    0.6h (9%)       14   3       0
+POWER_W  6.3h (94%)      1    2       14
 Worst SM (1/17): 35260825 0.1h@3% bdesinghu
 Jobs:            cpu-jobs=17  gpu-jobs=17  gpus=17
 ```
@@ -373,18 +373,18 @@ After the job listing come three numbered sections:
 ------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              10     6            75   49     66.0  20.6  18.1  14.5
   red at or below 10%, yellow at or below 20%, green above; POWER_W red below 100 W, green above, no yellow. Counts are jobs.
-  IDLE is resource-time that went unused -- for POWER_W, the time spent under that floor.
-  bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
-METRIC   IDLE           RED  YELLOW  GREEN
-CPU%     5698.3h (90%)  155  158     2
-MEM%     92.6TBh (94%)  303  8       4
-GPU%     119.9h (25%)   3    7       305
-GMEM%    245.2h (51%)   294  9       12
-SM_ACT%  165.6h (34%)   33   16      372
-OCC%     386.3h (79%)   123  267     31
-TENSOR%  398.6h (82%)   409  10      2
-DRAM%    416.1h (86%)   384  18      19
-POWER_W  36.7h (8%)     41   77      294
+  USED is resource-time that did work, and its share of the allocation -- for POWER_W, the time spent above that floor.
+  bands catch pathological jobs, USED measures efficiency: no red with a low USED means every job wastes a little
+METRIC   USED           RED  YELLOW  GREEN
+CPU%     633.1h (10%)   155  158     2
+MEM%     5.9TBh (6%)    303  8       4
+GPU%     359.7h (75%)   3    7       305
+GMEM%    235.6h (49%)   294  9       12
+SM_ACT%  321.5h (66%)   33   16      372
+OCC%     102.7h (21%)   123  267     31
+TENSOR%  87.5h (18%)    409  10      2
+DRAM%    67.7h (14%)    384  18      19
+POWER_W  422.1h (92%)   41   77      294
 
 2. Average efficiency  (filled = used, grey = idle)
 ---------------------------------------------------
@@ -410,7 +410,8 @@ Jobs:                cpu-jobs=77  gpu-jobs=77  gpus=119  no-blob=13
 
 **There is no per-job mean**, on purpose. Utilization is bimodal -- jobs cluster
 near 0% or near 100% -- so an average of them describes a job that does not
-exist. On the day above `GPU%` averaged 82% per job while the GPUs were 56% idle.
+exist. On the day above `GPU%` averaged 82% per job while the GPUs, pooled,
+ran at 44%.
 
 `Used/GPU-hr:` is a ratio rather than a centre: used resource-time over allocated
 resource-time, aligned under the columns above it.
@@ -426,9 +427,9 @@ metric is measured against the resource it is a percentage *of*:
 | `MEM%` | allocated host GB-hours |
 | `GPU%`, `GMEM%`, and every DCGM column | allocated GPU-hours |
 
-So the denominators differ by row on purpose, and reading down the `IDLE` column
+So the denominators differ by row on purpose, and reading down the `USED` column
 is the fastest way to see which resource a selection actually wasted: above, the
-GPUs were 56% idle while the *cores* were 95% idle and the *tensor cores* 90%.
+GPUs ran at 44% while the *cores* managed 5% and the *tensor cores* 10%.
 
 By default one set of cutoffs covers every metric -- **red at or below 10%, yellow
 at or below 20%, green above** -- and `POWER_W` is red below 100 W. The cutoffs are
@@ -444,18 +445,18 @@ output for anyone scripting them.
 be half idle with nearly every job green:
 
 ```
-METRIC   IDLE            RED  YELLOW  GREEN
-CPU%     84.3 (49%)      0    1       13
+METRIC   USED            RED  YELLOW  GREEN
+CPU%     87.7 (51%)      0    1       13
 ```
 
 That is not a contradiction: every job there used about half its cores, so none is
-below 10, yet half the allocation went unused. Read `IDLE` for efficiency and the
+below 10, yet half the allocation went unused. Read `USED` for efficiency and the
 bands for *where* the waste is:
 
 | pattern | meaning | what to do |
 |---|---|---|
 | red band holds a large **resource** share | a few jobs waste a lot | go find those jobs -- they are in `Worst` |
-| no red band but a high `IDLE` | every job wastes a little | nothing to escalate; over-requesting is the habit |
+| no red band but a low `USED` | every job wastes a little | nothing to escalate; over-requesting is the habit |
 
 On the partition above, `GPU%` is the first pattern (4% of jobs holding 53% of the
 GPU-hours in red) and `CPU%` the second.
@@ -464,7 +465,7 @@ The three band cells give each band's share of the **jobs** and of the
 **resource-time** (`13 (4%)/54%` is 13 jobs, 4% of the jobs, holding 54% of the
 GPU-hours). The gap between those two numbers is the finding, and either alone
 conceals it. On a terminal the band cells are printed in their own colours and
-`IDLE` is tinted by that metric's pooled grade, so a wasted resource is a red
+`USED` is tinted by that metric's pooled grade, so a wasted resource is a red
 line in the block.
 
 The `Worst` rows name the offenders, ranked by resource-time *wasted* rather than
@@ -522,7 +523,7 @@ the cells and colour `jobscope plot`, so the block is a tally of what you can
 already see.
 
 The **running** view reports the same table over resource *counts* rather than
-resource-hours (`Used/GPU:`, and `IDLE` in GPUs / cores / GB rather than hours).
+resource-hours (`Used/GPU:`, and `USED` in GPUs / cores / GB rather than hours).
 Its numbers are one scrape at a single moment, so weighting them by elapsed time
 would claim that instant represents the whole run; `--avg` folds each job over its
 runtime and does get the hour-based form.
@@ -562,8 +563,8 @@ Avg efficiency by metric  (filled = used, grey = idle)
 ```
 
 Bar length is the pooled utilization and the filled run is tinted by its band, so
-this is the `IDLE` column read the other way round: bar percent plus `IDLE` percent
-is always 100. It follows the table's metric set, so `--cpu`, `--gpu` and `--dcgm`
+this is the `USED` column drawn rather than tabulated -- the bar and the `USED`
+percentage are the same figure. It follows the table's metric set, so `--cpu`, `--gpu` and `--dcgm`
 narrow or widen it too, and it prints for a single job as well -- there it is that
 job's profile across metrics.
 
@@ -585,15 +586,15 @@ where they sit:
 ```
 $ jobscope 35244230
 35244230     bdesinghu    COMPLETED 1     11     3      1     78     2       64.3  ...
-METRIC   IDLE          RED  YELLOW  GREEN
-CPU%     1.1h (89%)    0    1       0
-MEM%     9.8GBh (97%)  1    0       0
-GPU%     <0.1h (22%)   0    0       1
-GMEM%    0.2h (98%)    1    0       0
-SM_ACT%  0.1h (36%)    0    0       1
-OCC%     0.1h (86%)    0    1       0
-TENSOR%  0.2h (97%)    1    0       0
-DRAM%    0.1h (91%)    1    0       0
+METRIC   USED          RED  YELLOW  GREEN
+CPU%     0.1h (11%)    0    1       0
+MEM%     0.3GBh (3%)   1    0       0
+GPU%     <0.1h (78%)   0    0       1
+GMEM%    <0.1h (2%)    1    0       0
+SM_ACT%  0.2h (64%)    0    0       1
+OCC%     <0.1h (14%)   0    1       0
+TENSOR%  <0.1h (3%)    1    0       0
+DRAM%    <0.1h (9%)    1    0       0
 ```
 
 One job, so each metric has a single `1` marking its band: this one used its GPU
@@ -991,7 +992,7 @@ $ jobscope -j 36612315 --ts 60m --stats
 Computed from the samples `--ts` already fetched, so there are **no extra queries** and
 the numbers cannot disagree with the series they summarize. `N` is the sample count,
 which is worth a glance: it says whether the window actually had data. `MEAN` is tinted
-by its band, as `IDLE` is in the summary table, and `--csv` emits the same rows for
+by its band, as `USED` is in the summary table, and `--csv` emits the same rows for
 scripting.
 
 `--stats-per-node` pools the job's GPUs on each host, and `--stats-per-job` pools
