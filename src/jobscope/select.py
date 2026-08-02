@@ -33,7 +33,7 @@ from .live import (
     live_records,
     per_gpu_by_node_minor,
 )
-from .live_blob import fill_running, note_offline_gap
+from .live_blob import fill_running, needs_fill, note_offline_gap
 from .prometheus import PrometheusClient, client_from_config
 from .report import (
     RenderOptions,
@@ -91,6 +91,12 @@ class Request:
     # cli._min_elapsed()), and it used to disagree with it by an hour.
     min_elapsed: int = config.parse_duration(config.DEFAULT_MIN_ELAPSED)
     average: bool = False
+    # Ignore the stored jobstats blob and read every metric from Prometheus, for a
+    # finished job as well as a running one. The blob is a fast path -- one free
+    # sacct field against several range queries -- so it stays preferred by
+    # default; this exists to compare the two, and to be what a site without
+    # jobstats runs on. See jobscope.doctor's --validate.
+    no_blob: bool = False
 
     @property
     def live(self) -> bool:
@@ -252,11 +258,13 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
         context = context_pairs(selection, desc, {})  # the window branch reads no records
         chunks = fetch_chunks(jobids, timeout)
 
-    return Resolved(context, _enrich(chunks, cfg, timeout, workers, specs))
+    return Resolved(context, _enrich(chunks, cfg, timeout, workers, specs,
+                                     no_blob=request.no_blob))
 
 
 def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
-            specs: Optional[List[MetricSpec]]) -> Iterator[Chunk]:
+            specs: Optional[List[MetricSpec]],
+            no_blob: bool = False) -> Iterator[Chunk]:
     """Attach DCGM metrics and fill running jobs' blobs, chunk by chunk.
 
     The client is built lazily and at most once: a selection with no GPU jobs, or a
@@ -269,28 +277,37 @@ def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
             if client is None:
                 client = client_from_config(cfg, timeout)
             dcgm_data = compute_dcgm(records, chunk_ids, specs, client, timeout, workers)
-        client = _fill_running(records, chunk_ids, cfg, timeout, workers, client)
+        client = _fill_running(records, chunk_ids, cfg, timeout, workers, client,
+                               force=no_blob)
         yield chunk_ids, records, dcgm_data
 
 
-def _fill_running(records, jobids, cfg, timeout, workers, client):
-    """Rebuild the utilization blob for any running job in this chunk.
+def _fill_running(records, jobids, cfg, timeout, workers, client, force=False):
+    """Rebuild the utilization blob for the jobs in this chunk that need one.
 
     A running job has no stored blob, so CPU%/MEM%/GPU%/GMEM% would all be empty.
-    Every input is in Prometheus, so fill them from there. An install with no
-    endpoint configured stays fully offline: the fill is skipped with a note rather
-    than an error.
+    Every input is in Prometheus, so fill them from there. With ``force``
+    (``--no-blob``) finished jobs are rebuilt too, ignoring what Slurm stored.
+
+    An install with no endpoint configured stays fully offline: the fill is skipped
+    with a note rather than an error -- except under ``force``, where there is no
+    stored blob to fall back on and going quiet would print a table of dashes with
+    no explanation.
     """
-    if not any(j in records and records[j].state == "RUNNING" and not records[j].stats
-               for j in jobids):
+    if not any(j in records and needs_fill(records[j], force) for j in jobids):
         return client
     if client is None:
         try:
             client = client_from_config(cfg, timeout)
         except JobscopeError:
+            if force:
+                raise JobscopeError(
+                    "--no-blob reads every metric from Prometheus, and no endpoint is\n"
+                    "configured. Drop --no-blob to use the stored jobstats blob, or see\n"
+                    "'jobscope doctor' for how to configure one.")
             note_offline_gap(records, jobids)
             return None
-    fill_running(records, jobids, client, timeout, workers)
+    fill_running(records, jobids, client, timeout, workers, force)
     return client
 
 

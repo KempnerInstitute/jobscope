@@ -3,10 +3,14 @@
 import dataclasses
 import time
 
+import pytest
+
 from jobscope import select as select_mod
 from jobscope.dcgm import DEFAULT_SPECS
-from jobscope.sacct import TIMESTAMP_FORMAT
+from jobscope.errors import JobscopeError
+from jobscope.live_blob import needs_fill
 from jobscope.report import RenderOptions
+from jobscope.sacct import TIMESTAMP_FORMAT, JobRecord
 from jobscope.select import (
     BLOB_SPECS,
     FINISHED,
@@ -393,3 +397,35 @@ def test_both_branches_yield_the_same_chunk_shape(monkeypatch, gpu_record):
         assert records[jid].jobid_raw          # both carry the raw ID for the joins
         overall, per_gpu = dcgm_data[jid]
         assert isinstance(overall, dict) and isinstance(per_gpu, dict)
+
+
+def _record(state, stats, jobid="1"):
+    """A JobRecord in one line, for the needs_fill()/--no-blob checks."""
+    return JobRecord(jobid=jobid, state=state, name="j", runtime="00:10:00",
+                     nodes="1", gpus=1, stats=stats, start=0, end=600,
+                     duration=600, jobid_raw=jobid, cluster="", user="u")
+
+
+def test_no_blob_forces_the_prometheus_path_for_finished_jobs():
+    """A finished job carries a stored blob, so needs_fill() normally leaves it
+    alone. --no-blob is what makes the two sources comparable on the same job."""
+    finished = _record("COMPLETED", {"total_time": 600, "nodes": {}})
+    assert needs_fill(finished) is False
+    assert needs_fill(finished, force=True) is True
+
+
+def test_a_running_job_with_no_blob_is_filled_either_way():
+    running = _record("RUNNING", {})
+    assert needs_fill(running) is True and needs_fill(running, force=True) is True
+
+
+def test_no_blob_without_an_endpoint_is_an_error_not_a_silent_table_of_dashes():
+    """Without --no-blob a missing endpoint degrades to the stored blob with a note.
+    With it there is nothing to fall back on, so going quiet would print a table of
+    dashes and no explanation."""
+    records = {"1": _record("COMPLETED", {"total_time": 1, "nodes": {}})}
+    broken = dataclasses.replace(_cfg(), prometheus_url=None,
+                                 site_jobstats_config_path="/nonexistent")
+    with pytest.raises(JobscopeError) as exc:
+        select_mod._fill_running(records, ["1"], broken, None, 1, None, force=True)
+    assert "--no-blob" in str(exc.value)

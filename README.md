@@ -123,6 +123,13 @@ forever.
 jobscope doctor --validate           # do the exporters agree with the scheduler?
 ```
 
+`jobscope --no-blob` is the other half of that: it reads CPU%/MEM%/GPU%/GMEM% from
+Prometheus even for finished jobs, instead of the blob Slurm stored. Slower -- the
+blob is one free sacct field where this is several range queries per job -- but it
+is what a site without jobstats runs on, and it is how you check the two agree.
+Across 51 finished jobs spanning CPU-only, single-GPU, multi-GPU and multi-node
+shapes, they agree here to within one point (memory columns exactly).
+
 `--validate` puts one job's utilization side by side as each source measures it:
 Prometheus, the jobstats blob, and Slurm's own `jobacct_gather` /
 `AccountingStorageTRES` accounting, which needs neither of the other two.

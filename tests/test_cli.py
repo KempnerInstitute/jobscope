@@ -447,7 +447,7 @@ def test_running_blob_is_reconstructed(monkeypatch, capsys, gpu_record):
     monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: object())
     monkeypatch.setattr(select_mod, "compute_dcgm", lambda *a, **k: {"300": ({}, {})})
 
-    def fake_fill(records, ids, client, timeout=None, workers=1):
+    def fake_fill(records, ids, client, timeout=None, workers=1, force=False):
         records["300"].stats = gpu_record.stats
         return 1
 

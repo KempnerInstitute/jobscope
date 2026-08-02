@@ -203,16 +203,29 @@ def _query(client: PrometheusClient, query: str, at, timeout: Optional[float]):
         return []
 
 
-def fill_running(records: Dict[str, JobRecord], jobids, client: PrometheusClient,
-                 timeout: Optional[float] = None, workers: int = 1) -> int:
-    """Synthesize stats for every RUNNING record in ``jobids`` that has no blob.
+def needs_fill(record: JobRecord, force: bool = False) -> bool:
+    """Whether this record's stats have to be built from Prometheus.
 
-    Mutates the records in place and returns how many were filled. Records that
-    already carry a blob are left alone, so a finished job always reports the
-    numbers Slurm stored rather than a recomputation.
+    Normally only a running job: it has no stored blob yet, so its utilization
+    columns would be empty. With ``force`` -- ``--no-blob`` -- every record is
+    rebuilt, including finished ones that already carry a blob, so the two sources
+    can be compared on the same jobs.
+    """
+    return bool(force or (record.state == "RUNNING" and not record.stats))
+
+
+def fill_running(records: Dict[str, JobRecord], jobids, client: PrometheusClient,
+                 timeout: Optional[float] = None, workers: int = 1,
+                 force: bool = False) -> int:
+    """Synthesize stats for every record in ``jobids`` that needs it.
+
+    Mutates the records in place and returns how many were filled. By default a
+    record already carrying a blob is left alone, so a finished job reports the
+    numbers Slurm stored rather than a recomputation; ``force`` overwrites them
+    from Prometheus instead.
     """
     pending = [records[jid] for jid in jobids
-               if jid in records and records[jid].state == "RUNNING" and not records[jid].stats]
+               if jid in records and needs_fill(records[jid], force)]
     if not pending:
         return 0
 

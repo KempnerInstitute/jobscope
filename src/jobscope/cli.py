@@ -195,6 +195,10 @@ def build_parser():
     shape.add_argument("--avg", action="store_true",
                        help="running: fold each metric over the job's runtime, making the "
                             "values comparable to jobstats (default: the newest scrape)")
+    shape.add_argument("--no-blob", dest="no_blob", action="store_true",
+                       help="read CPU%%/MEM%%/GPU%%/GMEM%% from Prometheus even for finished "
+                            "jobs, instead of the stored jobstats blob (slower; use to "
+                            "compare the two, or where jobstats is not deployed)")
     shape.add_argument("--no-plot", dest="no_plot", action="store_true",
                        help="omit the efficiency-bars section (shown by default)")
     # Superseded: the bars are the default now. Accepted so a command that named it
@@ -530,6 +534,7 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
         state=args.state or cfg.defaults.state, user=user, all_users=args.all_users,
         account=args.account, partition=args.partition,
         min_elapsed=_min_elapsed(args, cfg), average=args.avg,
+        no_blob=getattr(args, "no_blob", False),
     )
 
 
