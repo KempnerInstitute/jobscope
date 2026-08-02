@@ -1,6 +1,7 @@
 """Tests for the DCGM metric catalog and the Prometheus join/compute logic."""
 
 import dataclasses
+import re
 
 import pytest
 
@@ -14,6 +15,7 @@ from jobscope.dcgm import (
     KEY_SPECS,
     METRICS,
     MODEL_KEY,
+    NAME_LABEL,
     SPEC_BY_HEADER,
     columns_for,
     compute_dcgm,
@@ -22,30 +24,64 @@ from jobscope.dcgm import (
     format_by_header,
     format_value,
     gpu_minor_key,
+    group_key,
+    grouped_window_query,
     stored_utilization,
     window_query,
 )
 
 
 class FakeClient:
-    """A Prometheus stand-in driven by canned GPU discovery and metric values."""
+    """A Prometheus stand-in driven by canned GPU discovery and metric values.
 
-    def __init__(self, gpus, values, sampling_period=60, range_values=None):
+    Answers **grouped** queries the way a real server does, which is the whole
+    point of the ``label_replace`` handling below: a fake that only knew per-metric
+    queries would return nothing for a grouped one, the production code would fall
+    back to per-metric, and every test would pass while measuring the path that is
+    no longer used. ``grouped`` counts the ones it served, so a test can assert the
+    query count actually fell.
+    """
+
+    def __init__(self, gpus, values, sampling_period=60, range_values=None,
+                 support_grouping=True):
         self.gpus = gpus                       # [(uuid, node, minor)]
         self.values = values                   # {metric_name: {uuid: raw_value}}
         self.range_values = range_values or {}  # {metric_name: {uuid: [(ts, raw)]}}
         self.sampling_period = sampling_period
+        # False stands in for a server that cannot do label_replace, to exercise
+        # the per-metric fallback.
+        self.support_grouping = support_grouping
+        self.queries = []
+        self.grouped = 0
+
+    def _grouped_names(self, query):
+        """The metric names a grouped query asks for, or None if it is per-metric."""
+        if "label_replace" not in query:
+            return None
+        found = re.search(r'__name__=~"\^\(([^)]*)\)\$"', query)
+        return found.group(1).split("|") if found else []
 
     def query(self, query, at, timeout=None):
+        self.queries.append(query)
         if "nvidia_gpu_jobId" in query:
             return [{"metric": {"uuid": u, "host": node + ":9400", "minor_number": minor}}
                     for u, node, minor in self.gpus]
+        names = self._grouped_names(query)
+        if names is not None:
+            if not self.support_grouping:
+                return []
+            self.grouped += 1
+            # One row per (metric, card), with the name in the label the real
+            # server keeps only because label_replace put it there.
+            return [{"metric": {NAME_LABEL: name, "UUID": u}, "value": [at, str(v)]}
+                    for name in names for u, v in self.values.get(name, {}).items()]
         for name, per in self.values.items():
             if name in query:
                 return [{"metric": {"UUID": u}, "value": [at, str(v)]} for u, v in per.items()]
         return []
 
     def query_range(self, query, start, end, step, timeout=None):
+        self.queries.append(query)
         for name, per in self.range_values.items():
             if name in query:
                 return [{"metric": {"UUID": u}, "values": [[ts, str(v)] for ts, v in pts]}
@@ -303,3 +339,74 @@ def test_the_built_in_lists_are_reproducible_by_name():
     from jobscope.dcgm import KEY_SPECS, specs_named
     assert [s.header for s in specs_named(["gpu", "sm_act", "tensor", "dram", "power"])] \
         == [s.header for s in KEY_SPECS]
+
+
+# --- metric grouping --------------------------------------------------------
+
+def test_grouped_query_names_every_metric_and_preserves_the_name_label():
+    """label_replace is not decoration: avg_over_time drops __name__, so without it
+    a response covering several metrics cannot be attributed to any of them."""
+    q = grouped_window_query("avg", "UUID",
+                             ["DCGM_FI_PROF_SM_ACTIVE", "DCGM_FI_PROF_DRAM_ACTIVE"],
+                             ["U1", "U2"], 100)
+    assert q == (
+        'avg_over_time((label_replace({__name__=~"^(DCGM_FI_PROF_DRAM_ACTIVE|'
+        'DCGM_FI_PROF_SM_ACTIVE)$",UUID=~"^(U1|U2)$"},'
+        '"jsname","$1","__name__","(.*)"))[100s:])')
+
+
+def test_the_delta_reducer_label_replaces_inside_both_halves():
+    """max_over_time - min_over_time is two selectors; a name preserved in only one
+    leaves half the response unattributable."""
+    q = grouped_window_query("delta", "UUID", ["A", "B"], ["U1"], 100)
+    assert q.count("label_replace") == 2
+    assert q.startswith("(max_over_time(") and " - min_over_time(" in q
+
+
+def test_group_key_splits_on_reducer_and_on_uuid_label():
+    """Both matter: the reducer picks the function, and the label differs by family
+    -- NVML uses lowercase uuid where DCGM uses uppercase UUID."""
+    assert group_key(SPEC_BY_HEADER["SM_ACT%"]) == ("avg", "UUID")
+    assert group_key(SPEC_BY_HEADER["GPU%"]) == ("avg", "uuid")      # NVML
+    assert group_key(SPEC_BY_HEADER["PWRmax_W"]) == ("max", "UUID")
+    assert group_key(SPEC_BY_HEADER["ENERGY_kWh"]) == ("delta", "UUID")
+
+
+def test_grouping_cuts_the_query_count(gpu_record):
+    """The whole point. 7 default specs share 3 (reducer, uuid_label) groups, so a
+    job costs 1 discovery + 3 instead of 1 + 7."""
+    client = _client()
+    dcgm_for_job(gpu_record, DEFAULT_SPECS, client, None)
+    assert client.grouped == 2      # avg/UUID and max/uuid; avg/uuid is a lone spec
+    assert len(client.queries) < 1 + len(DEFAULT_SPECS)
+
+
+def test_grouped_and_per_spec_produce_identical_values(gpu_record):
+    """Batching changes how values are fetched, never which samples reduce into
+    them -- so the two paths must agree exactly, not approximately."""
+    grouped = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
+    per_spec = dcgm_for_job(gpu_record, DEFAULT_SPECS,
+                            FakeClient(gpus=[("UUID-A", "node01", "0"),
+                                             ("UUID-B", "node01", "1")],
+                                       values=_client().values,
+                                       support_grouping=False), None)
+    assert grouped == per_spec
+
+
+def test_a_server_without_label_replace_falls_back_per_metric(gpu_record):
+    """An unusable grouped response must cost a little speed, never a blank column."""
+    client = FakeClient(gpus=[("UUID-A", "node01", "0"), ("UUID-B", "node01", "1")],
+                        values={"DCGM_FI_PROF_SM_ACTIVE": {"UUID-A": 0.80, "UUID-B": 0.40}},
+                        support_grouping=False)
+    overall, per_gpu = dcgm_for_job(gpu_record, DEFAULT_SPECS, client, None)
+    assert overall["SM_ACT%"] == 60.0
+    assert per_gpu[("node01", "0")]["SM_ACT%"] == 80.0
+
+
+def test_one_series_backing_two_specs_is_not_lost(gpu_record):
+    """DCGM_FI_DEV_POWER_USAGE feeds POWER_W (avg) and PWRmax_W (max). They land in
+    different groups today, but the metric->specs mapping must stay one-to-many."""
+    client = _client()
+    overall, _pg = dcgm_for_job(gpu_record, ALL_SPECS, client, None)
+    assert overall["POWER_W"] == 400.0        # mean(300, 500)
+    assert overall["PWRmax_W"] == 500.0       # max(300, 500)

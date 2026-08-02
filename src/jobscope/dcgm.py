@@ -363,6 +363,16 @@ def gpu_minor_key(minor):
 MODEL_KEY = "__model__"
 
 
+def _reduce(selector: str, reducer: str, duration: int) -> str:
+    """Wrap a selector in its window reducer."""
+    if reducer == "avg":
+        return "avg_over_time((%s)[%ds:])" % (selector, duration)
+    if reducer == "max":
+        return "max_over_time((%s)[%ds:])" % (selector, duration)
+    return "(max_over_time((%s)[%ds:]) - min_over_time((%s)[%ds:]))" % (
+        selector, duration, selector, duration)
+
+
 def window_query(spec: MetricSpec, uuids: List[str], duration: int,
                  clip: Optional[str] = None) -> str:
     """PromQL that reduces ``spec`` over a ``duration``-second window for ``uuids``.
@@ -376,12 +386,114 @@ def window_query(spec: MetricSpec, uuids: List[str], duration: int,
     selector = '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex)
     if clip:
         selector = "%s and %s" % (selector, clip)
-    if spec.reducer == "avg":
-        return "avg_over_time((%s)[%ds:])" % (selector, duration)
-    if spec.reducer == "max":
-        return "max_over_time((%s)[%ds:])" % (selector, duration)
-    return "(max_over_time((%s)[%ds:]) - min_over_time((%s)[%ds:]))" % (
-        selector, duration, selector, duration)
+    return _reduce(selector, spec.reducer, duration)
+
+
+# The label a grouped query's metric name is copied into. Needed because
+# `avg_over_time` and every other function that transforms a value **drops
+# `__name__`** -- so a response covering several metrics is indistinguishable
+# without it, and a demultiplexer keyed on `__name__` silently matches nothing.
+NAME_LABEL = "jsname"
+
+
+def group_key(spec: MetricSpec) -> Tuple[str, str]:
+    """The batch a spec can share a query with.
+
+    Both halves matter. ``reducer`` picks the function, so metrics reduced
+    differently cannot share one call. ``uuid_label`` differs by *family* -- NVML
+    publishes a lowercase ``uuid`` where DCGM uses uppercase ``UUID`` -- and mixing
+    them yields a response whose rows cannot be attributed to a card.
+    """
+    return (spec.reducer, spec.uuid_label)
+
+
+def grouped_window_query(reducer: str, uuid_label: str, metrics: List[str],
+                         uuids: List[str], duration: int) -> str:
+    """One query covering several metrics that share a reducer and a UUID label.
+
+    Replaces N per-metric round trips with one: 7 becomes 3 for the default column
+    set and 30 becomes 5 under ``--dcgm``, measured at 2.1x and 5.6x with values
+    identical to the per-metric path.
+
+    ``label_replace`` copies the series name into :data:`NAME_LABEL` *before* the
+    reduction, which is what makes the response demultiplexable -- see that
+    constant. For the ``delta`` reducer it has to appear inside both
+    ``max_over_time`` and ``min_over_time``, since each is its own selector.
+    """
+    names = "^(" + "|".join(sorted(set(metrics))) + ")$"
+    regex = "^(" + "|".join(uuids) + ")$"
+    selector = ('label_replace({__name__=~"%s",%s=~"%s"},"%s","$1","__name__","(.*)")'
+                % (names, uuid_label, regex, NAME_LABEL))
+    return _reduce(selector, reducer, duration)
+
+
+def _store_value(per_uuid: Dict[str, dict], spec: MetricSpec, series: dict) -> bool:
+    """Record one series' value under its card and header; True if it landed.
+
+    The return value is what tells a grouped query whether its response was
+    attributable at all -- an empty or unexpectedly-labelled one stores nothing, and
+    that is the signal to retry per metric.
+    """
+    labels = series["metric"]
+    uuid = (labels.get(spec.uuid_label) or labels.get("uuid") or labels.get("UUID"))
+    if uuid not in per_uuid:
+        return False
+    try:
+        per_uuid[uuid][spec.header] = float(series["value"][1]) * spec.scale
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _collect_per_spec(per_uuid, specs, uuids, duration, at, client, timeout) -> None:
+    """One query per metric -- the original path, and the fallback."""
+    for spec in specs:
+        try:
+            found = client.query(window_query(spec, uuids, duration), at, timeout)
+        except Exception:
+            continue        # a failed metric leaves its column empty, as before
+        for series in found:
+            _store_value(per_uuid, spec, series)
+
+
+def collect_window(per_uuid: Dict[str, dict], specs: List[MetricSpec], uuids: List[str],
+                   duration: int, at, client: PrometheusClient,
+                   timeout: Optional[float]) -> None:
+    """Fill ``per_uuid`` with every spec's windowed value for these cards.
+
+    Metrics that share a reducer and a UUID label go in one query
+    (:func:`grouped_window_query`); a group that fails or comes back unusable falls
+    back to per-metric queries for *that group only*. The fallback matters: a server
+    without ``label_replace``, or one labelling results unexpectedly, must produce
+    the same report a little slower rather than a report with blank columns.
+    """
+    groups: Dict[Tuple[str, str], List[MetricSpec]] = {}
+    for spec in specs:
+        groups.setdefault(group_key(spec), []).append(spec)
+
+    for (reducer, uuid_label), members in groups.items():
+        if len(members) == 1:
+            _collect_per_spec(per_uuid, members, uuids, duration, at, client, timeout)
+            continue
+        # One series can back two specs -- DCGM_FI_DEV_POWER_USAGE feeds POWER_W and
+        # PWRmax_W -- so a name maps to a *list*. Those two differ by reducer and so
+        # land in different groups, but nothing guarantees that for a future pair.
+        by_metric: Dict[str, List[MetricSpec]] = {}
+        for spec in members:
+            by_metric.setdefault(spec.metric, []).append(spec)
+        query = grouped_window_query(reducer, uuid_label, list(by_metric), uuids, duration)
+        try:
+            found = client.query(query, at, timeout)
+        except Exception:
+            found = []
+        stored = 0
+        for series in found:
+            for spec in by_metric.get(series["metric"].get(NAME_LABEL), ()):
+                stored += _store_value(per_uuid, spec, series)
+        if not stored:
+            # Nothing attributable came back: either the group query failed or the
+            # response carried no NAME_LABEL. Ask per metric rather than report gaps.
+            _collect_per_spec(per_uuid, members, uuids, duration, at, client, timeout)
 
 
 def _jobid_query(record: JobRecord) -> str:
@@ -457,20 +569,7 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
         return {}, {}
 
     per_uuid: Dict[str, dict] = {uuid: {} for uuid in uuids}
-    for spec in specs:
-        try:
-            result = client.query(window_query(spec, uuids, record.duration),
-                                  record.end, timeout)
-        except Exception:
-            continue
-        for series in result:
-            metric = series["metric"]
-            uuid = metric.get(spec.uuid_label) or metric.get("uuid") or metric.get("UUID")
-            try:
-                if uuid in per_uuid:
-                    per_uuid[uuid][spec.header] = float(series["value"][1]) * spec.scale
-            except (TypeError, ValueError):
-                pass
+    collect_window(per_uuid, specs, uuids, record.duration, record.end, client, timeout)
 
     per_gpu = {}
     for node, minor, uuid in gpus:
