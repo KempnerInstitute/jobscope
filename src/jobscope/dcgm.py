@@ -14,6 +14,12 @@ from typing import Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 from .prometheus import PrometheusClient
 from .sacct import JobRecord
 
+# The series whose *value* is the job id holding each card -- the only join between
+# Slurm's world and the GPU exporters', since neither nvidia_gpu_* nor DCGM_FI_*
+# carries a jobid label. Named once because it is a site convention: an exporter
+# that publishes it under another name is what [site] gpu_job_join will override.
+JOB_SERIES = "nvidia_gpu_jobId"
+
 
 @dataclass(frozen=True)
 class MetricSpec:
@@ -380,8 +386,24 @@ def window_query(spec: MetricSpec, uuids: List[str], duration: int,
 
 def _jobid_query(record: JobRecord) -> str:
     cluster = "slurm_cluster='%s'" % record.cluster if record.cluster else ""
-    return ("max_over_time((nvidia_gpu_jobId{%s} == %s)[%ds:])"
-            % (cluster, record.jobid_raw, record.duration))
+    return ("max_over_time((%s{%s} == %s)[%ds:])"
+            % (JOB_SERIES, cluster, record.jobid_raw, record.duration))
+
+
+def _gpu_from_series(metric: dict) -> Optional[dict]:
+    """One GPU descriptor from a ``nvidia_gpu_jobId`` series' labels."""
+    uuid = metric.get("uuid")
+    if not uuid:
+        return None
+    return {"uuid": uuid,
+            "node": metric.get("host", "?").split(":")[0],
+            "minor": str(metric.get("minor_number", "?")),
+            # For the per-model POWER_W floor; "" falls back to global.
+            "model": metric.get("name", "")}
+
+
+def _sorted_gpus(gpus: List[dict]) -> List[dict]:
+    return sorted(gpus, key=lambda g: (g["node"], gpu_minor_key(g["minor"])))
 
 
 def discover_gpus(record: JobRecord, client: PrometheusClient,
@@ -389,7 +411,12 @@ def discover_gpus(record: JobRecord, client: PrometheusClient,
     """The GPUs that ran a job, as ``{uuid, node, minor, model}``, by (node, minor).
 
     Empty for CPU-only jobs or when no GPU samples exist. Joins via
-    ``nvidia_gpu_jobId``, the same mapping jobstats uses.
+    :data:`JOB_SERIES`, the same mapping jobstats uses.
+
+    One query per job, and measurement says to keep it that way: answering this for
+    a whole selection in one range query is correct but *slower* here, because the
+    per-job calls already run 8-wide against ~90ms queries while the batched form
+    returns one or two million samples serially. See the note in ``compute_dcgm``.
     """
     if not (record.gpus and record.jobid_raw and record.duration):
         return []
@@ -397,43 +424,35 @@ def discover_gpus(record: JobRecord, client: PrometheusClient,
         found = client.query(_jobid_query(record), record.end, timeout)
     except Exception:
         return []
-    gpus = []
-    for series in found:
-        metric = series["metric"]
-        uuid = metric.get("uuid")
-        if uuid:
-            gpus.append({"uuid": uuid,
-                         "node": metric.get("host", "?").split(":")[0],
-                         "minor": str(metric.get("minor_number", "?")),
-                         # For the per-model POWER_W floor; "" falls back to global.
-                         "model": metric.get("name", "")})
-    gpus.sort(key=lambda g: (g["node"], gpu_minor_key(g["minor"])))
-    return gpus
+    return _sorted_gpus([g for g in (_gpu_from_series(s["metric"]) for s in found) if g])
 
 
 def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusClient,
-                 timeout: Optional[float]) -> Tuple[dict, dict]:
+                 timeout: Optional[float],
+                 gpus_found: Optional[List[dict]] = None) -> Tuple[dict, dict]:
     """``(overall, per_gpu)`` metric dicts for one job over ``specs``.
 
     ``({}, {})`` when the job has no GPUs or no samples. ``overall`` is keyed by
     header; ``per_gpu`` is keyed by ``(node, minor)``. Series are joined to the
-    job on UUID via ``nvidia_gpu_jobId``.
+    job on UUID via :data:`JOB_SERIES`.
+
+    ``gpus_found`` supplies the job's cards when a caller has already discovered
+    them, which skips the discovery round trip. Omit it and this discovers them
+    itself, which is what every caller does today -- the parameter exists so a
+    caller that already knows (a future batched discovery, or a test) need not
+    re-ask.
     """
     if not (record.gpus and record.jobid_raw and record.duration):
         return {}, {}
-    try:
-        found = client.query(_jobid_query(record), record.end, timeout)
-    except Exception:
-        return {}, {}
-    gpus, uuids, models = [], [], {}
-    for series in found:
-        metric = series["metric"]
-        uuid = metric.get("uuid")
-        if uuid:
-            gpus.append((metric.get("host", "?").split(":")[0],
-                         str(metric.get("minor_number", "?")), uuid))
-            uuids.append(uuid)
-            models[uuid] = metric.get("name", "")
+    if gpus_found is None:
+        try:
+            found = client.query(_jobid_query(record), record.end, timeout)
+        except Exception:
+            return {}, {}
+        gpus_found = [g for g in (_gpu_from_series(s["metric"]) for s in found) if g]
+    gpus = [(g["node"], g["minor"], g["uuid"]) for g in gpus_found]
+    uuids = [g["uuid"] for g in gpus_found]
+    models = {g["uuid"]: g["model"] for g in gpus_found}
     if not uuids:
         return {}, {}
 
@@ -562,13 +581,33 @@ def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],
     The per-job queries are network I/O-bound, so a thread pool overlaps them and
     speeds up wide selections even on one CPU core. The per-metric queries within a
     job stay sequential; the parallelism is across jobs.
+
+    **Three batching strategies were measured here and all three lost.** Recorded
+    because the reasoning that recommends them is sound and someone will try again:
+
+    * *One range query on* :data:`JOB_SERIES` *for the whole selection's discovery.*
+      Correct -- verified identical UUID sets on 40/40 jobs -- but slower: 2.1s for
+      25 jobs and 3.4s for 120 against 0.4s and 1.6s for the per-job pool, because
+      it returns one to two million samples in a single serial call.
+    * *More workers.* 8 -> 16 buys 1.25x and then plateaus; 32 and 64 are no better.
+      The ceiling is the server's per-query work, not the thread count.
+    * *One query per (reducer, uuid_label) group instead of per metric*, via a
+      ``__name__`` regex. 3.5x on wall clock and returned no usable values -- the
+      grouped selector does not resolve the way the per-metric one does.
+
+    The premise that fewer round trips must be faster assumed ~90ms per query. That
+    holds serially; across the pool the effective cost is nearer 10ms, and payload
+    size then dominates. Anything tried next should be measured against the *pooled*
+    path, not a serial baseline.
     """
     gpu_jobs = [jid for jid in jobids if jid in records and records[jid].gpus]
     if not gpu_jobs:
         return {}
+
     workers = max(1, min(workers, len(gpu_jobs)))
     if workers == 1:
-        return {jid: dcgm_for_job(records[jid], specs, client, timeout) for jid in gpu_jobs}
+        return {jid: dcgm_for_job(records[jid], specs, client, timeout)
+                for jid in gpu_jobs}
     results: Dict[str, Tuple[dict, dict]] = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(dcgm_for_job, records[jid], specs, client, timeout): jid
