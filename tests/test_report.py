@@ -19,7 +19,6 @@ from jobscope.report import (
     dcgm_report,
     dcgm_timeseries,
     detail,
-    extend_detail_row,
     fmt_context,
     summarize,
 )
@@ -1002,7 +1001,7 @@ def test_the_legend_names_each_metrics_cutoffs_once_they_differ():
     """One sentence cannot be true of the table when the rows are graded
     differently, so it becomes a list -- of the metrics in the table, and of the
     three edges its own RED/YELLOW columns turn on."""
-    from jobscope.config import Thresholds, power_floors
+    from jobscope.config import Thresholds
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True,

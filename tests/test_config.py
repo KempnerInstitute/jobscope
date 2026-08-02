@@ -9,8 +9,8 @@ from jobscope.config import (
     Thresholds,
     example_config_text,
     floor_band,
-    power_floors,
     load_config,
+    power_floors,
     resolve_prometheus,
 )
 from jobscope.errors import JobscopeError

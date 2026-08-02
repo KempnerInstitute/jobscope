@@ -117,6 +117,7 @@ def test_the_band_table_follows_the_csv_not_the_kind_flag(tmp_path, monkeypatch,
     that can differ is which of the two tables was resolved.
     """
     import dataclasses
+
     from jobscope import config as config_module
     config_module.set_config(dataclasses.replace(
         config_module.get_config(),
@@ -341,6 +342,7 @@ def test_the_chart_grades_with_the_configured_palette(tmp_path, monkeypatch):
     """One [colors] value drives both the report's escapes and the chart's styles,
     so a job is the same colour in a table and in a chart."""
     import dataclasses
+
     from jobscope import config as config_module
     config_module.set_config(dataclasses.replace(
         config_module.get_config(),
