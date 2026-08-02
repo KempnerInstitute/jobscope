@@ -896,6 +896,10 @@ For the pipeline behind those numbers — which source wins, how each metric is
 reduced over time and across GPUs, the raw-vs-display job ID rule, MIG limits, and
 how to verify a value by hand — see [`docs/metrics.md`](docs/metrics.md).
 
+[`CHANGELOG.md`](CHANGELOG.md) records what has changed between releases. Read it
+before upgrading if you script against `--csv`: the `LABEL` column of
+`--classify --csv` dropped two values in the unreleased version.
+
 ## Plotting
 
 `jobscope plot` renders `jobscope <view> --csv` output as terminal bar gauges,

@@ -813,7 +813,8 @@ def test_an_override_changes_only_what_it_names(hermetic_config, tmp_path):
     assert spec.kind == "rate"            # inherited, not defaulted to gauge
     assert spec.denom == "cpus"           # inherited
     assert spec.group == "default"        # still in the default view
-    assert metrics.headers_with_role(metrics.SPLIT) == ("CPU%",)
+    # Roles survive too: an override renames the query, not the metric's purpose.
+    assert metrics.headers_with_role(metrics.RESOURCE) == ("GPU%", "CPU%")
 
 
 def test_overriding_a_gpu_builtin_keeps_its_purpose(hermetic_config, tmp_path):

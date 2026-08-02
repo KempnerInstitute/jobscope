@@ -37,11 +37,11 @@ def test_memory_also_covers_the_cgroup_columns_that_used_to_slip_through():
     assert {"CACHE%", "MEM_USED%"} <= memory
 
 
-def test_power_is_the_only_cap_and_cpu_the_only_split():
-    """Both are single-metric roles the classifier hardcodes today; [classify] will
-    hand them to a site later, and more than one of either has no meaning."""
+def test_power_is_the_only_cap():
+    """`cap` names the shape [classify] floor now implements: a metric that can only
+    lower a verdict. POWER_W is the built-in one; the role is documentation, since
+    the classifier reads the resolved floors rather than this."""
     assert metrics.headers_with_role(metrics.CAP) == ("POWER_W",)
-    assert metrics.headers_with_role(metrics.SPLIT) == ("CPU%",)
 
 
 # --- the short forms --------------------------------------------------------

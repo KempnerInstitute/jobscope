@@ -25,12 +25,16 @@ The vocabulary, kept deliberately small:
               is idle, and letting GMEM% vote would call it busy.
 ``cap``       can only push a verdict *down*, never up -- POWER_W, whose floor is
               per GPU model. Not a percentage, so it has no tier of its own.
-``split``     divides the worst band in two, so a job idle on the GPU but busy on
-              the host reads differently from one idle on both. CPU% only.
 
-``cap`` and ``split`` are read here so that :mod:`jobscope.config` can hand them to
-a site later without the classifier growing a second source of truth; today they
-name what the code already hardcodes.
+``cap`` is documentation now rather than a lookup: ``[classify] floor`` names the
+metrics that lower a verdict, so the classifier reads the resolved Thresholds and
+not this role. It stays because it is still true of POWER_W, and a site adding a
+second floor metric should be able to see that the shape has a name.
+
+There was a ``split`` role too, for the mechanism that divided the worst band by
+whether the host was busy. That mechanism is gone -- CPU% is an ordinary voter with
+a ceiling -- so the role went with it rather than lingering as a description of
+something the code no longer does.
 """
 
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -42,9 +46,8 @@ WORST = "worst"
 RESOURCE = "resource"
 MEMORY = "memory"
 CAP = "cap"
-SPLIT = "split"
 
-ROLES: Tuple[str, ...] = (WORST, RESOURCE, MEMORY, CAP, SPLIT)
+ROLES: Tuple[str, ...] = (WORST, RESOURCE, MEMORY, CAP)
 
 
 def _catalog() -> List:

@@ -82,12 +82,13 @@ class CgroupSpec:
 # cannot have them), and being outside the default group also keeps them out of the
 # default --classify ballot, which they have no business deciding.
 CGROUP_METRICS: List[CgroupSpec] = [
-    # `split` divides the worst band into wasteful-cpu-gpu and wasteful-gpu: a job
-    # idle on the GPU but busy on the host is a different finding from one idle on
-    # both. `resource` pairs it with GPU% as the two distinct things a job holds.
+    # `resource` pairs it with GPU% as the two distinct things a job holds -- the
+    # `gpu-cpu` combined ranking. CPU% also votes, capped at `inefficient` by
+    # [classify.ceiling], since a busy host does not justify a GPU allocation; that
+    # is a threshold rather than a role, so it is not named here.
     CgroupSpec("cpu", "CPU%", "cgroup_cpu_total_seconds",
                "rate", "cpus", 0, "default",
-               roles=frozenset({"worst", "split", "resource"})),
+               roles=frozenset({"worst", "resource"})),
     # `memory`: held bytes are not work. See GMEM%'s note in dcgm.py.
     CgroupSpec("mem", "MEM%", "cgroup_memory_rss_bytes",
                "gauge", "total_memory", 0, "default",
