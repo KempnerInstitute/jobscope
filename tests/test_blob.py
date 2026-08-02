@@ -1,5 +1,6 @@
 """Tests for the sacct AdminComment blob decoder and metrics."""
 
+from jobscope import models
 from jobscope.blob import (
     GIB,
     blob_detail,
@@ -41,16 +42,53 @@ def test_bytes_to_gb_trims_zeros():
 
 
 def test_blob_metrics_gpu_job():
-    assert blob_metrics(GPU_STATS) == (75, 50, 70, 50)
+    got = blob_metrics(GPU_STATS, gpus=2)
+    assert got.known() == {"CPU%": 75, "MEM%": 50, "GPU%": 70, "GMEM%": 50}
 
 
-def test_blob_metrics_cpu_only_has_no_gpu():
-    assert blob_metrics(CPU_STATS) == (50, 50, None, None)
+def test_blob_metrics_rounds_to_whole_percents_as_the_renderers_expect():
+    """str() of a reading goes straight into the table and the CSV, so a float
+    would print 100.0 where every other release printed 100."""
+    got = blob_metrics(GPU_STATS, gpus=2)
+    assert all(isinstance(v, int) for v in got.known().values())
+
+
+def test_a_cpu_only_job_has_no_gpu_rather_than_an_unknown_one():
+    """`na`, not `unknown`: the job was allocated no GPUs, so there is nothing
+    missing. The distinction is what keeps the verdict valid."""
+    got = blob_metrics(CPU_STATS, gpus=0)
+    assert got.known() == {"CPU%": 50, "MEM%": 50}
+    assert got.state("GPU%") == models.NA and got.state("GMEM%") == models.NA
+
+
+def test_gpus_allocated_but_unsampled_is_unknown_not_na():
+    """Allocated 2, blob has none: that is a gap in collection, and it must not
+    read as 'this job has no GPU'."""
+    got = blob_metrics(CPU_STATS, gpus=2)
+    assert got.state("GPU%") == models.UNKNOWN
+    assert "no GPU samples" in got.measure("GPU%").reason
 
 
 def test_blob_metrics_empty():
-    assert blob_metrics({}) is None
-    assert blob_metrics({"no_nodes": 1}) is None
+    for stats in ({}, {"no_nodes": 1}):
+        got = blob_metrics(stats)
+        assert not got.by_header and got.known() == {}
+
+
+def test_a_blob_missing_its_core_count_is_unknown_not_zero():
+    """This was `else 0`. A fabricated zero passes every is-it-measured guard
+    downstream and lands in the summary averages as a real reading, so a job with
+    a truncated blob used to be indistinguishable from a genuinely idle one."""
+    got = blob_metrics({"total_time": 100, "nodes": {"n1": {"total_time": 50}}})
+    assert got.state("CPU%") == models.UNKNOWN
+    assert got.value("CPU%") is None
+    assert "core count" in got.measure("CPU%").reason
+
+
+def test_a_blob_missing_its_memory_allocation_is_unknown_not_zero():
+    got = blob_metrics({"total_time": 100, "nodes": {"n1": {"cpus": 2, "total_time": 100}}})
+    assert got.state("MEM%") == models.UNKNOWN
+    assert got.value("MEM%") is None
 
 
 def test_blob_detail_gpu_job():

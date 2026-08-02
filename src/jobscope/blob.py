@@ -14,9 +14,14 @@ import json
 import re
 from typing import List, Optional, Tuple
 
+from .models import JobMetrics, Measure
+
 GIB = 1024 ** 3
 
-BlobMetrics = Tuple[int, int, Optional[int], Optional[int]]
+# What a JobMetrics from here is labelled with, so a mixed report can say which
+# column came from where -- the blob and Prometheus do not always agree.
+SOURCE = "blob"
+
 DetailRow = Tuple[str, str, str, str, str, str, str]
 
 
@@ -59,29 +64,58 @@ def blob_capacity(stats: dict) -> Tuple[int, int]:
             sum(n.get("total_memory", 0) or 0 for n in nodes))
 
 
-def blob_metrics(stats: dict) -> Optional[BlobMetrics]:
-    """Overall ``(cpu%, mem%, gpu%, gmem%)`` for a job, or None if the blob is empty.
+def blob_metrics(stats: dict, gpus: Optional[int] = None) -> JobMetrics:
+    """A job's overall CPU%/MEM%/GPU%/GMEM% from its stats dict.
 
-    ``gpu%`` / ``gmem%`` are None for CPU-only jobs. Matches jobstats' overall bars.
+    Matches jobstats' overall bars. Every absence is labelled rather than blanked,
+    and ``gpus`` -- the count Slurm allocated -- is what makes the GPU columns
+    answerable: without it a missing GPU reading could mean either "CPU-only job"
+    or "the exporter was down", and those must not be the same value.
+
+    Two of these used to be ``else 0``. A blob carrying nodes but no core count
+    reported **CPU% 0**, indistinguishable from a genuinely idle job -- and worse
+    than a bare absence, because a fabricated zero passes every "is it measured"
+    guard downstream and lands in the summary averages as a real reading.
     """
     if not stats or "nodes" not in stats:
-        return None
+        return JobMetrics({}, source=SOURCE)
+
     nodes = list(stats["nodes"].values())
     runtime = stats.get("total_time", 0) or 0
+    found = {}
+
     cpu_time = sum(n.get("total_time", 0) for n in nodes)
     cpus = sum(n.get("cpus", 0) for n in nodes)
-    cpu = 100 * cpu_time / (runtime * cpus) if runtime and cpus else 0
+    if runtime and cpus:
+        found["CPU%"] = Measure.reading(round(100 * cpu_time / (runtime * cpus)))
+    else:
+        found["CPU%"] = Measure.unmeasured(
+            "the stored blob has no %s" % ("elapsed time" if not runtime else "core count"))
+
     used_mem = sum(n.get("used_memory", 0) for n in nodes)
     total_mem = sum(n.get("total_memory", 0) for n in nodes)
-    mem = 100 * used_mem / total_mem if total_mem else 0
-    gpu_utils = [v for n in nodes for v in n.get("gpu_utilization", {}).values()]
-    gpu = sum(gpu_utils) / len(gpu_utils) if gpu_utils else None
+    if total_mem:
+        found["MEM%"] = Measure.reading(round(100 * used_mem / total_mem))
+    else:
+        found["MEM%"] = Measure.unmeasured("the stored blob has no memory allocation")
+
+    utils = [v for n in nodes for v in n.get("gpu_utilization", {}).values()]
     gpu_used = sum(v for n in nodes for v in n.get("gpu_used_memory", {}).values())
     gpu_total = sum(v for n in nodes for v in n.get("gpu_total_memory", {}).values())
-    gmem = 100 * gpu_used / gpu_total if gpu_total else None
-    return (round(cpu), round(mem),
-            round(gpu) if gpu is not None else None,
-            round(gmem) if gmem is not None else None)
+
+    # A job with no GPUs allocated is not missing a GPU reading -- it has none to
+    # miss. A job that *was* allocated GPUs and still has no samples is a gap.
+    if gpus == 0:
+        absent = Measure.not_applicable("CPU-only job")
+        found["GPU%"], found["GMEM%"] = absent, absent
+        return JobMetrics(found, source=SOURCE)
+
+    no_gpu_data = Measure.unmeasured("no GPU samples in the stored blob")
+    found["GPU%"] = (Measure.reading(round(sum(utils) / len(utils)))
+                     if utils else no_gpu_data)
+    found["GMEM%"] = (Measure.reading(round(100 * gpu_used / gpu_total))
+                      if gpu_total else no_gpu_data)
+    return JobMetrics(found, source=SOURCE)
 
 
 def blob_detail(stats: dict) -> List[DetailRow]:

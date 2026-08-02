@@ -368,7 +368,8 @@ def _running(**kw):
 def test_synthesize_stats_feeds_blob_metrics():
     stats = synthesize_stats(_running(), BlobClient())
     # cpu = 100*150/(100*2) = 75, mem = 100*8/16 = 50, gpu = 70, gmem = 100*40/80 = 50.
-    assert blob_metrics(stats) == (75, 50, 70, 50)
+    assert blob_metrics(stats, gpus=1).known() == {"CPU%": 75, "MEM%": 50,
+                                                "GPU%": 70, "GMEM%": 50}
 
 
 def test_synthesize_stats_queries_the_raw_job_id():
@@ -400,7 +401,8 @@ def test_synthesize_stats_skips_gpu_queries_for_a_cpu_only_job():
     client = BlobClient()
     stats = synthesize_stats(_running(gpus=0), client)
     assert not any("nvidia_gpu" in q for q in client.queries)
-    assert blob_metrics(stats)[2:] == (None, None)   # no gpu%, no gmem%
+    got = blob_metrics(stats, gpus=0)               # no gpu%, no gmem%
+    assert got.value("GPU%") is None and got.value("GMEM%") is None
 
 
 def test_synthesize_stats_returns_empty_without_a_usable_window():

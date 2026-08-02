@@ -482,7 +482,6 @@ _RESOURCES = {
 }
 
 
-_BLOB_HEADERS = ("CPU%", "MEM%", "GPU%", "GMEM%")
 
 # The measures the Worst rows rank by, in print order, and the two combined
 # rankings: the distinct *resources*, then every measure. Read off the catalog's
@@ -532,16 +531,22 @@ def _worst_slug(header: str) -> str:
     return metrics.label(header)
 
 
-def _blob_value(metrics, header: str) -> Optional[float]:
-    """``header``'s value from a :func:`blob_metrics` tuple, or None.
+# The four columns the stats blob carries, paired with the internal keys the
+# running totals are accumulated under. One pairing in one place, replacing three
+# zips over parallel literal tuples that had to stay in the same order.
+BLOB_KEYS: Tuple[Tuple[str, str], ...] = (
+    ("cpu", "CPU%"), ("mem", "MEM%"), ("gpu", "GPU%"), ("gmem", "GMEM%"))
+BLOB_HEADERS: Tuple[str, ...] = tuple(header for _key, header in BLOB_KEYS)
+
+
+def _blob_value(job_metrics, header: str) -> Optional[float]:
+    """``header``'s value from a :class:`~jobscope.models.JobMetrics`, or None.
 
     None both for a header the blob does not carry (a DCGM column) and for one it
     carries without a measurement, which the caller treats the same way: look to
     Prometheus, then give up rather than invent a zero.
     """
-    if metrics is None or header not in _BLOB_HEADERS:
-        return None
-    return metrics[_BLOB_HEADERS.index(header)]
+    return job_metrics.value(header) if job_metrics is not None else None
 
 
 def _resource_of(header: str, hours: bool):
@@ -1037,13 +1042,13 @@ class SummaryRenderer:
             }
             gpus = record.gpus if record else 0
             weights = self._weights(record, gpus)
-            metrics = blob_metrics(record.stats if record else None)
-            if metrics is None:
-                for col in ("CPU%", "MEM%", "GPU%", "GMEM%"):
+            job_metrics = blob_metrics(record.stats if record else None, gpus)
+            if not job_metrics.by_header:
+                for col in BLOB_HEADERS:
                     row[col] = "-"
             else:
-                for key, col, value in zip(("cpu", "mem", "gpu", "gmem"),
-                                           ("CPU%", "MEM%", "GPU%", "GMEM%"), metrics):
+                for key, col in BLOB_KEYS:
+                    value = job_metrics.value(col)
                     row[col] = "-" if value is None else str(value)
                     if value is not None:
                         self.sums[key][0] += value
@@ -1072,7 +1077,7 @@ class SummaryRenderer:
             # One value map for every graded metric, built once both the blob and
             # the DCGM values are in hand, and shared by the tallies and the waste
             # bookkeeping so the two cannot disagree about what a job scored.
-            if metrics is None:
+            if not job_metrics.by_header:
                 # No stored blob, so the job is only half measured: it has DCGM
                 # numbers but no CPU%/MEM%/GPU%/GMEM%. Feeding it to the DCGM tallies
                 # alone made their denominators disagree with the blob ones -- 117
@@ -1083,7 +1088,7 @@ class SummaryRenderer:
             else:
                 values = {}
                 for header in self.tallies:
-                    value = _blob_value(metrics, header)
+                    value = _blob_value(job_metrics, header)
                     if value is None and header in self.dcgm_headers and do_dcgm:
                         value = dcgm_data.get(jid, ({}, {}))[0].get(header)
                     if value is not None:
@@ -1983,6 +1988,12 @@ def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
 # _tier_criteria()/_tier_range()).
 CATEGORIES = tuple((name, name) for name, _key in TIERS)
 
+# Not a tier: the label for a unit nothing could be measured for. It is deliberately
+# outside TIERS, so it has no band, no colour role and no cutoff -- there is nothing
+# to grade. It exists so that "we did not measure this" stops being reported as
+# "this job wasted its allocation", which is the reading that gets someone an email.
+NO_DATA = "no-data"
+
 def classify_metrics(columns) -> List[str]:
     """The ``%`` columns a verdict is taken over, in CSV order.
 
@@ -1997,9 +2008,10 @@ _VERDICT_ORDER = {name: i for i, (name, _role) in enumerate(CATEGORIES)}
 
 
 def classify(values: Dict[str, float], thresholds: "Thresholds",
-            power: Optional[float] = None, floor: Optional[float] = None) -> str:
+            power: Optional[float] = None,
+            floor: Optional[float] = None) -> Optional[str]:
     """The category for one unit's mean values: the band of its *best* metric,
-    capped by sustained idle power.
+    capped by sustained idle power. ``None`` when there is nothing to judge.
 
     The percentage vote is charitable on purpose -- one busy measure is enough to call
     a unit not-idle. But a duty-cycle-style metric can read busy while the card draws
@@ -2017,10 +2029,17 @@ def classify(values: Dict[str, float], thresholds: "Thresholds",
     every metric shares its edges this is the same answer as taking the max, since
     tier() is then monotonic in the value.
     """
-    # No measured metric at all -- a CPU-only job in a combined sweep -- is no
-    # evidence of work, which is what banding a 0.0 used to say.
+    # An empty ballot yields no verdict at all, rather than `wasteful`. It used to
+    # default to `wasteful` on the reading "no measured metric is no evidence of
+    # work" -- true of a CPU-only job in a combined sweep, whose GPU columns are
+    # *not applicable*, and false of a job whose exporter was down or that predates
+    # Prometheus retention, whose columns are merely *unknown*. Both arrive here as
+    # an empty dict, so this cannot tell them apart and must not guess: the caller
+    # knows which case it is holding, and NO_DATA is what an unknown one becomes.
+    if not values:
+        return None
     verdict = max((thresholds.tier(header, value) for header, value in values.items()),
-                  key=_VERDICT_ORDER.__getitem__, default="wasteful")
+                  key=_VERDICT_ORDER.__getitem__)
     if power is not None and floor is not None and power < floor:
         return CATEGORIES[min(_VERDICT_ORDER[verdict], _VERDICT_ORDER["inefficient"])][0]
     return verdict
@@ -2039,7 +2058,7 @@ COMBINED_CATEGORIES = ((("wasteful-cpu-gpu", "wasteful"), ("wasteful-gpu", "wast
 
 def classify_combined(gpu_values: Dict[str, float], cpu_value: Optional[float],
                       thresholds: "Thresholds", power: Optional[float] = None,
-                      floor: Optional[float] = None) -> str:
+                      floor: Optional[float] = None) -> Optional[str]:
     """The GPU verdict (:func:`classify`), with its worst band split by whether
     host CPU is also idle.
 
@@ -2055,6 +2074,8 @@ def classify_combined(gpu_values: Dict[str, float], cpu_value: Optional[float],
     """
     verdict = classify(gpu_values, thresholds, power, floor)
     if verdict != "wasteful":
+        # Includes None, i.e. nothing to judge: the split says which *flavour* of
+        # worst a job is, and there is no flavour of a verdict that was not reached.
         return verdict
     cpu_idle = cpu_value is not None and cpu_value < thresholds.edge("wasteful", "CPU%")
     return "wasteful-cpu-gpu" if cpu_idle else "wasteful-gpu"
@@ -2195,8 +2216,8 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     (see :func:`classify_combined`); it never inflates or outranks the GPU verdict.
     """
     out = out or sys.stdout
-    metrics = classify_metrics(columns)
-    if not metrics:
+    voting = classify_metrics(columns)
+    if not voting:
         raise JobscopeError("no %-metrics in this series to classify")
     unit = {"gpu": "GPUs", "node": "nodes"}.get(level, "jobs")
     thresholds = _bands(options)
@@ -2204,9 +2225,13 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     # CPU% only drives the combined path when real GPU metrics are also present --
     # a plain --cpu --ts --classify series has CPU% as its only metric, and stays
     # on the ordinary classify()/CATEGORIES path unchanged.
-    is_combined = "CPU%" in metrics and len(metrics) > 1
-    gpu_metrics = [m for m in metrics if m != "CPU%"] if is_combined else metrics
+    is_combined = "CPU%" in voting and len(voting) > 1
+    gpu_metrics = [m for m in voting if m != "CPU%"] if is_combined else voting
     categories = COMBINED_CATEGORIES if is_combined else CATEGORIES
+    # A unit whose voting columns carried no samples lands here rather than in a
+    # band. Last, because it is an absence rather than a severity: putting it at
+    # the top would push the findings someone opened the report for off the page.
+    categories = categories + ((NO_DATA, NO_DATA),)
 
     reported = [c for c in columns if c not in TS_ID_COLUMNS]
     groups = pool_samples(rows, reported, level)
@@ -2224,6 +2249,12 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         floor = options.thresholds.floor_for(model) if options.thresholds is not None else None
         verdict = (classify_combined(judged, cpu_mean, thresholds, power, floor) if is_combined
                   else classify(judged, thresholds, power, floor))
+        # None means nothing voted: the series carries these columns but this unit
+        # had no samples in any of them -- a dead exporter, a node that restarted,
+        # a window past retention. Saying `wasteful` there would report a
+        # collection gap as waste, and it is the reading someone acts on.
+        if verdict is None:
+            verdict = NO_DATA
         best_gpu = max(judged.values()) if judged else 0.0
         verdicts.append((verdict, key, found, means, power, best_gpu, cpu_mean))
 

@@ -98,7 +98,7 @@ def test_gpu_memory_comes_from_the_blob_for_a_finished_job(gpu_record):
     assert per_gpu[("node01", "1")]["GMEM%"] == 40.0
     # Job-level GMEM% sums used over sums total, exactly as blob_metrics does.
     assert overall["GMEM%"] == 50.0
-    assert overall["GMEM%"] == blob_metrics(gpu_record.stats)[3]
+    assert overall["GMEM%"] == blob_metrics(gpu_record.stats, gpu_record.gpus).value("GMEM%")
 
 
 def test_format_value():
@@ -155,7 +155,7 @@ def test_utilization_comes_from_the_blob_not_a_recomputation(gpu_record):
     assert per_gpu[("node01", "0")]["GPU%"] == 90.0   # the blob's own per-GPU values
     assert per_gpu[("node01", "1")]["GPU%"] == 50.0
     assert overall["GPU%"] == 70.0                   # mean(90, 50)
-    assert overall["GPU%"] == blob_metrics(gpu_record.stats)[2]
+    assert overall["GPU%"] == blob_metrics(gpu_record.stats, gpu_record.gpus).value("GPU%")
 
 
 def test_running_job_keeps_the_prometheus_utilization(gpu_record):

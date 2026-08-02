@@ -311,7 +311,8 @@ def test_running_yields_records_that_look_finished(monkeypatch):
     # A reconstructed blob, so blob_metrics works exactly as for a stored one:
     # cpu = 100*150/(100*2) = 75, mem = 100*8/16 = 50, gpu = 90, gmem = 40/80 = 50.
     from jobscope.blob import blob_metrics
-    assert blob_metrics(record.stats) == (75, 50, 90, 50)
+    assert blob_metrics(record.stats, record.gpus).known() == {
+        "CPU%": 75, "MEM%": 50, "GPU%": 90, "GMEM%": 50}
     assert dcgm_data["7"][0]["SM_ACT%"] == 80.0
 
 
@@ -330,7 +331,8 @@ def test_running_without_specs_still_builds_the_blob(monkeypatch):
     selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, None)
     (_ids, records, _d), = list(selected.chunks)
     from jobscope.blob import blob_metrics
-    assert blob_metrics(records["7"].stats)[:2] == (75, 50)
+    blob = blob_metrics(records["7"].stats, records["7"].gpus)
+    assert (blob.value("CPU%"), blob.value("MEM%")) == (75, 50)
     # ... but it does not pay for the DCGM profiling queries it will not print.
     assert not any("DCGM_FI" in q for q in client.queries)
     assert BLOB_SPECS and all(s.key in ("duty", "mem", "memtot") for s in BLOB_SPECS)

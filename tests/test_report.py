@@ -2337,10 +2337,28 @@ def test_the_best_metric_is_the_best_band_not_the_biggest_number():
     assert report.classify({"CPU%": 4.5}, t) == "wasteful"
 
 
-def test_a_unit_with_no_measured_metric_is_wasteful():
-    """Reachable: a CPU-only job in a combined sweep has no GPU metric to judge.
-    No measurement is no evidence of work, which is what banding a 0.0 used to say."""
-    assert report.classify({}, _thresholds()) == "wasteful"
+def test_an_empty_ballot_yields_no_verdict_rather_than_wasteful():
+    """This used to return "wasteful", on the reading that no measurement is no
+    evidence of work. That is true of a CPU-only job in a GPU sweep, whose GPU
+    columns are *not applicable*, and false of a job whose exporter was down or
+    that predates retention, whose columns are merely *unknown*. Both reach
+    classify() as an empty dict, so it cannot tell them apart and must not guess --
+    the caller knows which it is holding."""
+    assert report.classify({}, _thresholds()) is None
+
+
+def test_the_split_does_not_invent_a_flavour_for_a_verdict_never_reached():
+    """classify_combined splits *which* worst a unit is. With nothing judged there
+    is no worst to split, so it must not answer wasteful-cpu-gpu."""
+    assert report.classify_combined({}, 0.5, _thresholds()) is None
+
+
+def test_a_cpu_only_job_in_a_combined_sweep_is_still_judged_on_cpu():
+    """The case the old default was written for has to keep working: the caller
+    routes an empty GPU ballot to a CPU%-only classify() rather than relying on
+    classify() to invent a verdict."""
+    assert report.classify({"CPU%": 0.5}, _thresholds()) == "wasteful"
+    assert report.classify({"CPU%": 55.0}, _thresholds()) == "good"
 
 
 def test_the_category_is_the_best_metric_not_the_worst():
@@ -2859,3 +2877,51 @@ def test_the_detail_view_keeps_its_fixed_columns_whatever_metrics_say():
     text = out.getvalue()
     for header in ("SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"):
         assert header in text, header
+
+
+# --- units nothing could be measured for ------------------------------------
+
+def test_a_unit_with_no_gpu_samples_reads_no_data_not_wasteful():
+    """A combined series where this job's GPU columns are all blank: the exporter
+    died, the node restarted, the window predates retention. Reporting that as
+    waste turns a collection gap into an accusation, and it is the reading someone
+    acts on."""
+    text = _classify({"1": {"CPU%": 50.0}}, columns=("GPU%", "SM_ACT%", "CPU%"),
+                     csv=True)
+    _, rows = plot.parse_csv(io.StringIO(text))
+    assert rows[0]["LABEL"] == report.NO_DATA
+
+
+def test_no_data_does_not_fall_through_to_the_cpu_ballot():
+    """The failure this replaces: with GPU columns blank, a busy CPU would carry
+    the job to `good` -- reporting a GPU job with dead telemetry as healthy."""
+    text = _classify({"1": {"CPU%": 95.0}}, columns=("GPU%", "SM_ACT%", "CPU%"),
+                     csv=True)
+    _, rows = plot.parse_csv(io.StringIO(text))
+    assert rows[0]["LABEL"] == report.NO_DATA
+
+
+def test_a_measured_unit_is_unaffected_by_the_no_data_path():
+    text = _classify({"1": {"GPU%": 90.0, "SM_ACT%": 80.0, "CPU%": 50.0}},
+                     columns=("GPU%", "SM_ACT%", "CPU%"), csv=True)
+    _, rows = plot.parse_csv(io.StringIO(text))
+    assert rows[0]["LABEL"] == "good"
+
+
+def test_no_data_units_sort_after_the_real_findings():
+    """It is an absence, not a severity. Ranking it first would push the rows
+    someone opened the report for off the page."""
+    text = _classify({"idle": {"GPU%": 0.5, "SM_ACT%": 0.1, "CPU%": 1.0},
+                      "blank": {"CPU%": 50.0}},
+                     columns=("GPU%", "SM_ACT%", "CPU%"), csv=True)
+    _, rows = plot.parse_csv(io.StringIO(text))
+    assert [r["JOBID"] for r in rows] == ["idle", "blank"]
+    assert rows[1]["LABEL"] == report.NO_DATA
+
+
+def test_a_cpu_only_series_is_judged_on_cpu_not_called_no_data():
+    """--cpu --ts --classify has CPU% as its only voting column, and must stay on
+    the ordinary path: CPU% votes for itself there."""
+    text = _classify({"1": {"CPU%": 0.5}}, columns=("CPU%",), csv=True)
+    _, rows = plot.parse_csv(io.StringIO(text))
+    assert rows[0]["LABEL"] == "wasteful"
