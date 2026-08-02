@@ -21,6 +21,7 @@ from .config import (
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
     EDGE_KEYS,
+    REPORT_SECTIONS,
     TIERS,
     Palette,
     Thresholds,
@@ -231,6 +232,9 @@ class RenderOptions:
     # ([defaults] long_running, in seconds here).
     worst_jobs: int = DEFAULT_WORST_JOBS
     long_running: int = LONG_RUNNING
+    # Which sections of the summary block print, and in what order ([report]
+    # sections). --no-plot still drops the bars regardless: a flag beats a file.
+    sections: Tuple[str, ...] = REPORT_SECTIONS
     # --ts only: emit CPU%/MEM% alongside the GPU/DCGM columns in one series --
     # the default --ts view. cli.py resolves this from --cpu/--dcgm; view=="cpu"
     # takes precedence over this when combined is False (cpu-only), and combined
@@ -1264,10 +1268,14 @@ class SummaryRenderer:
                     problems.extend(self._worst_rows(heading, entries, user_width))
                 problems.append("Jobs: %s" % "  ".join(counts))
 
-            self._print_sections([("Summary by metric", summary),
-                                  ("Average efficiency  (filled = used, grey = idle)",
-                                   self._bar_lines(stats)),
-                                  ("Problem jobs", problems)])
+            # Keyed by [report] sections' short names, which is also what orders
+            # them: a site that reads Problem jobs first should not have to scroll.
+            # A section with no content still drops out, in _print_sections.
+            built = {"metrics": ("Summary by metric", summary),
+                     "efficiency": ("Average efficiency  (filled = used, grey = idle)",
+                                    self._bar_lines(stats)),
+                     "problems": ("Problem jobs", problems)}
+            self._print_sections([built[name] for name in options.sections])
             if alone and self._last_values:
                 self._print_classification()
 

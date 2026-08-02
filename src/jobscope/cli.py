@@ -726,6 +726,7 @@ def handle_report(args) -> None:
         color=_want_color(args), combined=ts_combined,
         worst_jobs=cfg.defaults.worst_jobs,
         long_running=parse_duration(cfg.defaults.long_running),
+        sections=cfg.report.sections,
         # The two views have their own band tables and inherit nothing from each
         # other, because a two-hour window that catches a checkpoint pause should
         # not answer to a nineteen-hour job's bar. --plot_ts set args.ts above, so
@@ -825,6 +826,17 @@ def handle_config(args) -> None:
     print("[defaults]")
     for key, value in sorted(vars(cfg.defaults).items()):
         print("  %-13s %s" % (key, value))
+    print()
+    print("[report]")
+    print("  %-13s %s" % ("sections", " ".join(cfg.report.sections)))
+    print()
+    print("[plot]")
+    # Resolved, so a short name in the file shows as the column header it charts --
+    # which is what a CSV has to carry for the series to appear at all.
+    print("  %-13s %s" % ("metrics", " ".join(cfg.plot.metrics)))
+    print("  %-13s %s" % ("palette", " ".join(str(c) for c in cfg.plot.palette)))
+    print("  %-13s %s" % ("max_rows", cfg.plot.max_rows))
+    print("  %-13s %s" % ("panels", cfg.plot.panels))
     print()
     print("print an example with: jobscope config --example")
 

@@ -2977,3 +2977,31 @@ def test_a_cpu_only_series_is_judged_on_cpu_not_called_no_data():
     text = _classify({"1": {"CPU%": 0.5}}, columns=("CPU%",), csv=True)
     _, rows = plot.parse_csv(io.StringIO(text))
     assert rows[0]["LABEL"] == "wasteful"
+
+
+def test_report_sections_reorder_and_renumber():
+    """[report] sections orders the block, and the numbering follows what printed.
+
+    Numbering is derived, not fixed per section, so a dropped section leaves no gap --
+    a missing number reads as something having failed.
+    """
+    records = {str(i): _gpu_job(str(i), {"0": 1.0}) for i in range(1, 4)}
+
+    default = _finish(records)
+    assert re.findall(r"^\d\. .*", default, re.M) == [
+        "1. Summary by metric",
+        "2. Average efficiency  (filled = used, grey = idle)",
+        "3. Problem jobs"]
+
+    flipped = _finish(records, sections=("problems", "metrics"))
+    assert re.findall(r"^\d\. .*", flipped, re.M) == [
+        "1. Problem jobs",
+        "2. Summary by metric"]
+
+
+def test_no_plot_still_drops_the_bars_when_they_are_configured_on():
+    """A flag beats a file: --no-plot wins over [report] sections listing efficiency."""
+    records = {str(i): _gpu_job(str(i), {"0": 1.0}) for i in range(1, 4)}
+    text = _finish(records, sections=("efficiency", "metrics"), plot_avgeff=False)
+    assert "Average efficiency" not in text
+    assert "1. Summary by metric" in text

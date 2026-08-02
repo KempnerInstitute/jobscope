@@ -23,34 +23,40 @@ ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
 # Summary footers, keyed on the JOBID cell. Not job rows, so parse_csv skips them.
 # Every footer label the summary view has ever emitted: the retired Mean rows stay
 # listed so a previously-saved CSV still parses.
+#
+# Deliberately not [plot] config, unlike the constants below it. This is not a
+# preference -- it is the set of labels a saved CSV might contain, and a site that
+# trimmed it would stop being able to read its own older files.
 FOOTER_ROWS = {"Mean", "MeanPerGPU", "MeanPerGPUHour", "Jobs",
                "UsedPerGPU", "UsedPerGPUHour", "UsedPerCPU", "UsedPerCPUHour",
                "GPUhours", "GPUs", "Corehours", "Cores",
                "Worst", "WorstGPU", "WorstCPU", "WorstSM", "WorstPOWER",
                "WorstBoth", "WorstGpu-cpu", "WorstAll"}
 
-HEAT_MAX_ROWS = 40
-PANEL_CAP = 12
-# Side-by-side panels for --by metric --gpu a,b,c. A panel narrower than this has no
-# room for an axis and its labels, so the column count drops before the width does.
+# A panel narrower than this has no room for an axis and its labels, so the column
+# count drops before the width does. Not configurable: it is a property of the glyphs,
+# not a preference, and setting it lower produces a chart with no readable axis.
 MIN_PANEL = 28
 GRID_GAP = 2
 
-# Distinct 256-color codes for the time-series chart, one per metric, so the
-# plotext line and the rich-tinted per-metric stats render the exact same color.
-PALETTE = [196, 46, 33, 208, 201, 51, 226, 129, 244, 39]
-
-# Default time-series columns, in the order the tables use. DUTY% is listed only to
-# keep charting utilization for CSVs written before that column was renamed to
-# GPU%; the two are the same quantity, so ts_defaults() shows at most one.
-#
-# GMEM% sits next to GPU% because the two are *resources* -- how full the card is and
-# how busy it is -- where OCC%/TENSOR%/DRAM% describe how the SMs were used, which only
-# means something once the GPU is known to be busy. Memory also catches a failure none
-# of them do: GPU% 96 with GMEM% 3 is under-batched, and no profiling column says so.
-# GMEM_GB stays out as the same quantity without a denominator.
-TS_DEFAULT = ["GPU%", "DUTY%", "GMEM%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
+# Two spellings of one quantity: DUTY% is what GPU% was called before it was renamed,
+# and a CSV saved then still charts. ts_defaults() shows at most one of each pair.
 TS_ALIASES = [("GPU%", "DUTY%")]
+
+
+def heat_max_rows() -> int:
+    """``[plot] max_rows`` -- the heatmap row cap. ``--max-rows`` overrides it."""
+    return config.get_config().plot.max_rows
+
+
+def panel_cap() -> int:
+    """``[plot] panels`` -- how many chart panels may sit side by side."""
+    return config.get_config().plot.panels
+
+
+def palette() -> list:
+    """``[plot] palette`` -- one 256-colour code per charted series."""
+    return list(config.get_config().plot.palette)
 
 
 def gpu_list(spec) -> list:
@@ -64,8 +70,12 @@ def gpu_list(spec) -> list:
 
 
 def ts_defaults(columns) -> list:
-    """The default series to chart for ``columns``, one per distinct quantity."""
-    chosen = [m for m in TS_DEFAULT if m in columns]
+    """The default series to chart for ``columns``, one per distinct quantity.
+
+    Which metrics those are is ``[plot] metrics``; the intersection with ``columns``
+    is what keeps a config naming a metric this CSV lacks from charting an empty line.
+    """
+    chosen = [m for m in config.get_config().plot.metrics if m in columns]
     for preferred, superseded in TS_ALIASES:
         if preferred in chosen and superseded in chosen:
             chosen.remove(superseded)
@@ -310,9 +320,10 @@ def render_line(columns, rows, args, plt, Console):
     nodes = sorted({n for n, _ in keys})
     jid = rows[0].get("JOBID", "?")
     base = args.title or ("job %s  DCGM over time" % jid)
-    mcolor = {m: PALETTE[i % len(PALETTE)] for i, m in enumerate(metrics)}
+    colours = palette()
+    mcolor = {m: colours[i % len(colours)] for i, m in enumerate(metrics)}
     gpu_ids = sorted({g for _, g in keys}, key=lambda g: int(g) if str(g).isdigit() else g)
-    gcolor = {g: PALETTE[i % len(PALETTE)] for i, g in enumerate(gpu_ids)}
+    gcolor = {g: colours[i % len(colours)] for i, g in enumerate(gpu_ids)}
 
     def pkw(color):
         kw = {"marker": args.marker}
@@ -330,10 +341,11 @@ def render_line(columns, rows, args, plt, Console):
         return (xs, ys) if ys else (None, None)
 
     def cap(items, what):
-        if len(items) > PANEL_CAP:
+        limit = panel_cap()
+        if len(items) > limit:
             print("note: showing %d of %d %s; narrow with --metric/--node/--gpu"
-                  % (PANEL_CAP, len(items), what), file=sys.stderr)
-        return items[:PANEL_CAP]
+                  % (limit, len(items), what), file=sys.stderr)
+        return items[:limit]
 
     width = args.width or shutil.get_terminal_size((100, 30)).columns
 
@@ -504,8 +516,12 @@ def add_arguments(parser):
     parser.add_argument("--title", help="override the chart title")
     parser.add_argument("--width", type=int, help="plot width in chars (plotext charts)")
     parser.add_argument("--height", type=int, help="plot height in chars (plotext charts)")
-    parser.add_argument("--max-rows", dest="max_rows", type=int, default=HEAT_MAX_ROWS,
-                        help="heatmap row cap (default %d)" % HEAT_MAX_ROWS)
+    # No default here: it comes from [plot] max_rows, resolved in run() so the flag
+    # still wins. Baking it in at parser-construction time would freeze the built-in
+    # before any config file has been read.
+    parser.add_argument("--max-rows", dest="max_rows", type=int, default=None,
+                        help="heatmap row cap (default %d, or [plot] max_rows)"
+                             % config.DEFAULT_HEAT_MAX_ROWS)
     parser.add_argument("--no-color", action="store_true",
                         help="disable color (also respects $NO_COLOR)")
 
@@ -582,6 +598,9 @@ def run(args, fobj=None) -> None:
                 raise JobscopeError("no rows for GPU %s. Available: %s"
                                     % (", ".join(repr(g) for g in missing), ", ".join(available)))
             rows = [r for r in rows if str(r.get("GPU")) in set(wanted)]
+
+    if getattr(args, "max_rows", None) is None:
+        args.max_rows = heat_max_rows()
 
     kind = args.kind
     if kind == "auto":

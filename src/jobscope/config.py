@@ -645,6 +645,61 @@ class Defaults:
     long_running: str = DEFAULT_LONG_RUNNING
 
 
+# The summary block's sections, in the order they print by default. Each answers a
+# different question -- how was each metric used, how do they compare, and which jobs
+# are the problem -- so a site that only wants one of the three should not have to
+# scroll past the others. Keys are short names; the headings stay in report.py, since
+# a heading is wording and this is structure.
+REPORT_SECTIONS = ("metrics", "efficiency", "problems")
+
+# What a chart defaults to plotting, in the order the tables use. DUTY% is listed only
+# so a CSV written before that column was renamed to GPU% still charts; the two are the
+# same quantity and ts_defaults() shows at most one.
+#
+# GMEM% sits next to GPU% because the two are *resources* -- how full the card is and
+# how busy it is -- where OCC%/TENSOR%/DRAM% describe how the SMs were used, which only
+# means something once the GPU is known to be busy. Memory also catches a failure none
+# of them do: GPU% 96 with GMEM% 3 is under-batched, and no profiling column says so.
+# GMEM_GB stays out as the same quantity without a denominator.
+DEFAULT_PLOT_METRICS = ("GPU%", "DUTY%", "GMEM%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%")
+
+# Distinct 256-colour codes for the time-series chart, one per metric, so the plotext
+# line and the rich-tinted per-metric stats render the exact same colour. Separate from
+# [colors], which grades a *value* by its band -- these only tell series apart.
+DEFAULT_PLOT_PALETTE = (196, 46, 33, 208, 201, 51, 226, 129, 244, 39)
+
+DEFAULT_HEAT_MAX_ROWS = 40
+DEFAULT_PLOT_PANELS = 12
+
+
+@dataclass(frozen=True)
+class Report:
+    """``[report]``: which parts of the summary block print, and in what order.
+
+    Only the block below the job table. The table itself is the report, and its
+    columns are chosen by ``[metrics]`` and the view flags.
+    """
+
+    sections: Tuple[str, ...] = REPORT_SECTIONS
+
+
+@dataclass(frozen=True)
+class Plot:
+    """``[plot]``: chart defaults, for both ``jobscope plot`` and ``--plot_ts``.
+
+    Held here rather than in plot.py so a site sets them once instead of typing
+    ``--max-rows`` every run, and so ``--plot_ts`` and a piped ``jobscope plot`` cannot
+    disagree about what a chart looks like.
+    """
+
+    metrics: Tuple[str, ...] = DEFAULT_PLOT_METRICS
+    palette: Tuple[int, ...] = DEFAULT_PLOT_PALETTE
+    # Heatmap row cap. --max-rows overrides it per run.
+    max_rows: int = DEFAULT_HEAT_MAX_ROWS
+    # Side-by-side panels for --by metric --gpu a,b,c.
+    panels: int = DEFAULT_PLOT_PANELS
+
+
 @dataclass(frozen=True)
 class Metrics:
     """Which GPU/DCGM metrics each view collects and shows.
@@ -754,6 +809,8 @@ class Config:
     metrics: "Metrics" = field(default_factory=lambda: Metrics())
     palette: Palette = field(default_factory=Palette)
     site: "Site" = field(default_factory=lambda: Site())
+    report: "Report" = field(default_factory=lambda: Report())
+    plot: "Plot" = field(default_factory=lambda: Plot())
 
 
 def default_config_path(env: Optional[Mapping[str, str]] = None) -> Path:
@@ -845,6 +902,8 @@ def load_config(path: Optional[str] = None,
         metrics=_metrics(data.get("metrics") or {}),
         palette=_palette(data.get("colors") or {}),
         site=_site(data.get("site") or {}),
+        report=_report(data.get("report") or {}),
+        plot=_plot(data.get("plot") or {}),
     )
 
 
@@ -896,6 +955,82 @@ def _site(table: Mapping) -> Site:
                 raise JobscopeError("[site] %s must be a non-empty string" % name)
             values[name] = raw.strip()
     return Site(**values)
+
+
+def _report(table: Mapping) -> Report:
+    """``[report]`` -> a :class:`Report`."""
+    unknown = sorted(set(table) - {"sections"})
+    if unknown:
+        raise JobscopeError("[report] does not know %s. Valid keys: sections."
+                            % ", ".join(repr(k) for k in unknown))
+    if "sections" not in table:
+        return Report()
+    raw = table["sections"]
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise JobscopeError(
+            "[report] sections must be a list, e.g. sections = %r" % (list(REPORT_SECTIONS),))
+    chosen = [str(x).strip() for x in raw]
+    bad = [x for x in chosen if x not in REPORT_SECTIONS]
+    if bad:
+        raise JobscopeError("[report] sections has no %s; it takes %s"
+                            % (", ".join(repr(x) for x in bad), ", ".join(REPORT_SECTIONS)))
+    # A repeat would print the section twice and renumber everything after it, which
+    # reads as a rendering bug rather than as the config it is.
+    seen = [x for i, x in enumerate(chosen) if x in chosen[:i]]
+    if seen:
+        raise JobscopeError("[report] sections repeats %s" % ", ".join(sorted(set(seen))))
+    return Report(sections=tuple(chosen))
+
+
+def _plot(table: Mapping) -> Plot:
+    """``[plot]`` -> a :class:`Plot`, with each value range-checked.
+
+    The counts are checked because a zero or negative one does not fail -- it renders
+    an empty chart, which looks like "no data" and sends someone looking at the
+    cluster instead of at their config.
+    """
+    known = {f.name for f in fields(Plot)}
+    unknown = sorted(set(table) - known)
+    if unknown:
+        raise JobscopeError("[plot] does not know %s. Valid keys: %s."
+                            % (", ".join(repr(k) for k in unknown), ", ".join(sorted(known))))
+    values = {}
+    for name in ("metrics", "palette"):
+        if name not in table:
+            continue
+        raw = table[name]
+        if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+            raise JobscopeError("[plot] %s must be a list" % name)
+        if not raw:
+            raise JobscopeError("[plot] %s is empty; omit the key to keep the default"
+                                % name)
+        values[name] = tuple(raw)
+    if "metrics" in values:
+        # Resolved to column headers, because a chart reads a CSV that was already
+        # written and can only plot what its header row says. Through metric_header so
+        # the short names [metrics] and [thresholds] take work here too -- `sm_act` and
+        # `SM_ACT%` are the same request, and a site should not have to remember which
+        # spelling each section wants.
+        #
+        # Not validated against the catalog: the default list names DUTY%, which has no
+        # catalog entry and exists only so a CSV saved before the GPU% rename still
+        # charts. A name absent from a given CSV simply does not plot -- that is what
+        # makes one list serve files with different columns.
+        values["metrics"] = tuple(metric_header(str(m).strip())
+                                  for m in values["metrics"])
+    if "palette" in values:
+        for colour in values["palette"]:
+            if not isinstance(colour, int) or not 0 <= colour <= 255:
+                raise JobscopeError(
+                    "[plot] palette takes 256-colour codes (0-255), not %r" % (colour,))
+    for name in ("max_rows", "panels"):
+        if name in table:
+            raw = table[name]
+            if not isinstance(raw, int) or isinstance(raw, bool) or raw < 1:
+                raise JobscopeError("[plot] %s must be a positive integer, not %r"
+                                    % (name, raw))
+            values[name] = raw
+    return Plot(**values)
 
 
 VIEWS = ("summary", "timeseries", "extended")

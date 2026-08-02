@@ -373,3 +373,50 @@ def test_a_configured_colour_is_valid_as_a_rich_background():
     for colour in Palette().colors.values():
         assert valid_colour(colour)
     assert valid_colour("color(200)") and not valid_colour("puce")
+
+
+def test_ts_defaults_follow_the_plot_config(hermetic_config, tmp_path):
+    """[plot] metrics chooses the series; the CSV's columns still gate them."""
+    from jobscope import config as config_module
+    from jobscope.config import load_config
+
+    columns = ["JOBID", "GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
+    assert plot.ts_defaults(columns) == ["GPU%", "SM_ACT%", "TENSOR%", "DRAM%"]
+
+    path = tmp_path / "c.toml"
+    path.write_text('[plot]\nmetrics = ["sm_act", "power"]\n')
+    config_module.set_config(load_config(str(path)))
+    assert plot.ts_defaults(columns) == ["SM_ACT%", "POWER_W"]
+    # A configured metric the CSV does not carry is skipped, not charted empty.
+    assert plot.ts_defaults(["JOBID", "SM_ACT%"]) == ["SM_ACT%"]
+
+
+def test_plot_palette_and_caps_come_from_config(hermetic_config, tmp_path):
+    from jobscope import config as config_module
+    from jobscope.config import load_config
+
+    path = tmp_path / "c.toml"
+    path.write_text("[plot]\npalette = [1, 2]\nmax_rows = 7\npanels = 3\n")
+    config_module.set_config(load_config(str(path)))
+    assert plot.palette() == [1, 2]
+    assert plot.heat_max_rows() == 7
+    assert plot.panel_cap() == 3
+
+
+def test_max_rows_flag_beats_the_config(hermetic_config, tmp_path, capsys):
+    """--max-rows is per-run; [plot] max_rows is the site default it overrides."""
+    from jobscope import config as config_module
+    from jobscope.config import load_config
+
+    path = tmp_path / "c.toml"
+    path.write_text("[plot]\nmax_rows = 2\n")
+    config_module.set_config(load_config(str(path)))
+
+    csv = tmp_path / "heat.csv"
+    csv.write_text("JOBID,NODE,GPU,DUR_S,GPU%\n"
+                   + "".join("1,n%d,0,60,10\n" % i for i in range(5)))
+    plot.run(plot.default_args(file=str(csv)))
+    assert "showing 2 of 5" in capsys.readouterr().err
+
+    plot.run(plot.default_args(file=str(csv), max_rows=4))
+    assert "showing 4 of 5" in capsys.readouterr().err

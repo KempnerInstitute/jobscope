@@ -947,3 +947,64 @@ def test_mem_means_host_memory_not_gpu_memory():
 def test_an_unknown_name_still_falls_through_to_the_guess():
     """So the stray-key note still fires on a genuine typo rather than raising."""
     assert config_module.metric_header("gpuu") == "GPUU%"
+
+
+# --- [report] and [plot] -----------------------------------------------------
+
+def test_report_and_plot_default_to_the_built_ins(hermetic_config, tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text("")
+    cfg = load_config(str(path))
+    assert cfg.report.sections == config_module.REPORT_SECTIONS
+    assert cfg.plot.metrics == config_module.DEFAULT_PLOT_METRICS
+    assert cfg.plot.max_rows == config_module.DEFAULT_HEAT_MAX_ROWS
+
+
+def test_report_sections_reorder_and_drop(hermetic_config, tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text('[report]\nsections = ["problems", "metrics"]\n')
+    assert load_config(str(path)).report.sections == ("problems", "metrics")
+
+
+@pytest.mark.parametrize("body,expect", [
+    ('sections = ["nonsense"]', "has no 'nonsense'"),
+    ('sections = "metrics"', "must be a list"),
+    ('sections = ["metrics", "metrics"]', "repeats metrics"),
+    ('order = ["metrics"]', "does not know 'order'"),
+])
+def test_report_rejects_a_bad_sections_list(hermetic_config, tmp_path, body, expect):
+    """A section that silently vanished would read as a rendering bug, not a typo."""
+    path = tmp_path / "c.toml"
+    path.write_text("[report]\n%s\n" % body)
+    with pytest.raises(JobscopeError) as excinfo:
+        load_config(str(path))
+    assert expect in str(excinfo.value)
+
+
+def test_plot_metrics_take_short_names_or_headers(hermetic_config, tmp_path):
+    """The same spellings [metrics] and [thresholds] take, so one name works anywhere.
+
+    DUTY% has no catalog entry -- it is the pre-rename spelling of GPU%, kept so an
+    old CSV still charts -- so a plain header has to pass through untouched.
+    """
+    path = tmp_path / "c.toml"
+    path.write_text('[plot]\nmetrics = ["sm_act", "DUTY%", "power"]\n')
+    assert load_config(str(path)).plot.metrics == ("SM_ACT%", "DUTY%", "POWER_W")
+
+
+@pytest.mark.parametrize("body,expect", [
+    ('palette = [196, 999]', "256-colour codes"),
+    ('palette = ["red"]', "256-colour codes"),
+    ('metrics = []', "omit the key"),
+    ('metrics = "gpu"', "must be a list"),
+    ('max_rows = 0', "positive integer"),
+    ('panels = -1', "positive integer"),
+    ('colours = [1]', "does not know 'colours'"),
+])
+def test_plot_rejects_bad_values(hermetic_config, tmp_path, body, expect):
+    """A zero cap renders an empty chart, which reads as "no data" rather than a typo."""
+    path = tmp_path / "c.toml"
+    path.write_text("[plot]\n%s\n" % body)
+    with pytest.raises(JobscopeError) as excinfo:
+        load_config(str(path))
+    assert expect in str(excinfo.value)

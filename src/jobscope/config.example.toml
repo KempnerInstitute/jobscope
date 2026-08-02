@@ -315,3 +315,37 @@ worst_jobs = 3
 # A Wasteful-row entry whose job ran at least this long is highlighted (see
 # [colors] long_running): hours of idle hardware do not come back.
 long_running = "3h"
+
+[report]
+# Which sections of the block below the job table print, and in what order. The
+# table itself is always the report; these three are what follows it.
+#
+#   metrics     "Summary by metric" -- each metric pooled, with its band split
+#   efficiency  the horizontal utilization bars (--no-plot drops these anyway)
+#   problems    "Problem jobs" -- the Wasteful rows and the job counts
+#
+# Drop one by leaving it out; reorder by listing them differently. A site that
+# reads Problem jobs first can put it first rather than scrolling past the rest.
+# Sections are numbered as printed, so the numbering follows this order.
+sections = ["metrics", "efficiency", "problems"]
+
+[plot]
+# Chart defaults, for both `jobscope plot` and --plot_ts, so a chart looks the same
+# whichever way it was drawn.
+
+# Which series a time-series chart draws when --metric is not given. Takes the same
+# short names as [metrics] and [thresholds] (gpu, sm_act, dram, ...) or plain column
+# headers. A name the CSV does not carry is skipped rather than charted empty, which
+# is how one list serves files with different columns -- and why the default can list
+# DUTY%, the old spelling of GPU%, so a CSV saved before the rename still charts.
+metrics = ["gpu", "DUTY%", "gmem", "sm_act", "occ", "tensor", "dram"]
+
+# One 256-colour code per charted series, cycled if there are more series than
+# codes. Distinct from [colors], which grades a value by its band -- these only tell
+# series apart, so what matters is that neighbours differ.
+palette = [196, 46, 33, 208, 201, 51, 226, 129, 244, 39]
+
+# Heatmap row cap. --max-rows overrides it per run.
+max_rows = 40
+# How many panels --by metric may place side by side before it starts dropping them.
+panels = 12

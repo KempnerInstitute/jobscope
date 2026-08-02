@@ -199,6 +199,8 @@ to a site's conventions is a TOML edit rather than a patch:
 | `[metrics]` | which GPU/DCGM metrics each view collects and shows |
 | `[colors]` | the colour of each classified tier, in tables and in charts alike |
 | `[defaults]` | the default window and state filter, timeouts, worker counts, and the Problem-jobs row size |
+| `[report]` | which sections print below the job table, and in what order |
+| `[plot]` | chart defaults: which series, which colours, the row and panel caps |
 
 `jobscope config` prints all of it as it actually resolves; `jobscope config
 --example` is the full commented template.
@@ -768,6 +770,31 @@ The summary table's `RED`/`YELLOW`/`GREEN` columns keep those names whatever you
 set, and so do the `red=`/`yellow=`/`green=` fields of the `--csv` output: those are
 the three band *counts*, so a script reading them does not break when you recolour
 the display.
+
+`[report] sections` chooses which parts of the block below the job table print, and
+in what order — `metrics` (Summary by metric), `efficiency` (the utilization bars)
+and `problems` (the Wasteful rows). Leave one out to drop it; list them differently
+to reorder. Sections are numbered as printed, so the numbers follow your order.
+
+```toml
+[report]
+sections = ["problems", "metrics"]   # lead with the jobs, skip the bars
+```
+
+`[plot]` sets the chart defaults, shared by `jobscope plot` and `--plot_ts` so a
+chart looks the same whichever way it was drawn:
+
+```toml
+[plot]
+metrics  = ["gpu", "sm_act", "dram"]   # what a time series draws without --metric
+palette  = [196, 46, 33, 208]          # one 256-colour code per series, cycled
+max_rows = 40                          # heatmap row cap (--max-rows overrides)
+panels   = 12                          # side-by-side panels before --by drops some
+```
+
+`metrics` takes the same short names as `[metrics]` and `[thresholds]`, or plain
+column headers. A name the CSV does not carry is skipped rather than charted empty —
+which is how one list serves files with different columns.
 
 ## Utilities
 
