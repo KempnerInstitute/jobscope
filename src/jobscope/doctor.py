@@ -100,6 +100,19 @@ def family_of(raw: str) -> Optional[str]:
     return None
 
 
+def catalog_name(raw: str) -> Optional[str]:
+    """The name config accepts for a series, or None if jobscope has none.
+
+    Distinct from :func:`simple_name`, which will happily *derive* a plausible name
+    for an unknown series. That derivation is right for suggesting what to call
+    something and wrong for a listing: a derived name is indistinguishable from a
+    real one, and config would reject it as unknown. Only catalogued series have a
+    name, so only they get one here.
+    """
+    known = CATALOG.get(raw)
+    return "%s-%s" % known if known else None
+
+
 def simple_name(raw: str) -> Optional[str]:
     """The ``family-short`` name config uses for a raw Prometheus series.
 
@@ -458,22 +471,66 @@ def discover_metrics(out, client, jobid: Optional[str], timeout: Optional[float]
         print("\n%s -- %d catalogued, %d present, %d not in jobscope's catalog"
               % (family, len(known), len(known) - len(missing),
                  sum(1 for raw in found if raw not in CATALOG)), file=out)
-        rows = ([(simple_name(raw), raw, OK if raw in CATALOG else NEW)
-                 for raw in sorted(found)]
-                + [(simple_name(raw), raw, "%s (not exported here)" % ABSENT)
+        # The name column carries the name **config actually takes**, and nothing
+        # else. An uncatalogued series gets NEW rather than a mechanically derived
+        # name, because a derived name looks exactly like a real one and is not:
+        # putting it in [thresholds] today would be rejected as unknown. What it
+        # needs is a [metrics] entry, which is what the footer explains.
+        rows = ([(catalog_name(raw) or NEW, raw, "") for raw in sorted(found)]
+                + [(catalog_name(raw) or NEW, raw, "%s here" % ABSENT)
                    for raw in sorted(missing)])
-        # Widths from the content: the derived names run from `nvml-gpu` to
+        # Widths from the content: names run from `nvml-gpu` to
         # `dcgm-uncorrectable_remapped_rows`, so a fixed column either wastes half
         # the line or lets the long ones collide with the series beside them.
-        name_w = max((len(name or "-") for name, _r, _s in rows), default=1)
+        name_w = max((len(name) for name, _r, _s in rows), default=1)
         raw_w = max((len(raw) for _n, raw, _s in rows), default=1)
         for name, raw, status in rows:
-            print("  %-*s  %-*s  %s" % (name_w, name or "-", raw_w, raw, status), file=out)
+            print("  %-*s  %-*s  %s" % (name_w, name, raw_w, raw, status), file=out)
 
-    print("\n%s = in jobscope's catalog and present   %s = present, jobscope has no name "
-          "for it yet\n%s = catalogued but this server does not carry it"
-          % (OK, NEW, ABSENT), file=out)
+    _print_config_guide(out)
     return 0
+
+
+def _print_config_guide(out) -> None:
+    """How to turn the listing above into config -- the reason for printing it.
+
+    Spelled out because the mapping is not guessable: the left column is what
+    ``[metrics]``, ``[thresholds]`` and ``[classify]`` accept, and a ``new`` row
+    needs a definition before any of them will take it.
+    """
+    print("""
+Mapping this to ~/.config/jobscope/config.toml
+----------------------------------------------
+The left column is a metric's jobscope name. Config takes the part after the
+family prefix -- `dcgm-sm_act` is written `sm_act` -- because the names are
+unique across families.
+
+  [metrics]                            # which metrics each view collects/shows
+  summary    = ["gpu", "sm_act", "tensor", "power"]
+  timeseries = ["gpu", "sm_act", "power"]     # --ts / --plot_ts / --classify
+  extended   = "all"                          # --dcgm
+
+  [thresholds.summary.wasteful]        # per-metric band edges, per view
+  default = 2                          # every metric not named below
+  sm_act  = 3                          # this one alone
+  cpu     = 5
+  [thresholds.timeslice.wasteful]      # --ts's own edges; inherits nothing
+  default = 2
+
+Write `sm_act`, not `dcgm-sm_act`: the prefixed form is rejected with a note.
+Run `jobscope config` to see how every value actually resolved, which is the
+quickest way to confirm an edit landed.
+
+A row marked "%s" is a series your server exports that jobscope has no name for,
+so nothing above will accept it -- naming one needs a [metrics.<family>.<name>]
+table, which is not implemented yet. Until it is, those rows are informational:
+they say what your cluster could expose, not what you can select today. The ones
+here worth having are the ECC/row-remap counters (hardware faults) and
+cgroup_memory_fail_count (OOM pressure).
+
+A row marked "%s" is in jobscope's catalog but your server does not carry it --
+usually hardware, e.g. DFMA%% exists on H100 and not on A100. Nothing to do; the
+column stays blank.""" % (NEW, ABSENT), file=out)
 
 
 # --- entry point -----------------------------------------------------------
