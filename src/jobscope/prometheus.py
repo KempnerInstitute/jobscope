@@ -57,3 +57,24 @@ def client_from_config(cfg: Optional[config.Config] = None,
     if timeout is None:
         timeout = cfg.defaults.timeout
     return PrometheusClient(url, sampling_period, timeout)
+
+
+def query_value(client: PrometheusClient, query: str, at, timeout: Optional[float]):
+    """``[(labels, value), ...]`` for an instant query; ``[]`` on any failure.
+
+    The collectors read one figure per series and do not want the envelope. They
+    also must not abort a whole report because one job's query failed: a value the
+    server cannot answer for becomes an absent column, which the report already
+    renders as ``-`` rather than as a zero.
+    """
+    try:
+        found = client.query(query, at, timeout)
+    except Exception:
+        return []
+    out = []
+    for series in found:
+        try:
+            out.append((series["metric"], float(series["value"][1])))
+        except (KeyError, IndexError, TypeError, ValueError):
+            out.append((series.get("metric", {}), None))
+    return out

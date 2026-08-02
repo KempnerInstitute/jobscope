@@ -623,17 +623,17 @@ def test_site_overrides_reach_every_query(hermetic_config, tmp_path):
     """The point of the section: one edit, and all five query builders follow.
     Before this each had its own literal, so porting meant finding all of them --
     and missing one failed silently."""
-    from jobscope.cpu import SPEC_BY_KEY
-    from jobscope.live_blob import _gpu_query, _host_query, _host_query_many
+    from jobscope.cpu import SPEC_BY_KEY, host_query, host_query_many
+    from jobscope.nvml import window_query
     path = tmp_path / "c.toml"
     path.write_text('[site]\nhost_label = "instance"\njobid_label = "slurm_job"\n'
                     'gpu_job_join = "gpu_job"\ncgroup_selector = "container=\'\'"\n')
     config_module.set_config(load_config(str(path)))
     assert "slurm_job='7'" in SPEC_BY_KEY["cpu"].query("7", 300, 60)
     assert "container=''" in SPEC_BY_KEY["cpu"].query("7", 300, 60)
-    assert "slurm_job='7'" in _host_query("cgroup_cpus", "max", "7", 60)
-    assert 'slurm_job=~"^(7)$"' in _host_query_many("cgroup_cpus", "max", [7], 60)
-    assert "gpu_job == 7" in _gpu_query("nvidia_gpu_duty_cycle", "avg", "7", 60)
+    assert "slurm_job='7'" in host_query("cgroup_cpus", "max", "7", 60)
+    assert 'slurm_job=~"^(7)$"' in host_query_many("cgroup_cpus", "max", [7], 60)
+    assert "gpu_job == 7" in window_query("nvidia_gpu_duty_cycle", "avg", "7", 60)
 
 
 def test_host_of_reads_the_configured_label_and_strips_the_port(hermetic_config, tmp_path):

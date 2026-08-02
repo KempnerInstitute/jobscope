@@ -27,7 +27,8 @@ from jobscope.live import (
     specs_for,
     timeseries_step,
 )
-from jobscope.live_blob import host_stats_many, synthesize_stats
+from jobscope.cpu import host_stats_many
+from jobscope.job_ave_stats import synthesize_stats
 from jobscope.report import (
     RenderOptions,
     live_combined_timeseries,
@@ -421,7 +422,7 @@ def test_synthesize_stats_degrades_instead_of_raising():
 
 
 def test_fill_running_leaves_a_finished_job_alone():
-    from jobscope.live_blob import fill_running
+    from jobscope.job_ave_stats import fill_running
     stored = {"total_time": 1, "nodes": {}}
     records = {"1": _running(state="COMPLETED", stats=stored)}
     assert fill_running(records, ["1"], BlobClient()) == 0
@@ -429,7 +430,7 @@ def test_fill_running_leaves_a_finished_job_alone():
 
 
 def test_fill_running_fills_only_unblobbed_running_jobs():
-    from jobscope.live_blob import fill_running
+    from jobscope.job_ave_stats import fill_running
     records = {"1": _running(), "2": _running(state="COMPLETED")}
     assert fill_running(records, ["1", "2"], BlobClient()) == 1
     assert records["1"].stats and not records["2"].stats

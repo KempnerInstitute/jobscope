@@ -33,7 +33,7 @@ from .live import (
     live_records,
     per_gpu_by_node_minor,
 )
-from .live_blob import fill_running, needs_fill, note_offline_gap
+from .job_ave_stats import fill_running, needs_fill, note_offline_gap
 from .prometheus import PrometheusClient, client_from_config
 from .report import (
     RenderOptions,

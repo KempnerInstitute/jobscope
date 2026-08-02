@@ -305,7 +305,7 @@ def validate(out, jobid: str, client, timeout: Optional[float]) -> int:
     than a bug to be averaged away.
     """
     from .blob import blob_metrics
-    from .live_blob import synthesize_stats
+    from .job_ave_stats import synthesize_stats
     from .sacct import fetch
 
     records = fetch([jobid], timeout)

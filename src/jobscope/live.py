@@ -41,7 +41,8 @@ from .dcgm import (
 )
 from . import config
 from .errors import JobscopeError
-from .live_blob import host_stats_many, stats_dict
+from .cpu import host_stats_many
+from .job_ave_stats import stats_dict
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, run_capture
 

@@ -52,7 +52,7 @@ from .dcgm import (
 )
 from .errors import JobscopeError
 from .live import Gpu, LiveJob, build_columns, job_sort_key, range_window
-from .live_blob import host_stats, host_stats_many
+from .cpu import host_stats, host_stats_many
 from .prometheus import PrometheusClient
 from .sacct import JobRecord, Selection, format_window
 
@@ -1818,7 +1818,7 @@ def cpu_timeseries(jobids: List[str], records: Dict[str, JobRecord],
             # A record here is usually a finished job with its blob already decoded,
             # but an explicit -j ID can also return a job that is still RUNNING (no
             # blob yet) -- rebuild just the two divisors from Prometheus, the same
-            # way live_blob.synthesize_stats() rebuilds the whole blob for the live
+            # way job_ave_stats.synthesize_stats() rebuilds the whole blob for the live
             # view (CPU-seconds/RSS themselves still come from our own range query
             # below, since they need per-timestamp granularity this does not give).
             nodes = host_stats(record.jobid_raw, record.duration, record.end, client, timeout)
@@ -2526,7 +2526,7 @@ def live_cpu_timeseries(jobs: Dict[int, LiveJob], client: PrometheusClient,
 
     Mirrors :func:`cpu_timeseries`, but for jobs with no stored blob yet: the
     per-host cpus/total_memory divisors come from one batched
-    :func:`jobscope.live_blob.host_stats_many` call across the whole selection --
+    :func:`jobscope.cpu.host_stats_many` call across the whole selection --
     the same one the summary/detail views use to reconstruct CPU%/MEM% -- and the
     per-job range queries run concurrently, the same as
     :func:`jobscope.live.collect_timeseries` does for the GPU/DCGM case.
@@ -2613,7 +2613,7 @@ def live_combined_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[i
     The GPU side is exactly ``live_timeseries()``'s pre-fetched ``samples``/``gpus``
     (any ``--nodename`` filtering already happened before this is called, on
     ``gpus``); the CPU side resolves divisors via one batched
-    ``live_blob.host_stats_many()`` call and thread-pools a ``cpu.host_series()``
+    ``cpu.host_stats_many()`` call and thread-pools a ``cpu.host_series()``
     call per job, the same as :func:`live_cpu_timeseries`.
     """
     out = out or sys.stdout

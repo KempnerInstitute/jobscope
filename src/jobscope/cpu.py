@@ -2,9 +2,10 @@
 
 jobstats' own Prometheus exporter scrapes per-job ``cgroup_*`` series labeled
 directly by ``jobid`` -- no GPU-UUID-style join needed, unlike DCGM/nvidia-exporter
-metrics. :mod:`jobscope.live_blob` only ever reduces four of them to one aggregate
-figure per job (client-side, via an instant query); this module range-queries the
-ones that vary over a job's run, to build genuine per-sample series.
+metrics. The aggregate figures at the bottom of this module reduce four of them to
+one number per job (client-side, via an instant query); the catalog above them
+range-queries the ones that vary over a job's run, to build genuine per-sample
+series.
 
 There is a catalog here, but a separate one from :class:`jobscope.dcgm.MetricSpec`
 rather than a reuse of it, because these metrics are shaped differently in two ways
@@ -16,7 +17,7 @@ two differences.
 
 The denominators are resolved by the caller rather than here: a finished job already
 has them in its stored blob, a running job gets them from one batched
-``live_blob.host_stats_many`` call, and neither varies enough within a job's
+:func:`host_stats_many` call, and neither varies enough within a job's
 lifetime to be worth re-querying per sample. They arrive as the per-node blob dict
 itself, so ``denom`` names a blob field.
 """
@@ -25,7 +26,8 @@ from dataclasses import dataclass, replace
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from . import config
-from .prometheus import PrometheusClient
+from .blob import store_as
+from .prometheus import PrometheusClient, query_value
 
 # rate()/increase() need several raw samples to be reliable: a range vector sized to
 # exactly the display step can span 0-1 scrapes depending on alignment and silently
@@ -226,3 +228,90 @@ def host_series(raw_jobid: str, divisors: Dict[str, Dict[str, float]],
                 series.setdefault(host, {}).setdefault(
                     int(float(stamp)), {})[spec.header] = pct
     return series
+
+
+# --- the aggregate figures, as distinct from the series -----------------------
+#
+# The catalog above range-queries the metrics that vary over a run, to build genuine
+# per-sample series. These four are read once per job instead: they are the figures a
+# summary row needs, and two of them (`cpus`, `total_memory`) are the *denominators*
+# the percentages above are divided by, so they are not metrics in the catalog sense
+# at all. jobstats reads them with these same reducers.
+HOST_FIELDS: Tuple[Tuple[str, str, str], ...] = (
+    ("cpus", "cgroup_cpus", "max"),
+    ("total_time", "cgroup_cpu_total_seconds", "max"),
+    ("used_memory", "cgroup_memory_rss_bytes", "max"),
+    ("total_memory", "cgroup_memory_total_bytes", "max"),
+)
+
+
+def _selector(raw_jobid: str) -> str:
+    site = config.get_config().site
+    return "{%s='%s',%s}" % (site.jobid_label, raw_jobid, site.cgroup_selector)
+
+
+def host_query(metric: str, reducer: str, raw_jobid: str, duration: int) -> str:
+    """One host field reduced over a job's window."""
+    return "%s_over_time(%s%s[%ds])" % (reducer, metric, _selector(raw_jobid), duration)
+
+
+def host_query_many(metric: str, reducer: str, raw_jobids, duration: int) -> str:
+    """One query covering many jobs, for the partition-wide case.
+
+    Per-job queries cost four round trips each, which is minutes once a selection
+    reaches a few hundred running jobs. Batching is safe *here specifically* because
+    ``cgroup_*`` series are per-job: they do not exist outside their job's lifetime,
+    so sharing one window (the longest job's) cannot pull another job's samples into
+    the result. The GPU series are continuous -- the next job inherits the card -- so
+    they have no equivalent, which is why :mod:`jobscope.nvml` queries per job.
+    """
+    site = config.get_config().site
+    return "%s_over_time(%s{%s=~\"^(%s)$\",%s}[%ds])" % (
+        reducer, metric, site.jobid_label, "|".join(str(j) for j in raw_jobids),
+        site.cgroup_selector, duration)
+
+
+def host_stats(raw_jobid: str, duration: int, at, client: PrometheusClient,
+               timeout: Optional[float] = None) -> Dict[str, dict]:
+    """Per-node CPU and host-memory fields, keyed by node name.
+
+    Split from the GPU side because the running view needs exactly this: its GPU
+    numbers come from its own collectors (which honour the instant-vs-``--avg``
+    choice), but CPU% and MEM% are cumulative either way -- CPU-seconds over
+    elapsed x cores, and peak RSS -- so there is nothing to vary.
+    """
+    nodes: Dict[str, dict] = {}
+    for field, metric, reducer in HOST_FIELDS:
+        for labels, value in query_value(
+                client, host_query(metric, reducer, raw_jobid, duration), at, timeout):
+            if value is not None:
+                nodes.setdefault(config.host_of(labels), {})[field] = store_as(field, value)
+    return nodes
+
+
+def host_stats_many(jobs: Dict[int, int], at, client: PrometheusClient,
+                    timeout: Optional[float] = None) -> Dict[int, Dict[str, dict]]:
+    """Per-node host fields for many jobs at once, ``{raw_jobid: {node: ...}}``.
+
+    ``jobs`` maps raw job ID to elapsed seconds. Four queries in total rather than
+    four per job -- see :func:`host_query_many` for why one shared window is safe.
+    """
+    if not jobs:
+        return {}
+    window = max(jobs.values())
+    label = config.jobid_label()
+    out: Dict[int, Dict[str, dict]] = {}
+    for field, metric, reducer in HOST_FIELDS:
+        for labels, value in query_value(
+                client, host_query_many(metric, reducer, jobs, window), at, timeout):
+            if value is None:
+                continue
+            try:
+                raw_jobid = int(labels.get(label))
+            except (TypeError, ValueError):
+                continue
+            if raw_jobid not in jobs:
+                continue
+            out.setdefault(raw_jobid, {}).setdefault(
+                config.host_of(labels), {})[field] = store_as(field, value)
+    return out

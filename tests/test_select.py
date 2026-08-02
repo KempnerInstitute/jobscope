@@ -8,7 +8,7 @@ import pytest
 from jobscope import select as select_mod
 from jobscope.dcgm import DEFAULT_SPECS
 from jobscope.errors import JobscopeError
-from jobscope.live_blob import needs_fill
+from jobscope.job_ave_stats import needs_fill
 from jobscope.report import RenderOptions
 from jobscope.sacct import TIMESTAMP_FORMAT, JobRecord
 from jobscope.select import (

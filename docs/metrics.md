@@ -76,7 +76,7 @@ which it got. Two details let the squeue side pass for the sacct side:
 
 - `live.live_records` synthesizes the blob Slurm has not written yet (§5), so a
   running job looks like a record with stored stats.
-- `live_blob.host_stats_many` batches the `cgroup_*` queries across every selected
+- `cpu.host_stats_many` batches the `cgroup_*` queries across every selected
   job -- four queries in total rather than four per job. Those series are per-job
   and do not exist outside their job's lifetime, so one shared window (the longest
   job's) cannot pull another job's samples in. Per-job round trips made a
@@ -570,7 +570,7 @@ jobstats. `running --avg` applies the reductions above and does match.
 ## 5. Reconstructing the blob for a running job
 
 Slurm writes the blob at job end, so a running job has none and its utilization
-columns would be empty. `jobscope/live_blob.py` rebuilds one from Prometheus, in
+columns would be empty. `jobscope/job_ave_stats.py` rebuilds one from Prometheus, in
 the blob's own shape, so `blob_metrics` / `blob_detail` and therefore the summary
 and detail views, `--csv` and `plot` all work unchanged.
 

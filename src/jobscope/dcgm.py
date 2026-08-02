@@ -697,7 +697,7 @@ def _prefer_stored(record: JobRecord, specs: List[MetricSpec],
     Rather than tune the window to imitate an instant we cannot recover, defer to
     the stored value: a finished job then reports exactly what Slurm recorded, in
     every view. Running jobs have no blob, so they keep the Prometheus value --
-    reconstructed by :mod:`jobscope.live_blob` for the blob columns, so those agree
+    reconstructed by :mod:`jobscope.job_ave_stats` for the blob columns, so those agree
     with each other by construction.
     """
     by_key = {spec.key: spec for spec in specs}

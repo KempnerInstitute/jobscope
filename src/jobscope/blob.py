@@ -24,6 +24,21 @@ SOURCE = "blob"
 
 DetailRow = Tuple[str, str, str, str, str, str, str]
 
+# The precision each field is stored at. jobstats writes byte counts as integers and
+# utilization to one decimal, and :func:`blob_detail` renders utilization with %g on
+# that assumption -- so a figure reconstructed from Prometheus is rounded here to the
+# same precision, or a synthesized row prints "93.1386%" beside stored rows printing
+# "93.1". Reconstruction lives in :mod:`jobscope.job_ave_stats`; the precision lives
+# here, with the shape that defines it.
+_ROUNDING = {"cpus": 0, "total_time": 1, "used_memory": 0, "total_memory": 0,
+             "gpu_utilization": 1, "gpu_used_memory": 0, "gpu_total_memory": 0}
+
+
+def store_as(field: str, value: float):
+    """Round ``value`` to the precision the stored blob uses for ``field``."""
+    decimals = _ROUNDING.get(field, 1)
+    return int(round(value)) if decimals == 0 else round(value, decimals)
+
 
 def decode_admin_comment(admin_comment) -> dict:
     """Return the decoded jobstats JSON, or {} when the blob is absent/short/bad."""
