@@ -264,6 +264,9 @@ def build_parser():
     p_doctor.add_argument("--metrics", nargs="?", const="", metavar="JOBID",
                           help="also list the metrics the server carries for a job "
                                "(a recent GPU job if none is named)")
+    p_doctor.add_argument("--toml", nargs="?", const="", metavar="JOBID",
+                          help="print the discovered metrics as an editable [metrics] "
+                               "block, to append to a config file")
     p_doctor.add_argument("--validate", nargs="?", const="", metavar="JOBID",
                           help="compare one job's utilization across Prometheus, the "
                                "jobstats blob and Slurm's own accounting")
@@ -786,7 +789,8 @@ def handle_doctor(args) -> None:
     status = doctor.run(sys.stdout, cfg, args.config_path, cfg.defaults.timeout,
                         metrics=args.metrics is not None,
                         validate=args.validate is not None,
-                        jobid=args.metrics or args.validate or None)
+                        toml=args.toml is not None,
+                        jobid=args.metrics or args.validate or args.toml or None)
     if status:
         raise SystemExit(status)
 

@@ -202,3 +202,137 @@ def test_check_blob_distinguishes_sacct_failing_from_a_quiet_cluster():
     doctor.check_blob(quiet, [])
     assert "could not query sacct" in unavailable.getvalue()
     assert "no finished jobs" in quiet.getvalue()
+
+
+# --- doctor --toml: the editable name table ---------------------------------
+
+class TomlClient:
+    """Serves a fixed set of series names per family selector."""
+
+    url = "http://prom"
+    sampling_period = 60
+
+    def __init__(self, by_family):
+        self.by_family = by_family      # {"cgroup"|"nvml"|"dcgm": [series, ...]}
+
+    def query(self, query, at, timeout=None):
+        if "jobId" in query:            # GPU discovery
+            return [{"metric": {"uuid": "GPU-1", "host": "n1:9400",
+                                "minor_number": "0", "name": "NVIDIA A100"}}]
+        for family, key in (("cgroup", "jobid="), ("nvml", "uuid=~"), ("dcgm", "UUID=~")):
+            if key in query:
+                return [{"metric": {"__name__": s}, "value": [at, "1"]}
+                        for s in self.by_family.get(family, ())]
+        return []
+
+
+def _emit(by_family, record):
+    out = io.StringIO()
+    doctor.emit_toml(out, TomlClient(by_family), record.jobid, None,
+                     [(record.jobid, "gres/gpu=1", "JS1:x")])
+    return out.getvalue()
+
+
+def test_a_builtin_is_emitted_commented_so_its_name_is_visible(gpu_record, monkeypatch):
+    """It already works; it is here so the name can be seen and renamed."""
+    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    text = _emit({"dcgm": ["DCGM_FI_PROF_SM_ACTIVE"]}, gpu_record)
+    assert "# [metrics.dcgm.sm_act]" in text and "# built-in" in text
+    assert "\n[metrics.dcgm.sm_act]" not in text     # never live
+
+
+def test_an_uncatalogued_series_is_emitted_live(gpu_record, monkeypatch):
+    """So a redirect into a config file is the only step -- no uncommenting."""
+    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    text = _emit({"dcgm": ["DCGM_FI_DEV_GPU_UTIL"]}, gpu_record)
+    assert "\n[metrics.dcgm.gpu_util]        # new here" in text
+    assert 'query  = "DCGM_FI_DEV_GPU_UTIL"' in text
+
+
+def test_the_table_key_is_the_short_name_without_the_family(gpu_record, monkeypatch):
+    """The family is already in the table path; repeating it would make the config
+    name `dcgm-gpu_util` inside `[metrics.dcgm]`."""
+    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    text = _emit({"dcgm": ["DCGM_FI_DEV_GPU_UTIL"]}, gpu_record)
+    assert "[metrics.dcgm.gpu_util]" in text and "[metrics.dcgm.dcgm-gpu_util]" not in text
+
+
+def test_a_cgroup_count_is_not_given_an_invented_denominator(gpu_record, monkeypatch):
+    """Every cgroup metric is divided by an allocation, and an OOM-kill count has
+    none. A percentage of total bytes would be a number with no meaning."""
+    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    text = _emit({"cgroup": ["cgroup_memory_fail_count"]}, gpu_record)
+    assert "not expressible here" in text
+    assert "[metrics.cgroup.memory_fail_count]" not in text.replace("# ", "")
+    assert "MEMORY_FAIL_COUNT%" not in text
+
+
+@pytest.mark.parametrize("raw,kind,denom", [
+    ("cgroup_cpu_user_seconds", "rate", "cpus"),
+    ("cgroup_memsw_used_bytes", "gauge", "total_memory"),
+])
+def test_a_cgroup_shape_is_inferred_from_the_suffix(raw, kind, denom):
+    assert doctor._cgroup_fields(raw) == (kind, denom)
+
+
+def test_a_cgroup_count_has_no_shape():
+    assert doctor._cgroup_fields("cgroup_memory_fail_count") is None
+
+
+@pytest.mark.parametrize("raw,scale", [
+    ("DCGM_FI_PROF_SM_ACTIVE", 100),        # a 0-1 fraction
+    ("DCGM_FI_DEV_GPU_UTIL", 1),            # already a percentage
+])
+def test_a_gpu_scale_is_inferred_where_it_is_reliable(raw, scale):
+    assert doctor._gpu_scale(raw)[0] == scale
+
+
+def test_an_unfamiliar_gpu_metric_says_to_check_its_units():
+    """A wrong scale reads as a plausible number, so it is flagged rather than
+    guessed."""
+    _scale, note = doctor._gpu_scale("DCGM_FI_DEV_ROW_REMAP_FAILURE")
+    assert "CHECK" in note
+
+
+def test_structural_series_are_listed_but_not_offered_as_metrics(gpu_record, monkeypatch):
+    """cgroup_cpus is the denominator every CPU percentage divides by, not a metric.
+    Listed rather than dropped, so a reader looking for it finds out where it went."""
+    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    text = _emit({"cgroup": ["cgroup_cpus", "cgroup_memory_rss_bytes"]}, gpu_record)
+    assert "cgroup_cpus" in text and "denominator" in text
+    assert "[metrics.cgroup.cpus]" not in text.replace("# ", "")
+
+
+def test_the_other_sources_are_reference_only(gpu_record, monkeypatch):
+    """slurm-* comes from sacct fields, so a query = "..." table cannot define one --
+    printing syntax that fails would be worse than printing nothing."""
+    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    text = _emit({"cgroup": ["cgroup_memory_rss_bytes"]}, gpu_record)
+    assert "slurm-cpu" in text and "slurm-gpuutil" in text
+    assert "[metrics.slurm" not in text.replace("# ", "")
+
+
+def test_the_output_is_a_loadable_config(gpu_record, monkeypatch, tmp_path,
+                                        hermetic_config):
+    """The whole point: `doctor --toml >> config.toml` has to produce a config file,
+    and the live blocks have to take effect."""
+    from jobscope import config as config_module
+    from jobscope import dcgm
+    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    text = _emit({"cgroup": ["cgroup_memory_rss_bytes", "cgroup_memsw_used_bytes"],
+                  "dcgm": ["DCGM_FI_PROF_SM_ACTIVE", "DCGM_FI_DEV_GPU_UTIL"]},
+                 gpu_record)
+    path = tmp_path / "generated.toml"
+    path.write_text(text)
+    config_module.set_config(config_module.load_config(str(path)))
+    assert dcgm.spec_named("gpu_util").metric == "DCGM_FI_DEV_GPU_UTIL"
+    from jobscope import cpu
+    assert cpu.spec_named("memsw_used_bytes").denom == "total_memory"
+    # And the commented built-in stayed a built-in, not a duplicate.
+    assert len([s for s in dcgm.METRICS if s.key == "smact"]) == 1
+
+
+def test_no_job_to_probe_yields_a_comment_not_a_crash(gpu_record):
+    out = io.StringIO()
+    assert doctor.emit_toml(out, TomlClient({}), None, None, []) == 1
+    assert out.getvalue().lstrip().startswith("#")

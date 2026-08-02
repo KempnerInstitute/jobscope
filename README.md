@@ -120,8 +120,29 @@ A metric jobscope names but your cluster lacks would otherwise just render blank
 forever.
 
 ```bash
+jobscope doctor --toml               # the same, as an editable [metrics] block
 jobscope doctor --validate           # do the exporters agree with the scheduler?
 ```
+
+`--toml` turns that listing into config. It prints one
+`[metrics.<family>.<name>]` table per series -- built-ins commented out so their
+names are visible and renameable, and anything jobscope has no name for **live**, so
+a redirect is the only step:
+
+```bash
+jobscope doctor --toml >> ~/.config/jobscope/config.toml
+```
+
+The table key *is* the config name, so renaming a metric is editing that key. Stdout
+is only ever TOML; the diagnosis goes to stderr, which is what makes the redirect
+safe. It writes nothing itself -- appending to a file you have hand-edited is your
+call, not the tool's.
+
+Two things it declines to guess rather than getting wrong. A cgroup *count* -- an
+OOM-kill tally, say -- is commented out with the reason: every cgroup metric is
+divided by an allocation, and a count has none, so a percentage of total bytes would
+be a number with no meaning. And an unfamiliar GPU metric gets `scale = 1` with a
+`# CHECK` note, because a wrong scale reads as a plausible value.
 
 `jobscope --no-blob` is the other half of that: it reads CPU%/MEM%/GPU%/GMEM% from
 Prometheus even for finished jobs, instead of the blob Slurm stored. Slower -- the

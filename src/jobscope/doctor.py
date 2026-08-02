@@ -25,6 +25,7 @@ configuration.
 """
 
 import os
+import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -122,6 +123,26 @@ def catalog_name(raw: str) -> Optional[str]:
     return "%s-%s" % known if known else None
 
 
+def name_parts(raw: str) -> Optional[Tuple[str, str]]:
+    """``(family, short name)`` for a series, or None if jobscope cannot place it.
+
+    Split out because the two halves are wanted separately: the listing joins them
+    with a hyphen, while a ``[metrics.<family>.<name>]`` table already carries the
+    family in its path and needs only the short half as its key.
+    """
+    known = catalog().get(raw)
+    if known:
+        return known
+    family = family_of(raw)
+    if family is None:
+        return None
+    for _f, prefixes in FAMILY_PREFIXES:
+        for prefix in prefixes:
+            if raw.startswith(prefix):
+                return family, raw[len(prefix):].lower()
+    return None
+
+
 def simple_name(raw: str) -> Optional[str]:
     """The ``family-short`` name config uses for a raw Prometheus series.
 
@@ -134,17 +155,8 @@ def simple_name(raw: str) -> Optional[str]:
     None for a series in no known family: naming it would imply jobscope knows how
     to join it to a job, and it does not.
     """
-    known = catalog().get(raw)
-    if known:
-        return "%s-%s" % known
-    family = family_of(raw)
-    if family is None:
-        return None
-    for _f, prefixes in FAMILY_PREFIXES:
-        for prefix in prefixes:
-            if raw.startswith(prefix):
-                return "%s-%s" % (family, raw[len(prefix):].lower())
-    return None
+    parts = name_parts(raw)
+    return "%s-%s" % parts if parts else None
 
 
 # --- rendering -------------------------------------------------------------
@@ -429,6 +441,44 @@ def _names_for(client, selector: str, at, timeout) -> Dict[str, int]:
     return {s["metric"].get("__name__", "?"): int(float(s["value"][1])) for s in found}
 
 
+def probe_series(client, jobid: Optional[str], timeout: Optional[float],
+                 sample=None):
+    """``(record, [(family, {series: count})])`` for one job, or None.
+
+    Shared by the listing and the TOML emitter so both describe the same server.
+    Keyed on a real job rather than on the whole server because presence in isolation
+    is not the question: a metric that exists cluster-wide but carries nothing for a
+    GPU job is no use, and one absent on this hardware (DFMA% on an A100, exported on
+    H100) should say so rather than look healthy and then render blank forever.
+    """
+    from .dcgm import discover_gpus
+    from .sacct import fetch
+
+    jobid = jobid or _recent_gpu_job(sample)
+    if not jobid:
+        return None
+    records = fetch([jobid], timeout)
+    record = records.get(jobid) or next(iter(records.values()), None)
+    if record is None:
+        raise JobscopeError("no such job: %s" % jobid)
+
+    site = config.get_config().site
+    selectors = [("cgroup", "{%s=\"%s\"}" % (site.jobid_label, record.jobid_raw))]
+    gpus = discover_gpus(record, client, timeout)
+    if gpus:
+        uuids = "|".join(g["uuid"] for g in gpus)
+        selectors.append(("nvml", '{uuid=~"%s"}' % uuids))
+        selectors.append(("dcgm", '{UUID=~"%s"}' % uuids))
+
+    families = []
+    for family, selector in selectors:
+        try:
+            families.append((family, _names_for(client, selector, record.end, timeout)))
+        except Exception:
+            families.append((family, {}))
+    return record, families
+
+
 def discover_metrics(out, client, jobid: Optional[str], timeout: Optional[float],
                      sample: Optional[List[Tuple[str, str, str]]] = None) -> int:
     """Print every series this server carries for one job, by family, with config names.
@@ -439,42 +489,25 @@ def discover_metrics(out, client, jobid: Optional[str], timeout: Optional[float]
     A100, exported on H100) should say ``absent`` rather than appear healthy and
     then render blank forever.
     """
-    from .dcgm import discover_gpus
-    from .sacct import fetch
-
-    jobid = jobid or _recent_gpu_job(sample)
-    if not jobid:
+    probed = probe_series(client, jobid, timeout, sample)
+    if probed is None:
         print("\nno recently finished GPU job to probe with; name one:"
               "\n  jobscope doctor --metrics JOBID", file=out)
         return 1
-    records = fetch([jobid], timeout)
-    record = records.get(jobid) or next(iter(records.values()), None)
-    if record is None:
-        raise JobscopeError("no such job: %s" % jobid)
+    record, families = probed
 
     print(file=out)
     print("metrics carried for job %s (%s, %d GPU(s), ran %s)"
           % (record.jobid, record.state, record.gpus, record.runtime), file=out)
-
-    groups = [("cgroup", '{jobid="%s"}' % record.jobid_raw)]
-    gpus = discover_gpus(record, client, timeout)
-    if gpus:
-        uuids = "|".join(g["uuid"] for g in gpus)
-        groups.append(("nvml", '{uuid=~"%s"}' % uuids))
-        groups.append(("dcgm", '{UUID=~"%s"}' % uuids))
-    else:
-        print("  (no GPUs discovered -- CPU-only job, or no samples in its window)", file=out)
+    if record.gpus and len(families) == 1:
+        print("  (no GPUs discovered -- CPU-only job, or no samples in its window)",
+              file=out)
 
     catalogued_by_family: Dict[str, List[str]] = {}
     for raw, (family, _short) in catalog().items():
         catalogued_by_family.setdefault(family, []).append(raw)
 
-    for family, selector in groups:
-        try:
-            found = _names_for(client, selector, record.end, timeout)
-        except Exception as exc:
-            print("\n%s -- query failed: %s" % (family, str(exc)[:70]), file=out)
-            continue
+    for family, found in families:
         known = catalogued_by_family.get(family, [])
         missing = [raw for raw in known if raw not in found]
         print("\n%s -- %d catalogued, %d present, %d not in jobscope's catalog"
@@ -575,19 +608,26 @@ column stays blank.""" % (NEW, ABSENT), file=out)
 # --- entry point -----------------------------------------------------------
 
 def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
-        metrics: bool = False, validate: bool = False,
+        metrics: bool = False, validate: bool = False, toml: bool = False,
         jobid: Optional[str] = None) -> int:
     """Print the report. Returns a process exit status."""
-    check_slurm(out, timeout)
+    # With --toml, stdout has to be a config file and nothing else: the documented
+    # move is `jobscope doctor --toml >> config.toml`, and a diagnosis section
+    # appended ahead of it is prose where TOML belongs. The checks still run, and
+    # still print -- to stderr, where a redirect leaves them visible.
+    notes = sys.stderr if toml else out
+    check_slurm(notes, timeout)
     sample = sample_jobs(timeout)
-    check_blob(out, sample)
-    check_config(out, config_path)
-    client = check_prometheus(out, cfg, timeout)
+    check_blob(notes, sample)
+    check_config(notes, config_path)
+    client = check_prometheus(notes, cfg, timeout)
     if client is None:
         print("\nThe Slurm sections above are unaffected; only the metric views need "
-              "an endpoint.", file=out)
+              "an endpoint.", file=notes)
         return 1
-    check_labels(out, client, timeout)
+    check_labels(notes, client, timeout)
+    if toml:
+        return emit_toml(out, client, jobid, timeout, sample)
     if validate:
         target = jobid or _recent_gpu_job(sample)
         if not target:
@@ -597,7 +637,194 @@ def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
         return extra_metric.validate(out, target, client, timeout)
     if metrics:
         return discover_metrics(out, client, jobid, timeout, sample)
-    print("\nRun 'jobscope doctor --metrics' to list the metrics this server carries "
-          "for a real job,\nand 'jobscope doctor --validate' to compare Prometheus "
-          "against Slurm's own accounting.", file=out)
+    print("\nNext:\n"
+          "  jobscope doctor --metrics    what this server carries, and its config names\n"
+          "  jobscope doctor --toml       the same as an editable [metrics] block\n"
+          "  jobscope doctor --validate   compare Prometheus against Slurm's accounting",
+          file=out)
     return 0
+
+
+# --- the editable name table ------------------------------------------------
+
+# Series jobscope reads for something other than a measurement, so a metric table
+# for them would be noise: the job-to-GPU join, the two cgroup denominators every
+# percentage is divided by, and the identity labels. Listed rather than filtered out
+# silently -- a reader looking for `cgroup_cpus` should find out where it went.
+_STRUCTURAL = {
+    "cgroup_cpus": "denominator for the CPU percentages",
+    "cgroup_memory_total_bytes": "denominator for the memory percentages",
+    "cgroup_uid": "identity, not a measurement",
+    "nvidia_gpu_jobId": "the job-to-GPU join; see [site] gpu_job_join",
+    "nvidia_gpu_jobUid": "identity, not a measurement",
+}
+
+
+def _cgroup_fields(raw: str) -> Optional[Tuple[str, str]]:
+    """``(kind, denom)`` for a cgroup series, or None if jobscope cannot model it.
+
+    Inferred from the suffix, which is reliable for the two shapes that fit: a
+    ``_seconds`` counter is a rate over allocated cores, a ``_bytes`` gauge is a level
+    over allocated memory.
+
+    None for anything else, and that matters more than a guess would. A cgroup metric
+    is *divided* by an allocation field, so there is no such thing as leaving the
+    denominator out -- and there is no allocation to divide an OOM-kill count by.
+    ``cgroup_memory_fail_count`` as a percentage of total bytes is a number with no
+    meaning, and emitting one would be worse than emitting nothing.
+    """
+    if raw.endswith("_seconds"):
+        return "rate", "cpus"
+    if raw.endswith("_bytes"):
+        return "gauge", "total_memory"
+    return None
+
+
+def _gpu_scale(raw: str) -> Tuple[float, str]:
+    """``(scale, note)`` guessed from a GPU series' name.
+
+    DCGM's PROF metrics are 0-1 fractions and want 100; its DEV utilisations are
+    already percentages. Anything else gets 1 and a note, because a wrong scale is
+    the kind of error that reads as a plausible number.
+    """
+    if "_PROF_" in raw and raw.endswith(("_ACTIVE", "_OCCUPANCY")):
+        return 100, ""
+    if raw.endswith("_UTIL"):
+        return 1, ""
+    return 1, "  # CHECK: raw units -- set scale if this is a fraction or bytes"
+
+
+def emit_toml(out, client, jobid: Optional[str], timeout: Optional[float],
+              sample=None) -> int:
+    """Print the discovered metrics as an editable ``[metrics]`` block.
+
+    Two states per series, and the difference is the point:
+
+    * **Catalogued** -- emitted commented out. It already works; it is here so the
+      name is *visible*, and so renaming it is an edit rather than a guess.
+    * **Uncatalogued** -- emitted live. Uncommenting is not required; the block is
+      already active, so redirecting this into a config file adds every metric the
+      server has.
+
+    Renaming is editing the table key. That is not a special feature -- the key *is*
+    the config name, which is what [metrics.<family>.<name>] made true.
+
+    Prints to stdout and writes nothing. Appending to a file someone has hand-edited
+    is not a thing to do without their eyes on it, and a redirect is one character.
+    """
+    probed = probe_series(client, jobid, timeout, sample)
+    if probed is None:
+        print("# no recently finished GPU job to probe with; name one:\n"
+              "#   jobscope doctor --toml JOBID", file=out)
+        return 1
+    record, families = probed
+
+    print("# jobscope metric definitions, generated by 'jobscope doctor --toml'.\n"
+          "#\n"
+          "# Probed against job %s (%s, %d GPU(s)) on this cluster's Prometheus.\n"
+          "# Left column of each table path is the family, which fixes how the series\n"
+          "# joins to a job. The table KEY is the name config uses -- rename it freely.\n"
+          "#\n"
+          "# Blocks that are commented out are jobscope built-ins: they already work,\n"
+          "# and are shown so their names are visible and editable. Blocks that are\n"
+          "# live are series this server has that jobscope does not name yet -- append\n"
+          "# this file to your config and they take effect.\n"
+          "#\n"
+          "#   jobscope doctor --toml >> ~/.config/jobscope/config.toml\n"
+          "#\n"
+          "# A defined metric joins the *extended* catalog: it shows under --dcgm, or in\n"
+          "# any view that names it. It never joins the default view on its own."
+          % (record.jobid, record.state, record.gpus), file=out)
+
+    for family, found in families:
+        if not found:
+            continue
+        print("\n\n# %s %s" % ("-" * 8, family), file=out)
+        print("# %s" % _FAMILY_NOTE.get(family, ""), file=out)
+        structural = [raw for raw in sorted(found) if raw in _STRUCTURAL]
+        for raw in sorted(found):
+            if raw in _STRUCTURAL:
+                continue
+            _emit_block(out, family, raw)
+        if structural:
+            print("\n# jobscope reads these for something other than a measurement,"
+                  "\n# so they are not metrics you can select:", file=out)
+            for raw in structural:
+                print("#   %-30s %s" % (raw, _STRUCTURAL[raw]), file=out)
+
+    _emit_other_sources(out)
+    return 0
+
+
+_FAMILY_NOTE = {
+    "cgroup": "per-job host metrics, joined on the jobid label. Values are divided by\n"
+              "# an allocation field, which `denom` names.",
+    "nvml": "GPU metrics from the nvidia exporter, joined on the lowercase `uuid`\n"
+            "# label via the job-to-GPU series.",
+    "dcgm": "GPU metrics from dcgm-exporter, joined on the uppercase `UUID` label.",
+}
+
+
+def _emit_block(out, family: str, raw: str) -> None:
+    """One ``[metrics.<family>.<name>]`` table, commented iff already catalogued."""
+    parts = name_parts(raw)
+    if parts is None:
+        return
+    _f, short = parts
+    builtin = raw in catalog()
+    hide = "# " if builtin else ""
+    lines = ['[metrics.%s.%s]' % (family, short), 'query  = "%s"' % raw]
+    tail, note = ("        # built-in" if builtin else "        # new here"), ""
+    if family == "cgroup":
+        shape = _cgroup_fields(raw)
+        if shape is None:
+            # Not modellable: every cgroup metric is divided by an allocation, and
+            # this one has nothing to divide by. Commented out with the reason rather
+            # than emitted with an invented denominator.
+            print("\n# %s -- not expressible here. jobscope divides every cgroup metric"
+                  "\n#   by an allocation (cpus or total_memory), and a count has none to"
+                  "\n#   divide by. Reading it needs code, not config." % raw, file=out)
+            return
+        kind, denom = shape
+        lines.append('header = "%s%%"' % short.upper())
+        lines.append('kind   = "%s"' % kind)
+        lines.append('denom  = "%s"' % denom)
+    else:
+        scale, note = _gpu_scale(raw)
+        percent = scale == 100 or raw.endswith("_UTIL")
+        lines.append('header = "%s%s"' % (short.upper(), "%" if percent else ""))
+        lines.append('scale  = %g%s' % (scale, note))
+    print("\n" + hide + lines[0] + tail, file=out)
+    for line in lines[1:]:
+        print(hide + line, file=out)
+
+
+def _emit_other_sources(out) -> None:
+    """The non-Prometheus names, for reference only.
+
+    Reference only because they are derived from sacct fields rather than a PromQL
+    query, so a ``query = "..."`` table cannot define one -- printing syntax that
+    fails would be worse than printing nothing. Their names are listed because the
+    question this command answers is "what is everything called", and these are part
+    of the answer.
+    """
+    print("""
+
+# -------- slurm and jobstats: names only, not definable here
+#
+# These come from sacct rather than Prometheus -- Slurm's own accounting and the
+# jobstats blob -- so a `query = "..."` table cannot describe one. Shown because they
+# are part of the mapping, and they are what 'jobscope doctor --validate' compares
+# against. Adding to this set is a code change, not a config one.
+#
+#   slurm-cpu        TotalCPU / CPUTime            (what `seff` reports)
+#   slurm-cpu_user   UserCPU / CPUTime
+#   slurm-cpu_sys    SystemCPU / CPUTime
+#   slurm-mem        TRESUsageInTot mem / ReqMem   (summed RSS, not MaxRSS)
+#   slurm-gpuutil    TRESUsageInTot gres/gpuutil   (summed across cards; divided
+#                                                   by the count)
+#   slurm-gpumem     TRESUsageInTot gres/gpumem    (likewise per card)
+#   slurm-disk       TRESUsageInTot fs/disk
+#   slurm-energy     ConsumedEnergyRaw             (needs AcctGatherEnergyType)
+#   jobstats-*       the JS1: AdminComment blob    (absent at non-jobstats sites)""",
+          file=out)
