@@ -27,6 +27,7 @@ configuration.
 import os
 import sys
 import time
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from . import config, extra_metric
@@ -381,7 +382,56 @@ def check_prometheus(out, cfg, timeout: Optional[float]):
     return client
 
 
-def check_labels(out, client, timeout: Optional[float]) -> None:
+# Label names worth trying when the configured one answers nothing. Ordered by how
+# likely each is to be the right answer: `instance` is what a stock Prometheus calls
+# the scrape target, where jobstats' own exporter says `host`.
+_LABEL_CANDIDATES = {
+    "host": ("instance", "host", "node", "nodename"),
+    "jobid": ("jobid", "slurm_job_id", "job_id", "job"),
+}
+
+
+def _label_works(client, label: str, metric: str, at, timeout) -> bool:
+    """Whether ``metric`` actually carries a non-empty ``label`` on this server."""
+    try:
+        found = client.query("count by (%s) (%s)" % (label, metric), at, timeout)
+    except Exception:
+        return False
+    return bool([s for s in found if s.get("metric", {}).get(label)])
+
+
+def detect_labels(client, timeout: Optional[float]) -> Dict[str, Optional[str]]:
+    """``{setting: the value that works}`` for the three joins, or None where none does.
+
+    The detection was already here, inside check_labels, and thrown away: it worked out
+    that a server uses ``instance`` and then said so in prose. `--init` needs the
+    answer, so the search returns it and the printer renders it.
+
+    Keyed by ``[site]`` field name. A configured value that works is kept even when a
+    candidate would also work -- a site that set something deliberately should not have
+    it second-guessed.
+    """
+    site = config.get_config().site
+    now = int(time.time())
+    found: Dict[str, Optional[str]] = {}
+    for field, configured, kind in (("host_label", site.host_label, "host"),
+                                    ("jobid_label", site.jobid_label, "jobid")):
+        if _label_works(client, configured, "cgroup_cpus", now, timeout):
+            found[field] = configured
+            continue
+        found[field] = next(
+            (c for c in _LABEL_CANDIDATES[kind]
+             if c != configured and _label_works(client, c, "cgroup_cpus", now, timeout)),
+            None)
+    # The GPU join is a metric name, not a label, so there is nothing to substitute:
+    # either the series exists here or a port needs a human to name its equivalent.
+    found["gpu_job_join"] = (site.gpu_job_join
+                             if _label_works(client, "uuid", site.gpu_job_join, now, timeout)
+                             else None)
+    return found
+
+
+def check_labels(out, client, timeout: Optional[float]) -> Dict[str, Optional[str]]:
     """Whether the join labels the collectors assume are the ones in use here.
 
     Checks the labels ``[site]`` actually configures, not a hardcoded set -- so a
@@ -392,37 +442,120 @@ def check_labels(out, client, timeout: Optional[float]) -> None:
     host label off every series and split a ``:port`` from it; a stock Prometheus
     calls that ``instance``, and reading the wrong one leaves every node as ``?``,
     misses the cgroup divisor lookup, and returns blank CPU%/MEM% with no error at
-    all. The ``instance`` fallback is suggested by name because that is the single
-    most likely correct answer.
+    all. Where the configured name answers nothing, the working alternative is named.
+
+    Returns :func:`detect_labels`' findings for ``--init`` to serialise.
     """
     site = config.get_config().site
-    checks = ((site.host_label, "cgroup_cpus", "node names on cgroup series"),
-              (site.jobid_label, "cgroup_cpus", "job join for cgroup series"),
-              ("uuid", site.gpu_job_join, "GPU join for NVML series"))
-    now = int(time.time())
+    working = detect_labels(client, timeout)
+    checks = (("host_label", site.host_label, "node names on cgroup series"),
+              ("jobid_label", site.jobid_label, "job join for cgroup series"),
+              ("gpu_job_join", "uuid", "GPU join for NVML series"))
     seen: List[str] = []
-    for label, metric, _what in checks:
-        try:
-            found = client.query("count by (%s) (%s)" % (label, metric), now, timeout)
-        except Exception:
-            found = []
-        if [s for s in found if s.get("metric", {}).get(label)]:
-            seen.append("%s %s" % (label, OK))
+    for field, shown, _what in checks:
+        if working.get(field) == (site.gpu_job_join if field == "gpu_job_join"
+                                  else getattr(site, field)):
+            seen.append("%s %s" % (shown, OK))
             continue
-        alt = ""
-        if label == site.host_label:
-            for candidate in ("instance", "host", "node", "nodename"):
-                if candidate == label:
-                    continue
-                try:
-                    if client.query("count by (%s) (%s)" % (candidate, metric), now, timeout):
-                        alt = " -- this server uses %r; set [site] host_label" % candidate
-                        break
-                except Exception:
-                    continue
-        seen.append("%s %s%s" % (label, ABSENT, alt))
+        alt = working.get(field)
+        seen.append("%s %s%s" % (shown, ABSENT,
+                                 " -- this server uses %r; set [site] %s"
+                                 % (alt, field) if alt else ""))
     _line(out, "labels", ";  ".join(seen))
-    _cont(out, "(%s)" % ", ".join(what for _l, _m, what in checks))
+    _cont(out, "(%s)" % ", ".join(what for _f, _s, what in checks))
+    return working
+
+
+# --- detecting the numbers a config file needs -------------------------------
+
+def detect_scrape(client, timeout: Optional[float]) -> Optional[int]:
+    """The server's real scrape interval, from raw sample spacing, or None.
+
+    **Not** via ``query_range``: that aligns its result to the ``step`` you pass, so
+    the gaps come back as whatever you asked for. Measured on this cluster, the same
+    server "reports" 15s for step=15 and 60s for step=60 -- a detector that agrees
+    with any guess is not one.
+
+    A range *selector* in an instant query returns the raw samples untouched, so the
+    gaps are the server's own. The mode rather than the mean, because a restarted
+    exporter leaves one long gap that would drag an average up.
+    """
+    now = int(time.time())
+    for metric in ("nvidia_gpu_duty_cycle", "cgroup_cpus", "up"):
+        try:
+            found = client.query("%s[10m]" % metric, now, timeout)
+        except Exception:
+            continue
+        gaps: Counter = Counter()
+        for series in found[:50]:
+            stamps = [int(v[0]) for v in series.get("values", [])]
+            gaps.update(b - a for a, b in zip(stamps, stamps[1:]))
+        if gaps:
+            return gaps.most_common(1)[0][0]
+    return None
+
+
+# How the floor sits between the two measured populations, and how far above a lone
+# idle figure to put it when nothing was busy. 15% clears the jitter on an idle board
+# without reaching the bottom of the busy range on any model measured here.
+_IDLE_MARGIN = 1.15
+
+
+def measure_power_floors(client, timeout: Optional[float],
+                         window: str = "1h") -> Dict[str, Tuple[Optional[int], str]]:
+    """``{model: (floor_watts_or_None, why)}`` -- the per-model idle power floor.
+
+    Runs the method docs/config.md documents: split every card of a model on whether
+    its SMs were doing anything, and put the floor between the idle 90th percentile
+    and the busy 10th. Two queries for the whole fleet.
+
+    **Only about half the models measure cleanly at any one time**, so this reports
+    why rather than guessing. Measured here, 12 models: 6 clean, 4 with no busy
+    samples at all, 2 whose populations overlapped. A wrong floor is worse than no
+    floor -- it silently caps healthy jobs at `inefficient` -- so an unclean model
+    returns None and the reason, for the caller to emit as a comment.
+
+    Over a window rather than an instant for the same reason: an instant snapshot of
+    this fleet left three models unmeasurable and inverted a fourth that the window
+    resolved.
+    """
+    now = int(time.time())
+
+    def quantile(q: float, busy: str) -> Dict[str, float]:
+        expr = ("quantile by (modelName) (%s, avg_over_time("
+                "(DCGM_FI_DEV_POWER_USAGE and on(UUID) DCGM_FI_PROF_SM_ACTIVE %s)[%s:5m]))"
+                % (q, busy, window))
+        try:
+            found = client.query(expr, now, timeout)
+        except Exception:
+            return {}
+        out = {}
+        for series in found:
+            model = series.get("metric", {}).get("modelName", "")
+            try:
+                if model:
+                    out[model] = float(series["value"][1])
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+        return out
+
+    idle, busy = quantile(0.9, "== 0"), quantile(0.1, "> 0")
+    floors: Dict[str, Tuple[Optional[int], str]] = {}
+    for model in sorted(set(idle) | set(busy)):
+        lo, hi = idle.get(model), busy.get(model)
+        if lo is None:
+            floors[model] = (None, "no idle samples in the last %s" % window)
+        elif hi is None:
+            floors[model] = (int(round(lo * _IDLE_MARGIN / 10.0) * 10),
+                             "idle p90 %.0f W; no busy samples, so %+d%% above idle"
+                             % (lo, round((_IDLE_MARGIN - 1) * 100)))
+        elif hi <= lo:
+            floors[model] = (None, "idle p90 %.0f W and busy p10 %.0f W overlap; "
+                                   "measure again over a longer window" % (lo, hi))
+        else:
+            floors[model] = (int(round((lo + hi) / 2 / 10.0) * 10),
+                             "idle p90 %.0f W, busy p10 %.0f W" % (lo, hi))
+    return floors
 
 
 # --- metric discovery ------------------------------------------------------

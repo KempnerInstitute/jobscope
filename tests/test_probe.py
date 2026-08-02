@@ -336,3 +336,87 @@ def test_no_job_to_probe_yields_a_comment_not_a_crash(gpu_record):
     out = io.StringIO()
     assert probe.emit_toml(out, TomlClient({}), None, None, []) == 1
     assert out.getvalue().lstrip().startswith("#")
+
+
+# --- detect_scrape: the trap is that the obvious method agrees with any guess ---
+
+class _RawSampleClient:
+    """Answers a range *selector* with real 30s samples, and query_range with the step.
+
+    Modelled on the server: query_range aligns to whatever step it is given, which is
+    why reading gaps from it "detects" the caller's own argument.
+    """
+
+    sampling_period = 60
+
+    def query(self, query, at, timeout=None):
+        if not query.endswith("[10m]"):
+            return []
+        return [{"metric": {}, "values": [[1000 + 30 * i, "1"] for i in range(20)]}]
+
+    def query_range(self, query, start, end, step, timeout=None):
+        return [{"metric": {}, "values": [[start + step * i, "1"] for i in range(20)]}]
+
+
+def test_detect_scrape_reads_raw_samples_not_the_step():
+    assert probe.detect_scrape(_RawSampleClient(), 30) == 30
+
+
+def test_detect_scrape_ignores_a_long_gap_from_a_restart():
+    """The mode, not the mean: one exporter restart would drag an average up."""
+    class Client(_RawSampleClient):
+        def query(self, query, at, timeout=None):
+            if not query.endswith("[10m]"):
+                return []
+            stamps = [0, 60, 120, 900, 960, 1020, 1080]     # one 780s hole
+            return [{"metric": {}, "values": [[t, "1"] for t in stamps]}]
+
+    assert probe.detect_scrape(Client(), 30) == 60
+
+
+def test_detect_scrape_returns_none_when_nothing_answers():
+    class Silent:
+        sampling_period = 60
+
+        def query(self, query, at, timeout=None):
+            return []
+
+    assert probe.detect_scrape(Silent(), 30) is None
+
+
+# --- measure_power_floors: report why, never guess ---------------------------
+
+def _floor_client(idle, busy):
+    class Client:
+        sampling_period = 60
+
+        def query(self, query, at, timeout=None):
+            wanted = idle if "0.9" in query else busy
+            return [{"metric": {"modelName": m}, "value": [at, str(v)]}
+                    for m, v in wanted.items()]
+    return Client()
+
+
+def test_power_floors_put_the_floor_between_the_two_populations():
+    floors = probe.measure_power_floors(_floor_client({"H200": 114.0}, {"H200": 253.0}), 30)
+    value, why = floors["H200"]
+    assert value == 180                       # (114 + 253) / 2, to the nearest 10
+    assert "idle p90 114 W, busy p10 253 W" in why
+
+
+def test_power_floors_omit_a_model_whose_populations_overlap():
+    """A wrong floor silently caps healthy jobs at `inefficient`, so no number beats
+    a guess. Two of this cluster's twelve models overlap at any given moment."""
+    floors = probe.measure_power_floors(_floor_client({"A100": 97.0}, {"A100": 96.0}), 30)
+    value, why = floors["A100"]
+    assert value is None
+    assert "overlap" in why and "97 W" in why and "96 W" in why
+
+
+def test_power_floors_fall_back_to_a_margin_above_idle_when_nothing_was_busy():
+    """Four of twelve models had no busy samples in the window -- an idle partition is
+    the normal state, not an error."""
+    floors = probe.measure_power_floors(_floor_client({"V100": 31.0}, {}), 30)
+    value, why = floors["V100"]
+    assert value == 40                        # 31 x 1.15, to the nearest 10
+    assert "no busy samples" in why
