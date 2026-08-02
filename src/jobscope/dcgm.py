@@ -13,7 +13,7 @@ from typing import Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 from . import config
 from .prometheus import PrometheusClient
-from .sacct import JobRecord
+from .slurm import JobRecord
 
 # The join between Slurm's world and the GPU exporters' is a series whose *value*
 # is the job id, because neither nvidia_gpu_* nor DCGM_FI_* carries a jobid label.
@@ -135,7 +135,7 @@ def _gmem_percent(values: Dict[str, Optional[float]]) -> Optional[float]:
     return used / total * 100
 
 
-# Columns computed from other metrics. Shared by the dcgm and live views so both
+# Columns computed from other metrics. Shared by the dcgm and running views so both
 # render the same set; each declares the metric keys it needs, so it appears only
 # where those were actually collected. ``fn`` receives a dict keyed by metric key,
 # which callers storing values by header must build first -- see values_by_key.
@@ -298,7 +298,7 @@ def spec_named(name: str) -> Optional[MetricSpec]:
     return SPEC_ALIASES.get(str(name).strip().lower())
 
 
-def specs_named(names, live: bool = False) -> List[MetricSpec]:
+def specs_named(names, running: bool = False) -> List[MetricSpec]:
     """Resolve metric names to specs, in catalog order, dropping duplicates.
 
     Catalog order rather than the order given, because column order is a property
@@ -306,7 +306,7 @@ def specs_named(names, live: bool = False) -> List[MetricSpec]:
     what keeps a narrower selection a prefix of a wider one, which several callers
     rely on to tell "default" from "extended".
 
-    ``live`` drops metrics whose reducer is ``delta`` (ENERGY_kWh): the running view
+    ``running`` drops metrics whose reducer is ``delta`` (ENERGY_kWh): the running view
     synthesizes a jobstats-shaped blob and a counter difference has no meaning over
     a window that has not finished. Unknown names are the caller's to validate --
     :func:`spec_named` returns None and this skips them.
@@ -314,7 +314,7 @@ def specs_named(names, live: bool = False) -> List[MetricSpec]:
     found = {}
     for name in names:
         spec = spec_named(name)
-        if spec is None or (live and spec.reducer == "delta"):
+        if spec is None or (running and spec.reducer == "delta"):
             continue
         found[spec.key] = spec
     return [found[key] for key in sorted(found, key=_CATALOG_ORDER.__getitem__)]
@@ -437,7 +437,7 @@ def window_query(spec: MetricSpec, uuids: List[str], duration: int,
     ``clip`` is an optional series to intersect the selector with, which restricts
     the window to the samples where that series also existed. Only usable when the
     two come from the same exporter, since PromQL's ``and`` requires identical
-    label sets -- see :func:`jobscope.live.clip_to_job`.
+    label sets -- see :func:`jobscope.running.clip_to_job`.
     """
     regex = "^(" + "|".join(uuids) + ")$"  # UUIDs are hex+hyphen, RE2-safe as-is
     selector = '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex)

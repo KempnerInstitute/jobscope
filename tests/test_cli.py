@@ -100,7 +100,7 @@ def test_finished_defaults_to_one_day():
 
 def test_running_needs_no_window():
     request = _request(mode=RUNNING)
-    assert request.days is None and request.live
+    assert request.days is None and request.running
 
 
 def test_explicit_jobids_take_no_default_window():
@@ -350,7 +350,7 @@ def test_finished_timeseries(monkeypatch, capsys, gpu_record):
 GIB = 1024 ** 3
 
 
-class _LiveClient:
+class _RunningClient:
     """Prometheus stand-in for the squeue branch: one GPU on one job.
 
     Serves the NVML and cgroup series as well as a DCGM one, because the live path
@@ -394,7 +394,7 @@ _LIVE_JOB = {42000000: {"jobid": "100_6", "user": "alice", "node": "node01", "na
 
 def _patch_squeue(monkeypatch):
     monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, timeout: dict(_LIVE_JOB))
-    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: _LiveClient())
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: _RunningClient())
 
 
 def test_running_table(monkeypatch, capsys):
@@ -679,7 +679,7 @@ def test_finished_defaults_to_completed_only(monkeypatch):
 
 
 def test_dash_t_reaches_the_request_verbatim(monkeypatch):
-    """sacct.states_for does the validating, so the CLI passes the string through."""
+    """slurm.states_for does the validating, so the CLI passes the string through."""
     got = _request_for(["finished", "-D", "1", "-t", "failed,timeout"], monkeypatch)
     assert got.state == "failed,timeout"
 

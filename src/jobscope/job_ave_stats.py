@@ -17,7 +17,7 @@ from typing import Dict, Optional
 from .cpu import host_stats
 from .nvml import per_gpu_stats
 from .prometheus import PrometheusClient
-from .sacct import JobRecord
+from .slurm import JobRecord
 
 
 def stats_dict(duration: int, *node_maps: Dict[str, dict]) -> dict:

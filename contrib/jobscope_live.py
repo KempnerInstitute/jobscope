@@ -3,12 +3,12 @@
 
 This started life as a standalone script (squeue + Prometheus, no install, running
 on the login node's system python). Its logic now lives in the package -- see
-``src/jobscope/live.py`` -- and "which jobs" is now a mode word rather than a
-subcommand, so the live view is ``jobscope running``. This wrapper stays so
+``src/jobscope/running.py`` -- and "which jobs" is now a mode word rather than a
+subcommand, so the running view is ``jobscope running``. This wrapper stays so
 existing command lines and scripts keep working.
 
 Flag translation:
-  (mode)             ->  running             the live selection
+  (mode)             ->  running             the running selection
   --min-runtime DUR  ->  --min-elapsed DUR   accepted as an alias, no rewrite
   no -u given        ->  --all-users         this script showed every user;
                                              jobscope defaults to you

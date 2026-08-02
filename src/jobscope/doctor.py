@@ -33,7 +33,7 @@ from . import config, extra_metric
 from .cpu import CGROUP_METRICS
 from .dcgm import METRICS as GPU_METRICS
 from .errors import JobscopeError
-from .sacct import run_capture
+from .slurm import run_capture
 
 # Status markers. Deliberately words rather than colour: doctor output gets pasted
 # into issues and email, where colour does not survive.
@@ -452,7 +452,7 @@ def probe_series(client, jobid: Optional[str], timeout: Optional[float],
     H100) should say so rather than look healthy and then render blank forever.
     """
     from .dcgm import discover_gpus
-    from .sacct import fetch
+    from .slurm import fetch
 
     jobid = jobid or _recent_gpu_job(sample)
     if not jobid:

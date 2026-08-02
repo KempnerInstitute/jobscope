@@ -7,12 +7,12 @@ import pytest
 from jobscope.blob import GIB, blob_metrics
 from jobscope.dcgm import ALL_SPECS, DEFAULT_SPECS, SPEC_BY_HEADER, window_query
 from jobscope.errors import JobscopeError
-from jobscope.live import (
-    DEFAULT_LIVE_SPECS,
-    EXTENDED_LIVE_SPECS,
+from jobscope.running import (
+    DEFAULT_RUNNING_SPECS,
+    EXTENDED_RUNNING_SPECS,
     SQUEUE_FORMAT,
     Gpu,
-    LiveSelection,
+    RunningSelection,
     build_columns,
     clip_to_job,
     collect_instant,
@@ -31,11 +31,11 @@ from jobscope.cpu import host_stats_many
 from jobscope.job_ave_stats import synthesize_stats
 from jobscope.report import (
     RenderOptions,
-    live_combined_timeseries,
-    live_cpu_timeseries,
-    live_timeseries,
+    running_combined_timeseries,
+    running_cpu_timeseries,
+    running_timeseries,
 )
-from jobscope.sacct import JobRecord
+from jobscope.slurm import JobRecord
 
 # squeue -o "%A|%i|%u|%N|%g|%j|%b|%C|%S": raw id, display id, user, nodelist,
 # group, name, gres, cpus, start. For array element 12345_6 the raw id differs --
@@ -214,32 +214,32 @@ def test_a_window_lands_on_the_runs_own_sample_grid():
 # --- catalogs ---------------------------------------------------------------
 
 def test_live_catalog_column_order_and_membership():
-    assert [h for _k, h, _d in build_columns(DEFAULT_LIVE_SPECS)] == [
+    assert [h for _k, h, _d in build_columns(DEFAULT_RUNNING_SPECS)] == [
         "GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
 
 
 def test_gpu_utilization_is_always_present_in_the_live_view():
     # A running job has no blob, so this is the only place GPU% comes from; there
     # is deliberately no narrower catalog that could drop it.
-    assert "GPU%" in [h for _k, h, _d in build_columns(DEFAULT_LIVE_SPECS)]
-    assert "GPU%" in [h for _k, h, _d in build_columns(EXTENDED_LIVE_SPECS)]
+    assert "GPU%" in [h for _k, h, _d in build_columns(DEFAULT_RUNNING_SPECS)]
+    assert "GPU%" in [h for _k, h, _d in build_columns(EXTENDED_RUNNING_SPECS)]
 
 
 def test_total_memory_is_queried_but_not_shown():
     # It exists only to derive MEM%.
-    assert any(s.header == "GMEM_TOTAL_GB" for s in DEFAULT_LIVE_SPECS)
-    assert "GMEM_TOTAL_GB" not in [h for _k, h, _d in build_columns(DEFAULT_LIVE_SPECS)]
+    assert any(s.header == "GMEM_TOTAL_GB" for s in DEFAULT_RUNNING_SPECS)
+    assert "GMEM_TOTAL_GB" not in [h for _k, h, _d in build_columns(DEFAULT_RUNNING_SPECS)]
 
 
 def test_extended_catalog_excludes_delta_reduced_counters():
     # A delta needs two points, so it is meaningless in an instant snapshot.
-    assert all(s.reducer != "delta" for s in EXTENDED_LIVE_SPECS)
+    assert all(s.reducer != "delta" for s in EXTENDED_RUNNING_SPECS)
     assert any(s.reducer == "delta" for s in ALL_SPECS), "fixture assumes one exists"
 
 
 def test_specs_for_maps_the_view_names():
-    assert specs_for("all") is EXTENDED_LIVE_SPECS
-    assert specs_for(None) is DEFAULT_LIVE_SPECS
+    assert specs_for("all") is EXTENDED_RUNNING_SPECS
+    assert specs_for(None) is DEFAULT_RUNNING_SPECS
 
 
 def test_live_and_dcgm_render_identical_columns():
@@ -249,7 +249,7 @@ def test_live_and_dcgm_render_identical_columns():
     same eye (and the same script) reads both.
     """
     from jobscope.dcgm import columns_for
-    assert build_columns(DEFAULT_LIVE_SPECS) == columns_for(DEFAULT_SPECS)
+    assert build_columns(DEFAULT_RUNNING_SPECS) == columns_for(DEFAULT_SPECS)
 
 
 def test_gmem_percent_is_per_gpu_and_handles_a_missing_total():
@@ -286,8 +286,8 @@ def test_unclipped_window_query_is_unchanged():
 # --- selection --------------------------------------------------------------
 
 def test_selection_describe_mentions_the_runtime_floor():
-    assert "1h" in LiveSelection(min_elapsed=3600).describe()
-    assert LiveSelection(jobids=["1", "2"]).describe() == "2 job ID(s)"
+    assert "1h" in RunningSelection(min_elapsed=3600).describe()
+    assert RunningSelection(jobids=["1", "2"]).describe() == "2 job ID(s)"
 
 
 def test_describe_omits_user_and_partition_but_describe_filters_names_them():
@@ -297,29 +297,29 @@ def test_describe_omits_user_and_partition_but_describe_filters_names_them():
     idle partition, when in practice the default user filter excluded the 20
     people who were on it.
     """
-    sel = LiveSelection(partition="kempner", user="bdesinghu", min_elapsed=600)
+    sel = RunningSelection(partition="kempner", user="bdesinghu", min_elapsed=600)
     assert sel.describe() == "running, longer than 10m"
     assert sel.describe_filters() == (
         "user bdesinghu, partition kempner, running, longer than 10m")
 
 
 def test_describe_filters_says_all_users_when_unfiltered():
-    sel = LiveSelection(partition="kempner", user=None, min_elapsed=600)
+    sel = RunningSelection(partition="kempner", user=None, min_elapsed=600)
     assert sel.describe_filters().startswith("all users, partition kempner")
 
 
 def test_widening_hints_cover_only_the_active_filters():
     """Suggesting -a when every user is already included would be noise."""
-    assert LiveSelection(user="alice", partition="p", min_elapsed=600).widening_hints() == [
+    assert RunningSelection(user="alice", partition="p", min_elapsed=600).widening_hints() == [
         "add -a to include every user",
         "set --min-elapsed 0s to include jobs that just started",
         "drop -p to search every partition"]
-    assert LiveSelection(user=None, partition=None, min_elapsed=0).widening_hints() == []
+    assert RunningSelection(user=None, partition=None, min_elapsed=0).widening_hints() == []
 
 
 def test_explicit_job_ids_keep_the_plain_description():
     """Job IDs bypass the filters, so naming them would be misleading."""
-    sel = LiveSelection(jobids=["1"], user="alice", partition="p")
+    sel = RunningSelection(jobids=["1"], user="alice", partition="p")
     assert sel.describe_filters() == "1 job ID(s)"
 
 
@@ -445,7 +445,7 @@ def test_live_timeseries_uses_the_schema_plot_reads():
     gpus = {"GPU-a": Gpu("GPU-a", 1, "node01", 3, "GPU 3")}
     samples = {"GPU-a": {1000: {"duty": 90.0, "mem": 10.0, "memtot": 80.0}}}
     out = io.StringIO()
-    live_timeseries(jobs, samples, gpus, DEFAULT_LIVE_SPECS, RenderOptions(), out=out)
+    running_timeseries(jobs, samples, gpus, DEFAULT_RUNNING_SPECS, RenderOptions(), out=out)
     lines = out.getvalue().splitlines()
     assert lines[0].startswith("JOBID,USER,EPOCH,TIME,NODE,GPU,")
     assert lines[1].startswith("100_6,alice,1000,")   # USER names whose job it is
@@ -455,7 +455,7 @@ def test_live_timeseries_uses_the_schema_plot_reads():
 
 def test_live_cpu_timeseries_uses_the_schema_plot_reads():
     """The divisors come from one host_stats_many call, the samples from range
-    queries -- the schema still has to match dcgm_timeseries'/live_timeseries'."""
+    queries -- the schema still has to match dcgm_timeseries'/running_timeseries'."""
     class Client:
         sampling_period = 60
 
@@ -477,7 +477,7 @@ def test_live_cpu_timeseries_uses_the_schema_plot_reads():
 
     jobs = {100: {"jobid": "100_6", "user": "alice", "start_epoch": 940, "elapsed_seconds": 60}}
     out = io.StringIO()
-    live_cpu_timeseries(jobs, Client(), None, RenderOptions(), workers=1, out=out)
+    running_cpu_timeseries(jobs, Client(), None, RenderOptions(), workers=1, out=out)
     lines = out.getvalue().splitlines()
     assert lines[0] == "JOBID,USER,EPOCH,TIME,NODE,GPU,MODEL,CPU%,MEM%"
     assert lines[1].startswith("100_6,alice,1000,")
@@ -500,7 +500,7 @@ def test_live_cpu_timeseries_warns_and_skips_a_job_with_no_divisor():
     import sys as _sys
     old_stderr, _sys.stderr = _sys.stderr, err
     try:
-        live_cpu_timeseries(jobs, Client(), None, RenderOptions(), workers=1, out=out)
+        running_cpu_timeseries(jobs, Client(), None, RenderOptions(), workers=1, out=out)
     finally:
         _sys.stderr = old_stderr
     assert out.getvalue() == ""
@@ -508,7 +508,7 @@ def test_live_cpu_timeseries_warns_and_skips_a_job_with_no_divisor():
 
 
 def test_live_combined_timeseries_uses_the_schema_plot_reads():
-    """live_timeseries's GPU rows, plus each one's node's CPU%/MEM% appended --
+    """running_timeseries's GPU rows, plus each one's node's CPU%/MEM% appended --
     the default running-job --ts view."""
     class Client:
         sampling_period = 60
@@ -533,7 +533,7 @@ def test_live_combined_timeseries_uses_the_schema_plot_reads():
     gpus = {"GPU-a": Gpu("GPU-a", 1, "node01", 3, "GPU 3")}
     samples = {"GPU-a": {1000: {"duty": 90.0, "mem": 10.0, "memtot": 80.0}}}
     out = io.StringIO()
-    live_combined_timeseries(jobs, samples, gpus, DEFAULT_LIVE_SPECS, Client(), None,
+    running_combined_timeseries(jobs, samples, gpus, DEFAULT_RUNNING_SPECS, Client(), None,
                              RenderOptions(), workers=1, out=out)
     lines = out.getvalue().splitlines()
     assert lines[0].startswith("JOBID,USER,EPOCH,TIME,NODE,GPU,")
@@ -550,7 +550,7 @@ def test_live_timeseries_keeps_mig_slices_distinct():
             "MIG-b": Gpu("MIG-b", 1, "node01", 0, "MIG 0.1")}
     samples = {"MIG-a": {1000: {"mem": 1.0}}, "MIG-b": {1000: {"mem": 2.0}}}
     out = io.StringIO()
-    live_timeseries(jobs, samples, gpus, DEFAULT_LIVE_SPECS, RenderOptions(), out=out)
+    running_timeseries(jobs, samples, gpus, DEFAULT_RUNNING_SPECS, RenderOptions(), out=out)
     gpu_column = [row.split(",")[5] for row in out.getvalue().splitlines()[1:]]
     # Both share minor 0; without the .instance suffix plot would merge them.
     assert gpu_column == ["0.0", "0.1"]
@@ -568,7 +568,7 @@ def test_collect_instant_stores_by_uuid_and_derives_mem_percent():
             return []
 
     gpus = {"GPU-a": Gpu("GPU-a", 7, "node01", 0, "GPU 0")}
-    metrics = collect_instant(Client(), gpus, DEFAULT_LIVE_SPECS, None)
+    metrics = collect_instant(Client(), gpus, DEFAULT_RUNNING_SPECS, None)
     values = metrics[7]["GPU-a"]
     assert values["mem"] == 40.0 and values["memtot"] == 80.0
     assert values["gmempct"] == 50.0

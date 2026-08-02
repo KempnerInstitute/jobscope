@@ -27,7 +27,7 @@ from typing import List, Optional, Tuple
 from . import __version__, config, doctor, plot
 from .dcgm import DCGM_HEADERS
 from .errors import JobscopeError
-from .live import format_duration, parse_duration
+from .running import format_duration, parse_duration
 from . import report
 from .report import (
     DetailRenderer,
@@ -38,7 +38,7 @@ from .report import (
     timeseries_classify,
     timeseries_stats,
 )
-from .sacct import DEFAULT_STATE, default_user
+from .slurm import DEFAULT_STATE, default_user
 from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
 
 MODES = (RUNNING, FINISHED)
@@ -300,7 +300,7 @@ def mode_was_explicit(argv) -> bool:
 
     It matters for JOBIDs: ``jobscope 12345`` looks the job up through sacct, which
     finds it running or finished, but ``jobscope running -j 12345`` asked for the
-    live view of it -- an instant snapshot, with --avg available. Without this the
+    running view of it -- an instant snapshot, with --avg available. Without this the
     explicit word would be silently discarded.
     """
     # `live` always meant running jobs, so it counts as naming the mode.
@@ -332,7 +332,7 @@ def _inert_dests(args) -> set:
         hide.add("state")                                   # raises: all are RUNNING
     else:
         hide.add("avg")          # raises: a finished job is always folded over its runtime
-        hide.add("min_elapsed")  # only ever reaches LiveSelection
+        hide.add("min_elapsed")  # only ever reaches RunningSelection
     if args.ts or args.plot_ts:
         # emit_timeseries drops these with a note; the series has no host, advisory or
         # aggregate columns to put them in, and nothing is plotted. --nodename is not
@@ -485,8 +485,8 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
     jobids = list(args.jobids) + list(getattr(args, "jobids_opt", None) or [])
     # An explicit `running` keeps the live path even with JOBIDs, narrowing within
     # squeue; an inferred mode yields to the IDs, which sacct resolves either way.
-    live_ids = jobids and args.mode == RUNNING and getattr(args, "explicit_mode", False)
-    mode = args.mode if (live_ids or not jobids) else JOBIDS
+    running_ids = jobids and args.mode == RUNNING and getattr(args, "explicit_mode", False)
+    mode = args.mode if (running_ids or not jobids) else JOBIDS
 
     if mode == RUNNING:
         for flag, short, attr in _FINISHED_ONLY:

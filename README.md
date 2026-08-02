@@ -286,7 +286,7 @@ it into a report of finished ones distorts every figure. `-t` selects other endi
 Comma-separated to combine: `jobscope finished -t failed,timeout`. The groups are
 separate because they are different problems -- a timeout usually means the walltime
 or the resource request was wrong, a cancellation is a person, and a failure is the
-job. Passing a live state (`-t running`) is an error pointing at `jobscope running`.
+job. Passing a running state (`-t running`) is an error pointing at `jobscope running`.
 
 An explicit job ID is never filtered this way, so `jobscope <jobid>` still reports a
 job that is running right now.
@@ -317,7 +317,7 @@ for a running one jobscope reconstructs `CPU%`/`MEM%`/`GPU%`/`GMEM%` from the sa
 Prometheus metrics jobstats falls back to. With no Prometheus endpoint configured
 those columns stay blank and say so.
 
-`jobscope running -j ID` differs from `jobscope ID`: the first reads the live view
+`jobscope running -j ID` differs from `jobscope ID`: the first reads the running view
 of that job (an instant snapshot, with `--avg` available), the second looks it up
 through `sacct` over its window.
 

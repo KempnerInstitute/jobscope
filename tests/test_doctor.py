@@ -235,7 +235,7 @@ def _emit(by_family, record):
 
 def test_a_builtin_is_emitted_commented_so_its_name_is_visible(gpu_record, monkeypatch):
     """It already works; it is here so the name can be seen and renamed."""
-    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"dcgm": ["DCGM_FI_PROF_SM_ACTIVE"]}, gpu_record)
     assert "# [metrics.dcgm.sm_act]" in text and "# built-in" in text
     assert "\n[metrics.dcgm.sm_act]" not in text     # never live
@@ -243,7 +243,7 @@ def test_a_builtin_is_emitted_commented_so_its_name_is_visible(gpu_record, monke
 
 def test_an_uncatalogued_series_is_emitted_live(gpu_record, monkeypatch):
     """So a redirect into a config file is the only step -- no uncommenting."""
-    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"dcgm": ["DCGM_FI_DEV_GPU_UTIL"]}, gpu_record)
     assert "\n[metrics.dcgm.gpu_util]        # new here" in text
     assert 'query  = "DCGM_FI_DEV_GPU_UTIL"' in text
@@ -252,7 +252,7 @@ def test_an_uncatalogued_series_is_emitted_live(gpu_record, monkeypatch):
 def test_the_table_key_is_the_short_name_without_the_family(gpu_record, monkeypatch):
     """The family is already in the table path; repeating it would make the config
     name `dcgm-gpu_util` inside `[metrics.dcgm]`."""
-    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"dcgm": ["DCGM_FI_DEV_GPU_UTIL"]}, gpu_record)
     assert "[metrics.dcgm.gpu_util]" in text and "[metrics.dcgm.dcgm-gpu_util]" not in text
 
@@ -260,7 +260,7 @@ def test_the_table_key_is_the_short_name_without_the_family(gpu_record, monkeypa
 def test_a_cgroup_count_is_not_given_an_invented_denominator(gpu_record, monkeypatch):
     """Every cgroup metric is divided by an allocation, and an OOM-kill count has
     none. A percentage of total bytes would be a number with no meaning."""
-    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"cgroup": ["cgroup_memory_fail_count"]}, gpu_record)
     assert "not expressible here" in text
     assert "[metrics.cgroup.memory_fail_count]" not in text.replace("# ", "")
@@ -297,7 +297,7 @@ def test_an_unfamiliar_gpu_metric_says_to_check_its_units():
 def test_structural_series_are_listed_but_not_offered_as_metrics(gpu_record, monkeypatch):
     """cgroup_cpus is the denominator every CPU percentage divides by, not a metric.
     Listed rather than dropped, so a reader looking for it finds out where it went."""
-    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"cgroup": ["cgroup_cpus", "cgroup_memory_rss_bytes"]}, gpu_record)
     assert "cgroup_cpus" in text and "denominator" in text
     assert "[metrics.cgroup.cpus]" not in text.replace("# ", "")
@@ -306,7 +306,7 @@ def test_structural_series_are_listed_but_not_offered_as_metrics(gpu_record, mon
 def test_the_other_sources_are_reference_only(gpu_record, monkeypatch):
     """slurm-* comes from sacct fields, so a query = "..." table cannot define one --
     printing syntax that fails would be worse than printing nothing."""
-    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"cgroup": ["cgroup_memory_rss_bytes"]}, gpu_record)
     assert "slurm-cpu" in text and "slurm-gpuutil" in text
     assert "[metrics.slurm" not in text.replace("# ", "")
@@ -318,7 +318,7 @@ def test_the_output_is_a_loadable_config(gpu_record, monkeypatch, tmp_path,
     and the live blocks have to take effect."""
     from jobscope import config as config_module
     from jobscope import dcgm
-    monkeypatch.setattr("jobscope.sacct.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
+    monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"cgroup": ["cgroup_memory_rss_bytes", "cgroup_memsw_used_bytes"],
                   "dcgm": ["DCGM_FI_PROF_SM_ACTIVE", "DCGM_FI_DEV_GPU_UTIL"]},
                  gpu_record)

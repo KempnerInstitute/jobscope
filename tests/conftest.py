@@ -9,7 +9,7 @@ import pytest
 from jobscope import config as config_module
 from jobscope import report
 from jobscope.blob import GIB
-from jobscope.sacct import JobRecord
+from jobscope.slurm import JobRecord
 
 
 def make_blob(stats: dict) -> str:

@@ -572,7 +572,7 @@ def test_the_new_defaults_are_read(tmp_path):
 
 
 def test_the_state_default_is_checked_by_the_same_rule_as_the_flag(tmp_path):
-    """Delegated to sacct.states_for, so the config and -t cannot come to disagree
+    """Delegated to slurm.states_for, so the config and -t cannot come to disagree
     about the vocabulary -- including its refusal of live states."""
     path = tmp_path / "c.toml"
     path.write_text('[defaults]\nstate = "running"\n')

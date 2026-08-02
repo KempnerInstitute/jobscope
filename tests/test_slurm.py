@@ -5,9 +5,9 @@ import time
 
 import pytest
 
-from jobscope import sacct
+from jobscope import slurm
 from jobscope.errors import JobscopeError
-from jobscope.sacct import (
+from jobscope.slurm import (
     TIMESTAMP_FORMAT,
     Selection,
     days_to_window,
@@ -94,7 +94,7 @@ def test_select_jobs_skips_jobs_that_have_not_finished(monkeypatch):
     The -s filter should keep these out at the sacct end; the client-side skip is
     the belt-and-braces behind it, and this pins it.
     """
-    monkeypatch.setattr(sacct, "run_capture",
+    monkeypatch.setattr(slurm, "run_capture",
                         lambda *a, **k: "100|COMPLETED\n101|RUNNING\n"
                                         "102|PENDING\n103|SUSPENDED\n")
     ids, desc = select_jobs(Selection(user="alice"), None)
@@ -103,7 +103,7 @@ def test_select_jobs_skips_jobs_that_have_not_finished(monkeypatch):
 
 
 def test_select_jobs_lastn(monkeypatch):
-    monkeypatch.setattr(sacct, "run_capture",
+    monkeypatch.setattr(slurm, "run_capture",
                         lambda *a, **k: "100|COMPLETED\n101|COMPLETED\n")
     ids, desc = select_jobs(Selection(user="alice", lastn=1), None)
     assert ids == ["101"]                       # ascending, so the tail is newest
@@ -119,7 +119,7 @@ def test_lastn_stops_after_one_day_when_that_is_enough(monkeypatch):
         windows.append((cmd[cmd.index("-S") + 1], cmd[cmd.index("-E") + 1]))
         return "100|COMPLETED\n101|COMPLETED\n"
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     selection = Selection(user="alice", lastn=1)
     ids, _desc = select_jobs(selection, None)
     assert ids == ["101"]
@@ -147,10 +147,10 @@ def test_each_step_queries_exactly_one_day_further_back(monkeypatch):
                      time.mktime(time.strptime(start, TIMESTAMP_FORMAT)))
         return ""                               # never enough, so it keeps walking
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     selection = Selection(user="alice", lastn=1)
     select_jobs(selection, None)
-    assert len(spans) == sacct.DEFAULT_LOOKBACK_DAYS
+    assert len(spans) == slurm.DEFAULT_LOOKBACK_DAYS
     assert all(abs(span - 86400) < 5 for span in spans)       # one day each, not growing
     # And walking backwards: every step starts earlier than the one before.
     assert starts == sorted(starts, reverse=True)
@@ -164,7 +164,7 @@ def test_lastn_walks_back_until_it_has_enough(monkeypatch):
         # Nothing until the third day back, then two jobs.
         return "100|COMPLETED\n101|COMPLETED\n" if len(calls) >= 3 else ""
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     selection = Selection(user="alice", lastn=2)
     ids, _desc = select_jobs(selection, None)
     assert ids == ["100", "101"]
@@ -187,7 +187,7 @@ def test_older_days_are_prepended_so_the_newest_are_kept(monkeypatch):
         days.append(1)
         return {1: "300|COMPLETED\n", 2: "200|COMPLETED\n"}.get(len(days), "100|COMPLETED\n")
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     ids, _desc = select_jobs(Selection(user="alice", lastn=2), None)
     assert ids == ["200", "300"]                # the two newest, oldest-first
 
@@ -197,7 +197,7 @@ def test_a_job_spanning_two_days_is_not_counted_twice(monkeypatch):
     def fake(cmd, *a, **k):
         return "100|COMPLETED\n"               # the same job every day
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     ids, _desc = select_jobs(Selection(user="alice", lastn=3), None)
     assert ids == ["100"]
 
@@ -212,7 +212,7 @@ def test_lastn_keeps_a_narrow_answer_when_a_wider_query_times_out(monkeypatch):
             return "100|COMPLETED\n"
         raise JobscopeError("sacct query timed out after 60s")
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     ids, _desc = select_jobs(Selection(user="alice", lastn=5), None)
     assert ids == ["100"]                       # not an exception
     assert len(calls) == 2
@@ -222,13 +222,13 @@ def test_lastn_still_raises_when_even_the_narrowest_window_fails(monkeypatch):
     def boom(*a, **k):
         raise JobscopeError("sacct query timed out after 60s")
 
-    monkeypatch.setattr(sacct, "run_capture", boom)
+    monkeypatch.setattr(slurm, "run_capture", boom)
     with pytest.raises(JobscopeError, match="timed out"):
         select_jobs(Selection(user="alice", lastn=5), None)
 
 
 def test_select_jobs_days_desc(monkeypatch):
-    monkeypatch.setattr(sacct, "run_capture", lambda *a, **k: "100|COMPLETED\n")
+    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: "100|COMPLETED\n")
     ids, desc = select_jobs(
         Selection(user="alice", days=3, starttime="2026-01-01T00:00:00", endtime="now"), None)
     assert desc == "last 3 days, completed"
@@ -240,7 +240,7 @@ def test_fetch_parses_record(monkeypatch):
                      "billing=2,cpu=2,gres/gpu=2,mem=16G",
                      "2020-01-01T00:00:00", "2020-01-01T01:00:00", "100", "odyssey",
                      "alice", blob])
-    monkeypatch.setattr(sacct, "run_capture", lambda *a, **k: line + "\n")
+    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line + "\n")
     records = fetch(["100"], None)
     record = records["100"]
     assert record.state == "COMPLETED"
@@ -261,7 +261,7 @@ def test_fetch_aliases_array_base_id(monkeypatch):
     line = "|".join(["18114115", "COMPLETED", "arr", "00:10:00", "1", "gres/gpu=1",
                      "2020-01-01T00:00:00", "2020-01-01T00:10:00", "18114115",
                      "odyssey", "alice", make_blob(GPU_STATS)])
-    monkeypatch.setattr(sacct, "run_capture", lambda *a, **k: line + "\n")
+    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line + "\n")
     records = fetch(["18114115_[0-719%64]"], None)
     assert "18114115_[0-719%64]" in records
     assert records["18114115_[0-719%64]"].state == "COMPLETED"
@@ -277,7 +277,7 @@ def _fake_fetch_run_capture(calls, blob):
     """A run_capture stub that answers any chunked -j query and records it."""
     def fake(cmd, timeout, what, soft=False):
         assert cmd[:2] == ["sacct", "-j"]
-        assert len(cmd[2]) <= sacct.JOBID_ARG_LIMIT
+        assert len(cmd[2]) <= slurm.JOBID_ARG_LIMIT
         ids = cmd[2].split(",")
         calls.append(ids)
         return "".join(_record_line(jid, blob) for jid in ids)
@@ -285,31 +285,31 @@ def _fake_fetch_run_capture(calls, blob):
 
 
 def test_chunk_jobids_empty():
-    assert sacct.chunk_jobids([], 64) == []
+    assert slurm.chunk_jobids([], 64) == []
 
 
 def test_chunk_jobids_single_oversized_id():
     # An id longer than the limit cannot be split; it gets its own chunk.
-    assert sacct.chunk_jobids(["a" * 100], 8) == [["a" * 100]]
+    assert slurm.chunk_jobids(["a" * 100], 8) == [["a" * 100]]
 
 
 def test_chunk_jobids_boundary():
-    assert sacct.chunk_jobids(["aaa", "bbb"], 7) == [["aaa", "bbb"]]
-    assert sacct.chunk_jobids(["aaa", "bbb", "c"], 7) == [["aaa", "bbb"], ["c"]]
+    assert slurm.chunk_jobids(["aaa", "bbb"], 7) == [["aaa", "bbb"]]
+    assert slurm.chunk_jobids(["aaa", "bbb", "c"], 7) == [["aaa", "bbb"], ["c"]]
 
 
 def test_chunk_jobids_preserves_order_and_membership():
     ids = [str(1000 + i) for i in range(100)]
-    chunks = sacct.chunk_jobids(ids, 16)
+    chunks = slurm.chunk_jobids(ids, 16)
     assert [jid for chunk in chunks for jid in chunk] == ids
     assert all(len(",".join(chunk)) <= 16 for chunk in chunks)
 
 
 def test_chunk_jobids_max_count():
     ids = ["1", "2", "3", "4", "5"]
-    assert sacct.chunk_jobids(ids, 1024, max_count=2) == [["1", "2"], ["3", "4"], ["5"]]
+    assert slurm.chunk_jobids(ids, 1024, max_count=2) == [["1", "2"], ["3", "4"], ["5"]]
     # the byte limit still wins when it is the tighter bound
-    assert sacct.chunk_jobids(["aaa", "bbb", "ccc"], 7, max_count=10) == [["aaa", "bbb"], ["ccc"]]
+    assert slurm.chunk_jobids(["aaa", "bbb", "ccc"], 7, max_count=10) == [["aaa", "bbb"], ["ccc"]]
 
 
 def test_fetch_chunks_large_id_list(monkeypatch):
@@ -318,7 +318,7 @@ def test_fetch_chunks_large_id_list(monkeypatch):
     ids = [str(10_000_000 + i) for i in range(4_000)]
     blob = make_blob(GPU_STATS)
     calls = []
-    monkeypatch.setattr(sacct, "run_capture", _fake_fetch_run_capture(calls, blob))
+    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, blob))
     records = fetch(ids, None)
     assert len(calls) >= 2
     assert [jid for chunk in calls for jid in chunk] == ids
@@ -330,7 +330,7 @@ def test_fetch_chunks_large_id_list(monkeypatch):
 def test_fetch_merges_records_across_chunks(monkeypatch):
     # limit 8 forces the two 8-byte ids into separate chunks; both parses must
     # merge into one dict rather than the second overwriting the first.
-    monkeypatch.setattr(sacct, "JOBID_ARG_LIMIT", 8)
+    monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
     blob = make_blob(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
@@ -338,7 +338,7 @@ def test_fetch_merges_records_across_chunks(monkeypatch):
         assert "," not in jid
         return _record_line(jid, blob, name="job-%s" % jid)
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     records = fetch(["10000001", "10000002"], None)
     assert records["10000001"].name == "job-10000001"
     assert records["10000002"].name == "job-10000002"
@@ -347,13 +347,13 @@ def test_fetch_merges_records_across_chunks(monkeypatch):
 def test_fetch_array_alias_survives_chunking(monkeypatch):
     # The bracketed id and the other id land in different chunks; the alias
     # back to the requested bracketed id must still resolve afterward.
-    monkeypatch.setattr(sacct, "JOBID_ARG_LIMIT", 8)
+    monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
     blob = make_blob(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         return _record_line(cmd[2], blob)
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     records = fetch(["18114115_[0-719%64]", "99999999"], None)
     assert "18114115_[0-719%64]" in records
     assert records["99999999"].state == "COMPLETED"
@@ -364,7 +364,7 @@ def test_fetch_small_list_single_call(monkeypatch, capsys):
     # and no progress chatter on stderr.
     blob = make_blob(GPU_STATS)
     calls = []
-    monkeypatch.setattr(sacct, "run_capture", _fake_fetch_run_capture(calls, blob))
+    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, blob))
     records = fetch(["100", "101"], None)
     assert len(calls) == 1
     assert len(records) == 2
@@ -372,13 +372,13 @@ def test_fetch_small_list_single_call(monkeypatch, capsys):
 
 
 def test_fetch_progress_notes(monkeypatch, capsys):
-    monkeypatch.setattr(sacct, "JOBID_ARG_LIMIT", 8)
+    monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
     blob = make_blob(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         return _record_line(cmd[2], blob)
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     fetch(["10000001", "10000002"], None)
     err = capsys.readouterr().err
     assert "2 jobs selected -- fetching sacct data in 2 batches" in err
@@ -387,14 +387,14 @@ def test_fetch_progress_notes(monkeypatch, capsys):
 
 
 def test_fetch_chunks_empty():
-    assert list(sacct.fetch_chunks([], None)) == []
+    assert list(slurm.fetch_chunks([], None)) == []
 
 
 def test_fetch_chunks_single_chunk_no_notes(monkeypatch, capsys):
     blob = make_blob(GPU_STATS)
     calls = []
-    monkeypatch.setattr(sacct, "run_capture", _fake_fetch_run_capture(calls, blob))
-    chunks = list(sacct.fetch_chunks(["100", "101"], None))
+    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, blob))
+    chunks = list(slurm.fetch_chunks(["100", "101"], None))
     assert len(chunks) == 1
     ready, records = chunks[0]
     assert ready == ["100", "101"]
@@ -404,29 +404,29 @@ def test_fetch_chunks_single_chunk_no_notes(monkeypatch, capsys):
 
 
 def test_fetch_chunks_yields_per_batch_in_order(monkeypatch):
-    monkeypatch.setattr(sacct, "JOBID_ARG_LIMIT", 8)
+    monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
     blob = make_blob(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         assert "," not in cmd[2]
         return _record_line(cmd[2], blob)
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
-    chunks = list(sacct.fetch_chunks(["10000001", "10000002"], None))
+    monkeypatch.setattr(slurm, "run_capture", fake)
+    chunks = list(slurm.fetch_chunks(["10000001", "10000002"], None))
     assert [ready for ready, _ in chunks] == [["10000001"], ["10000002"]]
     # the records dict is cumulative: the last yield sees every job so far
     assert "10000001" in chunks[1][1] and "10000002" in chunks[1][1]
 
 
 def test_fetch_chunks_alias_applied_at_yield(monkeypatch):
-    monkeypatch.setattr(sacct, "JOBID_ARG_LIMIT", 8)
+    monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
     blob = make_blob(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         return _record_line(cmd[2], blob)
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
-    chunks = list(sacct.fetch_chunks(["18114115_[0-719%64]", "99999999"], None))
+    monkeypatch.setattr(slurm, "run_capture", fake)
+    chunks = list(slurm.fetch_chunks(["18114115_[0-719%64]", "99999999"], None))
     ready, records = chunks[0]
     assert ready == ["18114115_[0-719%64]"]
     assert "18114115_[0-719%64]" in records
@@ -436,28 +436,28 @@ def test_fetch_chunks_prefix_preserves_global_order(monkeypatch):
     # The two bracketed ids share a base queried in chunk 1, but the middle
     # id's base is only queried in chunk 2 -- the third id must wait so that
     # the concatenated yields equal the input order.
-    monkeypatch.setattr(sacct, "JOBID_ARG_LIMIT", 8)
+    monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
     blob = make_blob(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         return _record_line(cmd[2], blob)
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     requested = ["18114115_[0-9]", "99999999", "18114115_[10-19]"]
-    chunks = list(sacct.fetch_chunks(requested, None))
+    chunks = list(slurm.fetch_chunks(requested, None))
     assert [ready for ready, _ in chunks] == [
         ["18114115_[0-9]"], ["99999999", "18114115_[10-19]"]]
 
 
 def test_fetch_chunks_progress_notes(monkeypatch, capsys):
-    monkeypatch.setattr(sacct, "JOBID_ARG_LIMIT", 8)
+    monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
     blob = make_blob(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         return _record_line(cmd[2], blob)
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
-    list(sacct.fetch_chunks(["10000001", "10000002"], None))
+    monkeypatch.setattr(slurm, "run_capture", fake)
+    list(slurm.fetch_chunks(["10000001", "10000002"], None))
     err = capsys.readouterr().err
     assert "2 jobs selected -- fetching sacct data in 2 batches" in err
     assert "batch 1/2" not in err  # throttled: below the NOTE_EVERY cadence
@@ -466,24 +466,24 @@ def test_fetch_chunks_progress_notes(monkeypatch, capsys):
 
 def test_fetch_chunks_uses_jobs_per_chunk(monkeypatch):
     # The count bound splits even when the byte limit is nowhere near binding.
-    monkeypatch.setattr(sacct, "JOBS_PER_CHUNK", 2)
+    monkeypatch.setattr(slurm, "JOBS_PER_CHUNK", 2)
     blob = make_blob(GPU_STATS)
     calls = []
-    monkeypatch.setattr(sacct, "run_capture", _fake_fetch_run_capture(calls, blob))
-    list(sacct.fetch_chunks(["1", "2", "3", "4", "5"], None))
+    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, blob))
+    list(slurm.fetch_chunks(["1", "2", "3", "4", "5"], None))
     assert [len(c) for c in calls] == [2, 2, 1]
 
 
 def test_fetch_chunks_notes_throttled(monkeypatch, capsys):
-    monkeypatch.setattr(sacct, "JOBS_PER_CHUNK", 1)
-    monkeypatch.setattr(sacct, "NOTE_EVERY", 2)
+    monkeypatch.setattr(slurm, "JOBS_PER_CHUNK", 1)
+    monkeypatch.setattr(slurm, "NOTE_EVERY", 2)
     blob = make_blob(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         return _record_line(cmd[2], blob)
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
-    list(sacct.fetch_chunks(["1", "2", "3", "4"], None))
+    monkeypatch.setattr(slurm, "run_capture", fake)
+    list(slurm.fetch_chunks(["1", "2", "3", "4"], None))
     err = capsys.readouterr().err
     assert "4 jobs selected -- fetching sacct data in 4 batches" in err
     assert "batch 2/4 done (2/4 jobs)" in err   # crossed the 2-job cadence
@@ -492,14 +492,14 @@ def test_fetch_chunks_notes_throttled(monkeypatch, capsys):
 
 
 def test_fetch_chunks_final_note_always_prints(monkeypatch, capsys):
-    monkeypatch.setattr(sacct, "JOBS_PER_CHUNK", 1)
+    monkeypatch.setattr(slurm, "JOBS_PER_CHUNK", 1)
     blob = make_blob(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         return _record_line(cmd[2], blob)
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
-    list(sacct.fetch_chunks(["1", "2", "3"], None))
+    monkeypatch.setattr(slurm, "run_capture", fake)
+    list(slurm.fetch_chunks(["1", "2", "3"], None))
     err = capsys.readouterr().err
     assert "batch 3/3 done (3/3 jobs)" in err  # completion note despite no cadence crossing
     assert "batch 1/3" not in err and "batch 2/3" not in err
@@ -509,7 +509,7 @@ def test_run_capture_oserror_raises_jobscope_error(monkeypatch):
     def boom(*a, **k):
         raise OSError(errno.E2BIG, "Argument list too long")
 
-    monkeypatch.setattr(sacct.subprocess, "Popen", boom)
+    monkeypatch.setattr(slurm.subprocess, "Popen", boom)
     with pytest.raises(JobscopeError) as exc:
         run_capture(["sacct", "-j", "1"], None, "sacct query")
     assert "narrow" in str(exc.value).lower()
@@ -519,7 +519,7 @@ def test_run_capture_oserror_soft_returns_none(monkeypatch):
     def boom(*a, **k):
         raise OSError(errno.E2BIG, "Argument list too long")
 
-    monkeypatch.setattr(sacct.subprocess, "Popen", boom)
+    monkeypatch.setattr(slurm.subprocess, "Popen", boom)
     assert run_capture(["sacct", "-j", "1"], None, "sacct query", soft=True) is None
 
 
@@ -531,7 +531,7 @@ def test_the_state_filter_is_always_passed_to_sacct(monkeypatch):
         seen["cmd"] = cmd
         return "100|COMPLETED\n"
 
-    monkeypatch.setattr(sacct, "run_capture", fake)
+    monkeypatch.setattr(slurm, "run_capture", fake)
     select_jobs(Selection(user="alice"), None)
     assert "-s" in seen["cmd"]
     assert seen["cmd"][seen["cmd"].index("-s") + 1] == "COMPLETED"
@@ -541,7 +541,7 @@ def test_the_state_filter_is_always_passed_to_sacct(monkeypatch):
 
 
 def test_state_groups_are_separable_and_composable():
-    from jobscope.sacct import states_for
+    from jobscope.slurm import states_for
     assert states_for("completed") == ("COMPLETED",)
     assert "TIMEOUT" not in states_for("failed")      # no longer an umbrella
     assert set(states_for("failed,timeout")) == set(states_for("failed")) | set(

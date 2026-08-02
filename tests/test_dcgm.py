@@ -114,8 +114,8 @@ def test_key_specs_is_the_curated_ts_default():
 
 def test_dcgm_and_live_columns_are_identical():
     """A finished job and a running one must be described by the same columns."""
-    from jobscope.live import DEFAULT_LIVE_SPECS, build_columns
-    assert columns_for(DEFAULT_SPECS) == build_columns(DEFAULT_LIVE_SPECS)
+    from jobscope.running import DEFAULT_RUNNING_SPECS, build_columns
+    assert columns_for(DEFAULT_SPECS) == build_columns(DEFAULT_RUNNING_SPECS)
     assert [h for _k, h, _d in columns_for(DEFAULT_SPECS)] == [
         "GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
 
@@ -330,7 +330,7 @@ def test_the_live_view_drops_counter_deltas():
     blob from a window that has not finished, so the number would mean nothing."""
     from jobscope.dcgm import specs_named
     assert [s.header for s in specs_named(["gpu", "energy"])] == ["GPU%", "ENERGY_kWh"]
-    assert [s.header for s in specs_named(["gpu", "energy"], live=True)] == ["GPU%"]
+    assert [s.header for s in specs_named(["gpu", "energy"], running=True)] == ["GPU%"]
 
 
 def test_the_built_in_lists_are_reproducible_by_name():

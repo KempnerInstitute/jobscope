@@ -1,4 +1,9 @@
-"""Job selection and the bulk sacct fetch.
+"""Slurm as a data source: which jobs exist, and what Slurm itself knows about them.
+
+Named for the scheduler rather than for ``sacct`` because both of Slurm's job
+listings belong here -- ``sacct`` for finished jobs and ``squeue``, via
+:mod:`jobscope.running`, for the ones running now. Everything downstream asks this
+module "which jobs", and asks Prometheus what they did.
 
 Jobs are selected with one ``sacct`` query, then all of their data is retrieved
 with bulk ``sacct -j`` queries, no per-job jobstats calls and no job-count
@@ -28,7 +33,7 @@ TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S"
 # because they are different problems: a timeout usually means the walltime or the
 # resource request was wrong, a cancellation is a person, and a true failure is the
 # job itself. RUNNING and PENDING appear in none of them -- `finished` means finished,
-# and `jobscope running` is the live view.
+# and `jobscope running` is the running view.
 STATE_GROUPS = {
     "completed": ("COMPLETED",),
     "failed": ("FAILED", "OUT_OF_MEMORY", "NODE_FAIL", "BOOT_FAIL"),

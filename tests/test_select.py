@@ -10,7 +10,7 @@ from jobscope.dcgm import DEFAULT_SPECS
 from jobscope.errors import JobscopeError
 from jobscope.job_ave_stats import needs_fill
 from jobscope.report import RenderOptions
-from jobscope.sacct import TIMESTAMP_FORMAT, JobRecord
+from jobscope.slurm import TIMESTAMP_FORMAT, JobRecord
 from jobscope.select import (
     BLOB_SPECS,
     FINISHED,
@@ -181,8 +181,8 @@ def test_emit_timeseries_dispatches_to_cpu_for_a_running_request(monkeypatch):
     monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, t: dict(JOBS))
     monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: object())
     calls = []
-    monkeypatch.setattr(select_mod, "live_cpu_timeseries",
-                        lambda *a, **k: calls.append(("live_cpu", a, k)))
+    monkeypatch.setattr(select_mod, "running_cpu_timeseries",
+                        lambda *a, **k: calls.append(("running_cpu", a, k)))
 
     def boom(*a, **k):
         raise AssertionError("GPU discovery must not run for a --cpu --ts request")
@@ -234,16 +234,16 @@ def test_emit_timeseries_combined_wins_over_cpu_only_when_both_are_set(monkeypat
 
 
 def test_emit_timeseries_dispatches_to_combined_for_a_running_request(monkeypatch):
-    """The new default (combined) view must skip live_cpu_timeseries for a live
+    """The new default (combined) view must skip running_cpu_timeseries for a live
     selection, and still do GPU discovery (unlike cpu-only)."""
-    _patch_live(monkeypatch)
+    _patch_running(monkeypatch)
     calls = []
-    monkeypatch.setattr(select_mod, "live_combined_timeseries",
-                        lambda *a, **k: calls.append(("live_combined", a, k)))
+    monkeypatch.setattr(select_mod, "running_combined_timeseries",
+                        lambda *a, **k: calls.append(("running_combined", a, k)))
 
     def boom(*a, **k):
-        raise AssertionError("live_cpu_timeseries must not run when combined")
-    monkeypatch.setattr(select_mod, "live_cpu_timeseries", boom)
+        raise AssertionError("running_cpu_timeseries must not run when combined")
+    monkeypatch.setattr(select_mod, "running_cpu_timeseries", boom)
 
     emit_timeseries(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
                     None, RenderOptions(view="all", combined=True))
@@ -264,7 +264,7 @@ def test_no_matching_jobs_names_all_users(monkeypatch, capsys):
 
 # --- the squeue branch ------------------------------------------------------
 
-class FakeLiveClient:
+class FakeRunningClient:
     """Serves the series the live branch needs, and counts the queries."""
 
     sampling_period = 60
@@ -297,8 +297,8 @@ JOBS = {7: {"jobid": "7", "user": "alice", "node": "node01", "name": "train",
             "start_epoch": 1000, "elapsed_seconds": 100}}
 
 
-def _patch_live(monkeypatch, client=None):
-    client = client or FakeLiveClient()
+def _patch_running(monkeypatch, client=None):
+    client = client or FakeRunningClient()
     monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, t: dict(JOBS))
     monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: client)
     return client
@@ -306,7 +306,7 @@ def _patch_live(monkeypatch, client=None):
 
 def test_running_yields_records_that_look_finished(monkeypatch):
     """The squeue branch must be indistinguishable from sacct downstream."""
-    _patch_live(monkeypatch)
+    _patch_running(monkeypatch)
     selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS)
     (jobids, records, dcgm_data), = list(selected.chunks)
     assert jobids == ["7"]
@@ -321,7 +321,7 @@ def test_running_yields_records_that_look_finished(monkeypatch):
 
 
 def test_running_provides_the_per_gpu_metrics(monkeypatch):
-    _patch_live(monkeypatch)
+    _patch_running(monkeypatch)
     selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS)
     (_ids, _records, dcgm_data), = list(selected.chunks)
     per_gpu = dcgm_data["7"][1]
@@ -331,7 +331,7 @@ def test_running_provides_the_per_gpu_metrics(monkeypatch):
 
 def test_running_without_specs_still_builds_the_blob(monkeypatch):
     """--cpu needs CPU%, which comes from the reconstructed blob."""
-    client = _patch_live(monkeypatch)
+    client = _patch_running(monkeypatch)
     selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, None)
     (_ids, records, _d), = list(selected.chunks)
     from jobscope.blob import blob_metrics
@@ -343,14 +343,14 @@ def test_running_without_specs_still_builds_the_blob(monkeypatch):
 
 
 def test_running_context_names_the_owner_for_explicit_ids(monkeypatch):
-    _patch_live(monkeypatch)
+    _patch_running(monkeypatch)
     selected = resolve(Request(mode=RUNNING, jobids=["7"], user=None),
                        _cfg(), None, 1, DEFAULT_SPECS)
     assert ("User", "alice") in selected.context
 
 
 def test_running_context_says_all_users(monkeypatch):
-    _patch_live(monkeypatch)
+    _patch_running(monkeypatch)
     selected = resolve(Request(mode=RUNNING, all_users=True, user=None),
                        _cfg(), None, 1, DEFAULT_SPECS)
     assert ("User", "(all users)") in selected.context
@@ -379,7 +379,7 @@ def test_the_empty_running_message_names_the_filters_and_how_to_widen(monkeypatc
 
 def test_both_branches_yield_the_same_chunk_shape(monkeypatch, gpu_record):
     """The contract that lets one renderer serve both sources."""
-    _patch_live(monkeypatch)
+    _patch_running(monkeypatch)
     live = list(resolve(Request(mode=RUNNING, user="alice"),
                         _cfg(), None, 1, DEFAULT_SPECS).chunks)
 

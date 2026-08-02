@@ -74,13 +74,13 @@ cannot drift apart.
 `(jobids, records, dcgm_data)` chunks from either source, so no renderer knows
 which it got. Two details let the squeue side pass for the sacct side:
 
-- `live.live_records` synthesizes the blob Slurm has not written yet (§5), so a
+- `running.running_records` synthesizes the blob Slurm has not written yet (§5), so a
   running job looks like a record with stored stats.
 - `cpu.host_stats_many` batches the `cgroup_*` queries across every selected
   job -- four queries in total rather than four per job. Those series are per-job
   and do not exist outside their job's lifetime, so one shared window (the longest
   job's) cannot pull another job's samples in. Per-job round trips made a
-  cluster-wide live view unusable: 8000 running jobs meant 32000 queries.
+  cluster-wide running view unusable: 8000 running jobs meant 32000 queries.
 
 `NODE` is the node count and `#GPU` the allocated GPU count. Under `running`,
 `STATE` is always `RUNNING`, and `CPU%`/`MEM%` are cumulative in both modes --
@@ -160,7 +160,7 @@ Two strategies follow from that, and the difference matters:
 - **Historical** (`jobscope/dcgm.py`) filters server-side per job:
   `max_over_time((nvidia_gpu_jobId{slurm_cluster=...} == <raw>)[<duration>s:])`
   evaluated at the job's end. Correct for a job whose window is known.
-- **Running** (`jobscope/live.py`) issues one *unwindowed* instant query for all of
+- **Running** (`jobscope/running.py`) issues one *unwindowed* instant query for all of
   `nvidia_gpu_jobId` and filters client-side by value. This is not an
   optimization — a single GPU can host a dozen jobs in a day, so any windowed
   lookup would hand the same GPU to every job that touched it. One query returns
@@ -199,7 +199,7 @@ element `36410890_2` appears as `jobid="36410916"`.
   `ordinal`, so a `3g.20gb` pair both report minor 0.
 
 Only the UUID is unique, and its prefix says what the device is: `GPU-…` for a
-whole card, `MIG-…` for an instance. The live view therefore keys rows by UUID and
+whole card, `MIG-…` for an instance. The running view therefore keys rows by UUID and
 labels them `GPU 0` or `MIG 0.1`, enumerating siblings that share a
 `(job, host, minor)` by sorted UUID (NVML exposes no instance index; the ordering
 is stable as long as the partitioning is).
@@ -554,7 +554,7 @@ resource-time only.
 
 `mean` by default; `max` for peak-like metrics; `sum` for energy. The per-job
 figure in the summary view uses this; the per-GPU rows in `detail`, `dcgm` and
-`live` do not reduce across GPUs at all.
+`running` do not reduce across GPUs at all.
 
 Note the aggregation runs over **UUIDs**, not over `(node, minor)` pairs, so MIG
 siblings are not silently dropped from a job-level mean.
@@ -562,7 +562,7 @@ siblings are not silently dropped from a job-level mean.
 ### Instant versus windowed
 
 `jobscope running` defaults to the newest single scrape — no time reduction at
-all. It is the only mode that does, and it is why live numbers need not match
+all. It is the only mode that does, and it is why running numbers need not match
 jobstats. `running --avg` applies the reductions above and does match.
 
 ---

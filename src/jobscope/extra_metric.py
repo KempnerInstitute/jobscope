@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from .errors import JobscopeError
-from .sacct import run_capture
+from .slurm import run_capture
 
 # The fields one sacct call needs to answer everything here. Order matters: it is
 # positional on the way back out.
@@ -306,7 +306,7 @@ def validate(out, jobid: str, client, timeout: Optional[float]) -> int:
     """
     from .blob import blob_metrics
     from .job_ave_stats import synthesize_stats
-    from .sacct import fetch
+    from .slurm import fetch
 
     records = fetch([jobid], timeout)
     record = records.get(jobid) or next(iter(records.values()), None)

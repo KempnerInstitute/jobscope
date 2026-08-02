@@ -21,8 +21,8 @@ from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 from . import config
 from .dcgm import BLOB_BACKED_KEYS, DEFAULT_SPECS, MetricSpec, compute_dcgm
 from .errors import JobscopeError
-from .live import (
-    LiveSelection,
+from .running import (
+    RunningSelection,
     aggregate_by_job,
     collect_averaged,
     collect_instant,
@@ -30,7 +30,7 @@ from .live import (
     discover_gpus,
     fetch_jobs,
     job_sort_key,
-    live_records,
+    running_records,
     per_gpu_by_node_minor,
 )
 from .job_ave_stats import fill_running, needs_fill, note_offline_gap
@@ -41,12 +41,12 @@ from .report import (
     context_pairs,
     cpu_timeseries,
     dcgm_timeseries,
-    live_combined_timeseries,
-    live_cpu_timeseries,
-    live_timeseries,
+    running_combined_timeseries,
+    running_cpu_timeseries,
+    running_timeseries,
     no_such_node,
 )
-from .sacct import (
+from .slurm import (
     JobRecord,
     Selection,
     days_to_window,
@@ -99,7 +99,7 @@ class Request:
     no_blob: bool = False
 
     @property
-    def live(self) -> bool:
+    def running(self) -> bool:
         return self.mode == RUNNING
 
 
@@ -121,21 +121,21 @@ def resolve(request: Request, cfg: config.Config, timeout: Optional[float],
     Both halves of ``dcgm_data`` are otherwise populated: the job-level metrics the
     default granularity renders, and the per-GPU ones ``--per-gpu`` needs. Neither
     branch pays extra for the second -- ``compute_dcgm`` returns it anyway, and the
-    live equivalent is pure dict work over values already collected.
+    running equivalent is pure dict work over values already collected.
     """
-    if request.live:
+    if request.running:
         return _resolve_running(request, cfg, timeout, workers, specs)
     return _resolve_historical(request, cfg, timeout, workers, specs)
 
 
 # --- squeue -----------------------------------------------------------------
 
-def _live_selection(request: Request) -> LiveSelection:
-    return LiveSelection(jobids=list(request.jobids), partition=request.partition,
+def _running_selection(request: Request) -> RunningSelection:
+    return RunningSelection(jobids=list(request.jobids), partition=request.partition,
                          user=request.user, min_elapsed=request.min_elapsed)
 
 
-def _live_context(selection: LiveSelection, jobs: dict, gpus: dict
+def _running_context(selection: RunningSelection, jobs: dict, gpus: dict
                   ) -> List[Tuple[str, str]]:
     """Header context for a squeue selection.
 
@@ -174,10 +174,10 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
                      workers: int, specs: Optional[List[MetricSpec]]) -> Optional[Resolved]:
     """One chunk from squeue plus Prometheus, shaped like a sacct chunk.
 
-    ``live_records`` synthesizes the blob Slurm has not written yet, so the records
+    ``running_records`` synthesizes the blob Slurm has not written yet, so the records
     are indistinguishable from finished ones to everything downstream.
     """
-    selection = _live_selection(request)
+    selection = _running_selection(request)
     jobs = fetch_jobs(selection, timeout)
     if not jobs:
         _report_no_running(selection)
@@ -190,13 +190,13 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
         print("No GPU data in Prometheus for these jobs (CPU-only, or not yet scraped).",
               file=sys.stderr)
 
-    # A --cpu report still needs the blob-backed GPU metrics, because live_records
+    # A --cpu report still needs the blob-backed GPU metrics, because running_records
     # assembles the blob from them -- but only those, so it does not pay for the
     # DCGM profiling queries whose columns it will not print.
     specs = specs or BLOB_SPECS
     metrics = (collect_averaged(client, jobs, gpus, specs, timeout, workers)
                if request.average else collect_instant(client, gpus, specs, timeout))
-    records = live_records(jobs, gpus, metrics, specs, client, timeout)
+    records = running_records(jobs, gpus, metrics, specs, client, timeout)
     per_job = aggregate_by_job(metrics, specs)
     per_gpu = per_gpu_by_node_minor(metrics, gpus, specs)
     dcgm_data: DcgmData = {
@@ -204,7 +204,7 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
         for raw, job in jobs.items()}
     jobids = sorted((job["jobid"] for job in jobs.values()),
                     key=lambda jid: job_sort_key({"jobid": jid}))
-    return Resolved(_live_context(selection, jobs, gpus),
+    return Resolved(_running_context(selection, jobs, gpus),
                     iter([(jobids, records, dcgm_data)]))
 
 
@@ -214,7 +214,7 @@ def sacct_selection(request: Request) -> Selection:
     """The sacct-side selection for a finished or explicit-ID request.
 
     This is where a scope becomes an actual window, and it must happen: with no
-    ``starttime``, :func:`jobscope.sacct.select_jobs` falls back to ``now-30days``,
+    ``starttime``, :func:`jobscope.slurm.select_jobs` falls back to ``now-30days``,
     so a request carrying only ``days`` would scan a month while the header
     truthfully claimed "last 1 day". ``days`` is kept alongside for that header.
     """
@@ -327,15 +327,15 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
     ``out`` sends the CSV somewhere other than stdout, which is how ``--plot_ts``
     captures it and charts it in the same command.
     """
-    if request.live:
-        selection = _live_selection(request)
+    if request.running:
+        selection = _running_selection(request)
         jobs = fetch_jobs(selection, timeout)
         if not jobs:
             _report_no_running(selection)
             return
         client = client_from_config(cfg, timeout)
         if not options.combined and options.view == "cpu":
-            live_cpu_timeseries(jobs, client, timeout, options, workers, step, out=out)
+            running_cpu_timeseries(jobs, client, timeout, options, workers, step, out=out)
             return
         gpus = discover_gpus(client, jobs, timeout)
         if options.nodename:
@@ -348,10 +348,10 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
         samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, step,
                                      window=options.window)
         if options.combined:
-            live_combined_timeseries(jobs, samples, gpus, specs, client, timeout, options,
+            running_combined_timeseries(jobs, samples, gpus, specs, client, timeout, options,
                                      workers, step, out=out)
             return
-        live_timeseries(jobs, samples, gpus, specs, options, out=out)
+        running_timeseries(jobs, samples, gpus, specs, options, out=out)
         return
 
     selection = sacct_selection(request)

@@ -35,7 +35,7 @@ DEFAULT_TIMEOUT = 60.0
 DEFAULT_MIN_ELAPSED = "10m"
 # The `finished` window when no -D/-N/-S/-E is given.
 DEFAULT_DAYS = 1
-# Which job endings `finished` reports without -t. See sacct.STATE_GROUPS.
+# Which job endings `finished` reports without -t. See slurm.STATE_GROUPS.
 DEFAULT_STATE = "completed"
 # How many jobs each Problem-jobs "Wasteful" row lists. Three because the row is a
 # lead, not a census -- the counts beside its heading say how many there were.
@@ -213,8 +213,8 @@ class Palette:
 def parse_duration(text: str) -> int:
     """Seconds from a compact duration such as ``30s``, ``5m``, ``2h``, ``7d``.
 
-    Here rather than in live.py, which is where it started: config needs it too, for
-    the duration-valued ``[defaults]`` keys, and config cannot import live.
+    Here rather than in running.py, which is where it started: config needs it too,
+    for the duration-valued ``[defaults]`` keys, and config cannot import it.
     """
     match = re.match(r"^(\d+)([smhd])$", str(text).strip())
     if not match:
@@ -636,7 +636,7 @@ class Defaults:
     days: int = DEFAULT_DAYS
     # Which job endings `finished` reports without -t. The default hides
     # FAILED/TIMEOUT/CANCELLED, which is worth being able to set once per site
-    # rather than typing every run. Validated against sacct.STATE_GROUPS.
+    # rather than typing every run. Validated against slurm.STATE_GROUPS.
     state: str = DEFAULT_STATE
     # How many jobs each Problem-jobs "Wasteful" row lists.
     worst_jobs: int = DEFAULT_WORST_JOBS
@@ -683,15 +683,6 @@ class Metrics:
             if missing:
                 object.__setattr__(self, name, tuple(specs_named(
                     [s.key for s in listed] + [s.key for s in missing])))
-
-    def live(self, which: str) -> Tuple:
-        """``which``'s specs for the running view, which cannot use a counter delta.
-
-        ENERGY_kWh is a difference over a finished window; the running view
-        synthesizes a jobstats-shaped blob from a window that has not finished, so
-        the number would be meaningless rather than merely partial.
-        """
-        return tuple(spec for spec in getattr(self, which) if spec.reducer != "delta")
 
 
 @dataclass(frozen=True)
@@ -875,7 +866,7 @@ def _state_name(raw) -> str:
     disagree about the vocabulary -- including ``all``, comma-separated groups, and
     the refusal of live states.
     """
-    from .sacct import states_for
+    from .slurm import states_for
     name = str(raw).strip().lower()
     try:
         states_for(name)

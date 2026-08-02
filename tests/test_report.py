@@ -22,7 +22,7 @@ from jobscope.report import (
     fmt_context,
     summarize,
 )
-from jobscope.sacct import JobRecord, Selection
+from jobscope.slurm import JobRecord, Selection
 
 CTX = [("User", "alice"), ("Select", "x")]
 
@@ -85,7 +85,7 @@ def test_an_explicit_window_is_not_repeated():
 
 
 def test_explicit_job_ids_have_no_window():
-    from jobscope.sacct import Selection
+    from jobscope.slurm import Selection
     pairs = dict(context_pairs(Selection(user="alice", jobids=["1"]), "1 job ID(s)", {}))
     assert "Window" not in pairs
 

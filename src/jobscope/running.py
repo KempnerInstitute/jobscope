@@ -1,4 +1,4 @@
-"""The live view: GPU metrics for the jobs running right now.
+"""The running view: GPU metrics for the jobs running right now.
 
 The historical views start from ``sacct`` and reduce each metric over a job's
 finished ``[start, end]`` window. This one starts from ``squeue`` and, by default,
@@ -44,13 +44,13 @@ from .errors import JobscopeError
 from .cpu import host_stats_many
 from .job_ave_stats import stats_dict
 from .prometheus import PrometheusClient
-from .sacct import JobRecord, run_capture
+from .slurm import JobRecord, run_capture
 
 # One job's squeue fields, plus the derived start_epoch / elapsed_seconds.
-LiveJob = Dict[str, Any]
+RunningJob = Dict[str, Any]
 # {raw_jobid: {gpu_uuid: {metric key: value}}}. Keyed by UUID rather than
 # minor_number, which is not unique per schedulable GPU -- see gpu_labels.
-LiveMetrics = Dict[int, Dict[str, Dict[str, Optional[float]]]]
+RunningMetrics = Dict[int, Dict[str, Dict[str, Optional[float]]]]
 
 # %A first, then %i: %A is the raw per-element job ID that nvidia_gpu_jobId
 # reports, %i the display form (they differ for array elements). Pipe-delimited
@@ -85,7 +85,7 @@ class Gpu(NamedTuple):
 
 
 @dataclass
-class LiveSelection:
+class RunningSelection:
     """Which running jobs to report on."""
 
     jobids: List[str] = field(default_factory=list)
@@ -133,7 +133,7 @@ class LiveSelection:
         return hints
 
 
-# The live catalogs. Deliberately the same specs the dcgm view uses, so a running
+# The running catalogs. Deliberately the same specs the dcgm view uses, so a running
 # job and a finished one are described by identical columns:
 #
 #   GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
@@ -141,16 +141,16 @@ class LiveSelection:
 # The summary and detail views omit GPU% and the GMEM columns from their DCGM set
 # because they render those from the blob instead; a running job has no blob, so
 # here Prometheus is the only source and nothing is dropped.
-DEFAULT_LIVE_SPECS: List[MetricSpec] = DEFAULT_SPECS
+DEFAULT_RUNNING_SPECS: List[MetricSpec] = DEFAULT_SPECS
 # --all appends the extended catalog, minus delta-reduced counters (ENERGY_kWh):
 # a delta needs two points, so it is meaningless in an instant snapshot.
-EXTENDED_LIVE_SPECS: List[MetricSpec] = DEFAULT_LIVE_SPECS + [
+EXTENDED_RUNNING_SPECS: List[MetricSpec] = DEFAULT_RUNNING_SPECS + [
     s for s in ALL_SPECS if s.group == "all" and s.reducer != "delta"]
 
 
 def specs_for(view: Optional[str]) -> List[MetricSpec]:
-    """The metric catalog for a live view: the default set, or ``all``."""
-    return EXTENDED_LIVE_SPECS if view == "all" else DEFAULT_LIVE_SPECS
+    """The metric catalog for a running view: the default set, or ``all``."""
+    return EXTENDED_RUNNING_SPECS if view == "all" else DEFAULT_RUNNING_SPECS
 
 
 # Moved to config, which needs it for the duration-valued [defaults] keys and
@@ -181,13 +181,13 @@ def parse_start_time(start_time: str) -> Tuple[Optional[int], Optional[int]]:
     return epoch, int(time.time()) - epoch
 
 
-def parse_squeue(stdout: str) -> Dict[int, LiveJob]:
+def parse_squeue(stdout: str) -> Dict[int, RunningJob]:
     """Parse :data:`SQUEUE_FORMAT` output into ``{raw_jobid: job}``.
 
     Keyed by the raw ID so the Prometheus join works for array elements too; the
     displayed ID keeps squeue's own notation.
     """
-    jobs: Dict[int, LiveJob] = {}
+    jobs: Dict[int, RunningJob] = {}
     for line in stdout.strip().split("\n"):
         if not line or line.startswith("JOBID"):
             continue
@@ -217,7 +217,7 @@ def parse_squeue(stdout: str) -> Dict[int, LiveJob]:
     return jobs
 
 
-def job_sort_key(job: LiveJob) -> Tuple[int, int]:
+def job_sort_key(job: RunningJob) -> Tuple[int, int]:
     """Sort key from the displayed job ID: ``(base id, array index)``.
 
     Keeps elements of one array together and in index order. Raw IDs are assigned
@@ -236,7 +236,7 @@ def job_sort_key(job: LiveJob) -> Tuple[int, int]:
     return (base_n, index_n)
 
 
-def fetch_jobs(selection: LiveSelection, timeout: Optional[float]) -> Dict[int, LiveJob]:
+def fetch_jobs(selection: RunningSelection, timeout: Optional[float]) -> Dict[int, RunningJob]:
     """Running jobs matching ``selection``, keyed by raw job ID.
 
     Explicit job IDs bypass the partition/user filters and the runtime floor, as
@@ -266,7 +266,7 @@ def fetch_jobs(selection: LiveSelection, timeout: Optional[float]) -> Dict[int, 
     return filter_by_elapsed(jobs, selection.min_elapsed)
 
 
-def filter_by_elapsed(jobs: Dict[int, LiveJob], min_seconds: int) -> Dict[int, LiveJob]:
+def filter_by_elapsed(jobs: Dict[int, RunningJob], min_seconds: int) -> Dict[int, RunningJob]:
     """Drop jobs that have not been running longer than ``min_seconds``."""
     kept = {}
     for raw_jobid, job in jobs.items():
@@ -306,7 +306,7 @@ def gpu_labels(found: List[Tuple[str, int, str, int]]) -> Dict[str, str]:
     return labels
 
 
-def discover_gpus(client: PrometheusClient, jobs: Dict[int, LiveJob],
+def discover_gpus(client: PrometheusClient, jobs: Dict[int, RunningJob],
                   timeout: Optional[float]) -> Dict[str, Gpu]:
     """Map GPU UUID -> :class:`Gpu` for the given jobs.
 
@@ -350,7 +350,7 @@ def _uuid_regex(uuids) -> str:
     return "^(" + "|".join(uuids) + ")$"
 
 
-def _store(results: LiveMetrics, gpus: Dict[str, Gpu], spec: MetricSpec,
+def _store(results: RunningMetrics, gpus: Dict[str, Gpu], spec: MetricSpec,
            series: List[dict], jobid: Optional[int] = None) -> None:
     """File one query's series into ``results`` under (job, uuid, metric key)."""
     for entry in series:
@@ -368,9 +368,9 @@ def _store(results: LiveMetrics, gpus: Dict[str, Gpu], spec: MetricSpec,
 
 
 def collect_instant(client: PrometheusClient, gpus: Dict[str, Gpu],
-                    specs: List[MetricSpec], timeout: Optional[float]) -> LiveMetrics:
+                    specs: List[MetricSpec], timeout: Optional[float]) -> RunningMetrics:
     """The newest scrape of every metric, one query per metric across all GPUs."""
-    results: LiveMetrics = defaultdict(lambda: defaultdict(dict))
+    results: RunningMetrics = defaultdict(lambda: defaultdict(dict))
     regex = _uuid_regex(gpus)
     for spec in specs:
         query = '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex)
@@ -383,9 +383,9 @@ def collect_instant(client: PrometheusClient, gpus: Dict[str, Gpu],
     return results
 
 
-def collect_averaged(client: PrometheusClient, jobs: Dict[int, LiveJob],
+def collect_averaged(client: PrometheusClient, jobs: Dict[int, RunningJob],
                      gpus: Dict[str, Gpu], specs: List[MetricSpec],
-                     timeout: Optional[float], workers: int) -> LiveMetrics:
+                     timeout: Optional[float], workers: int) -> RunningMetrics:
     """Each metric folded over each job's own runtime, as jobstats does.
 
     Utilization is averaged and memory peaked, per each spec's ``reducer``. The
@@ -393,7 +393,7 @@ def collect_averaged(client: PrometheusClient, jobs: Dict[int, LiveJob],
     one query per (job, metric) -- run concurrently, since the count grows with
     the selection.
     """
-    results: LiveMetrics = defaultdict(lambda: defaultdict(dict))
+    results: RunningMetrics = defaultdict(lambda: defaultdict(dict))
     by_job = defaultdict(list)
     for uuid, gpu in gpus.items():
         by_job[gpu.jobid].append(uuid)
@@ -440,7 +440,7 @@ def clip_to_job(spec: MetricSpec, raw_jobid: int) -> Optional[str]:
             if spec.uuid_label == "uuid" else None)
 
 
-def add_derived(results: LiveMetrics, specs: List[MetricSpec]) -> None:
+def add_derived(results: RunningMetrics, specs: List[MetricSpec]) -> None:
     """Fill in derived columns whose input metrics were all queried.
 
     Values here are keyed by metric key throughout, so the shared ``fn`` can read
@@ -492,7 +492,7 @@ def range_window(start: int, end: int, window: Optional[int], sampling_period: i
     return begin, step
 
 
-def collect_timeseries(client: PrometheusClient, jobs: Dict[int, LiveJob],
+def collect_timeseries(client: PrometheusClient, jobs: Dict[int, RunningJob],
                        gpus: Dict[str, Gpu], specs: List[MetricSpec],
                        timeout: Optional[float], workers: int,
                        step: Optional[int] = None,
@@ -551,11 +551,11 @@ def collect_timeseries(client: PrometheusClient, jobs: Dict[int, LiveJob],
     return samples
 
 
-# The live and dcgm views lay out the same columns, so they share one builder.
+# The running and dcgm views lay out the same columns, so they share one builder.
 build_columns = columns_for
 
 
-def aggregate_by_job(metrics: LiveMetrics, specs: List[MetricSpec],
+def aggregate_by_job(metrics: RunningMetrics, specs: List[MetricSpec],
                      ) -> Dict[int, Dict[str, Optional[float]]]:
     """Reduce per-GPU values to one row per job, keyed by column header.
 
@@ -586,12 +586,12 @@ def aggregate_by_job(metrics: LiveMetrics, specs: List[MetricSpec],
     return per_job
 
 
-def per_gpu_by_node_minor(metrics: LiveMetrics, gpus: Dict[str, Gpu],
+def per_gpu_by_node_minor(metrics: RunningMetrics, gpus: Dict[str, Gpu],
                           specs: List[MetricSpec],
                           ) -> Dict[int, Dict[Tuple[str, str], Dict[str, Optional[float]]]]:
     """Re-key per-GPU values to ``(node, minor)`` and headers, for ``--per-gpu``.
 
-    The live collectors key by UUID, which is the only unique GPU identity; the
+    The running collectors key by UUID, which is the only unique GPU identity; the
     detail renderer keys by ``(node, minor)``, which is what the blob uses. MIG
     siblings share a minor, so they collapse here exactly as they do in the blob --
     the honest per-instance view is ``--ts``, which keys by UUID throughout.
@@ -609,13 +609,13 @@ def per_gpu_by_node_minor(metrics: LiveMetrics, gpus: Dict[str, Gpu],
     return out
 
 
-def live_records(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu],
-                 metrics: LiveMetrics, specs: List[MetricSpec],
+def running_records(jobs: Dict[int, RunningJob], gpus: Dict[str, Gpu],
+                 metrics: RunningMetrics, specs: List[MetricSpec],
                  client: PrometheusClient,
                  timeout: Optional[float] = None) -> Dict[str, JobRecord]:
-    """Turn squeue jobs into :class:`~jobscope.sacct.JobRecord`s, keyed by display ID.
+    """Turn squeue jobs into :class:`~jobscope.slurm.JobRecord`s, keyed by display ID.
 
-    This is what lets the live view render through the same code as the historical
+    This is what lets the running view render through the same code as the historical
     ones: once a running job looks like a record with a utilization blob, the summary
     renderer cannot tell the difference, and the two views cannot drift apart.
 

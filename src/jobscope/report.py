@@ -58,10 +58,10 @@ from .classifier import (
     unceilinged,
 )
 from .errors import JobscopeError
-from .live import Gpu, LiveJob, build_columns, job_sort_key, range_window
+from .running import Gpu, RunningJob, build_columns, job_sort_key, range_window
 from .cpu import host_stats, host_stats_many
 from .prometheus import PrometheusClient
-from .sacct import JobRecord, Selection, format_window
+from .slurm import JobRecord, Selection, format_window
 
 
 @dataclass(frozen=True)
@@ -1677,7 +1677,7 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
             seen.add(spec.metric)
             ts_specs.append(spec)
     # Query every spec (including hidden ones, which feed a derived column) but
-    # emit the displayed columns, so this header matches `jobscope live --ts`.
+    # emit the displayed columns, so this header matches `jobscope running --ts`.
     columns = columns_for(specs)
     derived = applicable_derived(specs)
     sampling_period = client.sampling_period
@@ -1690,7 +1690,7 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         Lazily, because a --nodename that matches nothing raises below: a header with
         no rows under it is a CSV that reads as "this node was idle" and confuses
         `jobscope plot` into "no numeric values". Nothing written is the honest answer,
-        and it is what the live path already does.
+        and it is what the running path already does.
         """
         nonlocal wrote_header
         if options.header and not wrote_header:
@@ -1825,7 +1825,7 @@ def cpu_timeseries(jobids: List[str], records: Dict[str, JobRecord],
             # A record here is usually a finished job with its blob already decoded,
             # but an explicit -j ID can also return a job that is still RUNNING (no
             # blob yet) -- rebuild just the two divisors from Prometheus, the same
-            # way job_ave_stats.synthesize_stats() rebuilds the whole blob for the live
+            # way job_ave_stats.synthesize_stats() rebuilds the whole blob for the running
             # view (CPU-seconds/RSS themselves still come from our own range query
             # below, since they need per-timestamp granularity this does not give).
             nodes = host_stats(record.jobid_raw, record.duration, record.end, client, timeout)
@@ -1959,7 +1959,7 @@ def combined_timeseries(jobids: List[str], records: Dict[str, JobRecord],
 # How each spec's window reducer reads in the --describe output.
 _REDUCER_NAME = {"avg": "mean", "max": "peak", "delta": "delta"}
 
-def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
+def _running_rows(jobs: Dict[int, RunningJob], gpus: Dict[str, Gpu]):
     """Yield ``(job, gpu_or_None)`` in display order: by job, then by GPU.
 
     A job with no GPU samples yields once with ``None``, so it still gets a row
@@ -2255,7 +2255,7 @@ def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptio
     out.flush()
 
 
-def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]],
+def running_timeseries(jobs: Dict[int, RunningJob], samples: Dict[str, Dict[int, dict]],
                     gpus: Dict[str, Gpu], specs: List[MetricSpec],
                     options: RenderOptions, out=None) -> None:
     """Emit one CSV row per GPU per sample over each job's runtime.
@@ -2274,7 +2274,7 @@ def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]
         writer.writerow(TS_ID_COLUMNS
                         + [header for _k, header, _d in columns])
 
-    for job, gpu in _live_rows(jobs, gpus):
+    for job, gpu in _running_rows(jobs, gpus):
         if gpu is None:
             continue
         for epoch in sorted(samples.get(gpu.uuid, {})):
@@ -2290,7 +2290,7 @@ def live_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]
                    for key, _h, dec in columns])
 
 
-def live_cpu_timeseries(jobs: Dict[int, LiveJob], client: PrometheusClient,
+def running_cpu_timeseries(jobs: Dict[int, RunningJob], client: PrometheusClient,
                         timeout: Optional[float], options: RenderOptions,
                         workers: int, step: Optional[int] = None, out=None) -> None:
     """Emit the raw per-scrape CPU%/MEM% cgroup series for running jobs as CSV.
@@ -2300,7 +2300,7 @@ def live_cpu_timeseries(jobs: Dict[int, LiveJob], client: PrometheusClient,
     :func:`jobscope.cpu.host_stats_many` call across the whole selection --
     the same one the summary/detail views use to reconstruct CPU%/MEM% -- and the
     per-job range queries run concurrently, the same as
-    :func:`jobscope.live.collect_timeseries` does for the GPU/DCGM case.
+    :func:`jobscope.running.collect_timeseries` does for the GPU/DCGM case.
     """
     out = out or sys.stdout
     writer = csv.writer(out, lineterminator="\n")
@@ -2373,19 +2373,19 @@ def live_cpu_timeseries(jobs: Dict[int, LiveJob], client: PrometheusClient,
         raise no_such_node(options.nodename, nodes_seen)
 
 
-def live_combined_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]],
+def running_combined_timeseries(jobs: Dict[int, RunningJob], samples: Dict[str, Dict[int, dict]],
                              gpus: Dict[str, Gpu], specs: List[MetricSpec],
                              client: PrometheusClient, timeout: Optional[float],
                              options: RenderOptions, workers: int,
                              step: Optional[int] = None, out=None) -> None:
-    """``live_timeseries`` plus each row's node's CPU%/MEM% appended -- the default
+    """``running_timeseries`` plus each row's node's CPU%/MEM% appended -- the default
     running-job ``--ts`` view.
 
-    The GPU side is exactly ``live_timeseries()``'s pre-fetched ``samples``/``gpus``
+    The GPU side is exactly ``running_timeseries()``'s pre-fetched ``samples``/``gpus``
     (any ``--nodename`` filtering already happened before this is called, on
     ``gpus``); the CPU side resolves divisors via one batched
     ``cpu.host_stats_many()`` call and thread-pools a ``cpu.host_series()``
-    call per job, the same as :func:`live_cpu_timeseries`.
+    call per job, the same as :func:`running_cpu_timeseries`.
     """
     out = out or sys.stdout
     columns = build_columns(specs)
@@ -2427,7 +2427,7 @@ def live_combined_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[i
         writer.writerow(TS_ID_COLUMNS + [header for _k, header, _d in columns]
                         + [spec.header for spec in cgroup])
 
-    for job, gpu in _live_rows(jobs, gpus):
+    for job, gpu in _running_rows(jobs, gpus):
         if gpu is None:
             continue
         node_cpu = cpu_results.get(gpu.jobid, {}).get(gpu.host, {})
