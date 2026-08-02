@@ -43,7 +43,7 @@ def _render_ts(kind, jobids, records, client, options, specs=None, step=None):
     from jobscope import timeseries as ts
 
     out = io.StringIO()
-    match = ts.NodeMatch(options.nodename)
+    match = ts.UnitFilter(options.nodename)
     common = dict(window=options.window, step=step,
                   host_specs=options.cgroup_specs, match=match)
     if kind == "cpu":
@@ -2234,7 +2234,7 @@ def test_a_failed_timeseries_filter_writes_no_header(gpu_record):
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
                             nodename="node99")
     from jobscope import timeseries as ts
-    match = ts.NodeMatch(options.nodename)
+    match = ts.UnitFilter(options.nodename)
     # Rendering itself must not raise -- it simply gets nothing to write. The error
     # comes afterwards, from the filter that matched no node, which is what leaves
     # the header unwritten rather than written-then-regretted.
@@ -3042,3 +3042,78 @@ def test_no_plot_still_drops_the_bars_when_they_are_configured_on():
     text = _finish(records, sections=("efficiency", "metrics"), plot_avgeff=False)
     assert "Average efficiency" not in text
     assert "1. Summary by metric" in text
+
+
+# --- --gpuid: charting or tabulating a subset of a job's cards ---------------
+
+def _four_gpu_record():
+    return dataclasses.replace(_gpu_job("100", {str(i): 50.0 for i in range(4)}),
+                               start=900, end=1100, duration=200, jobid_raw="100")
+
+
+class _FourGpuClient(_TimeseriesClient):
+    """Four GPUs across two nodes -- 0,1 on node01 and 2,3 on node02."""
+
+    def query(self, query, at, timeout=None):
+        return [{"metric": {"uuid": "U%d" % i, "minor_number": str(i),
+                            "host": "node0%d:9400" % (1 if i < 2 else 2)}}
+                for i in range(4)]
+
+    def query_range(self, query, start, end, step, timeout=None):
+        """Answer only for the UUIDs the query's regex actually names.
+
+        Modelling the server this way is the point: it means the assertions below
+        check that --gpuid narrowed the *query*, not merely that the demultiplexer
+        threw the extra cards away afterwards.
+        """
+        if "DCGM_FI_PROF_SM_ACTIVE" not in query:
+            return []
+        asked = re.search(r'UUID=~"\^\(([^)]*)\)\$"', query)
+        wanted = set(asked.group(1).split("|")) if asked else set()
+        return [{"metric": {"UUID": u}, "values": [[1000, "0.5"]]}
+                for u in sorted(wanted)]
+
+
+def _gpuid_rows(gpu_ids, nodename=None):
+    """--ts rows for a two-node, four-GPU job, narrowed by --gpuid."""
+    from jobscope import timeseries as ts
+
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
+                            nodename=nodename, gpu_ids=gpu_ids)
+    out = io.StringIO()
+    match = ts.UnitFilter(nodename, gpu_ids)
+    report.dcgm_timeseries(
+        ts.finished_gpu(["100"], {"100": _four_gpu_record()}, DEFAULT_SPECS,
+                        _FourGpuClient(), None, match=match),
+        DEFAULT_SPECS, options, out=out)
+    match.check()
+    _cols, rows = plot.parse_csv(io.StringIO(out.getvalue()))
+    return sorted({r["GPU"] for r in rows})
+
+
+def test_gpuid_narrows_the_series_to_the_named_cards():
+    assert _gpuid_rows(()) == ["0", "1", "2", "3"]
+    assert _gpuid_rows(("0", "1")) == ["0", "1"]
+    assert _gpuid_rows(("2",)) == ["2"]
+
+
+def test_gpuid_names_every_id_that_matched_nothing():
+    """The typo in the middle of a list is the one that is hard to spot, so a
+    partially-valid list is an error naming each miss -- not a quietly shorter chart.
+    This is the rule plot.run already applies to its own --gpu."""
+    with pytest.raises(JobscopeError) as excinfo:
+        _gpuid_rows(("0", "9"))
+    assert "'9'" in str(excinfo.value) and "0, 1, 2, 3" in str(excinfo.value)
+
+    with pytest.raises(JobscopeError) as excinfo:
+        _gpuid_rows(("7", "9"))
+    assert "'7', '9'" in str(excinfo.value)
+
+
+def test_gpuid_composes_with_nodename():
+    """Both narrow, and the "it used" list names only the kept node's cards -- GPUs
+    from a node the user excluded are not an answer to "which GPUs are there"."""
+    assert _gpuid_rows(("0",), nodename="node01") == ["0"]
+    with pytest.raises(JobscopeError) as excinfo:
+        _gpuid_rows(("2",), nodename="node01")       # 2 and 3 are on node02
+    assert "'2'" in str(excinfo.value) and "0, 1" in str(excinfo.value)

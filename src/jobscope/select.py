@@ -336,7 +336,7 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
             return
         client = client_from_config(cfg, timeout)
         if not options.combined and options.view == "cpu":
-            match = timeseries.NodeMatch(options.nodename)
+            match = timeseries.UnitFilter(options.nodename)
             collected = timeseries.running_host(
                 jobs, client, timeout, workers, window=options.window, step=step,
                 host_specs=options.cgroup_specs, match=match)
@@ -351,6 +351,16 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
             kept = {u: g for u, g in gpus.items() if g.host == options.nodename}
             if not kept:
                 raise no_such_node(options.nodename, {g.host for g in gpus.values()})
+            gpus = kept
+        if options.gpu_ids:
+            # Same reason as --nodename above: narrow before collect_timeseries so the
+            # other cards are never queried rather than queried and discarded.
+            kept = {u: g for u, g in gpus.items() if str(g.csv_id) in options.gpu_ids}
+            if not kept:
+                raise JobscopeError(
+                    "no rows for GPU %s in this selection; it used: %s"
+                    % (", ".join(repr(g) for g in options.gpu_ids),
+                       ", ".join(sorted({str(g.csv_id) for g in gpus.values()})) or "(none)"))
             gpus = kept
         samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, step,
                                      window=options.window)
@@ -376,7 +386,7 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
     # Collect and render are separate calls, but the collectors are generators, so
     # this still walks one job at a time -- the renderer pulls the next job's samples
     # only once it has written the last one's rows.
-    match = timeseries.NodeMatch(options.nodename)
+    match = timeseries.UnitFilter(options.nodename, options.gpu_ids)
     if not options.combined and options.view == "cpu":
         cpu_timeseries(
             timeseries.finished_host(jobids, records, client, timeout,

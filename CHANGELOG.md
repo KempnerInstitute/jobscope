@@ -63,6 +63,28 @@ carrying it has empty metric cells rather than zeros, so a monitoring outage no 
 reads as a fleet of wasteful jobs. Anything that treats an unrecognised `LABEL` as an
 error should be taught this one.
 
+### New: `--gpuid`, and `--gpu 0,1` is no longer silently wrong
+
+`jobscope plot` has always taken `--gpu 0,1` to chart particular cards, so that is
+what people type on a report command too. There `--gpu` is the flag that selects the
+GPU *columns* and takes no value — so `0,1` fell through to the JOBID positional. The
+run warned about a job named `0,1`, charted **every** GPU, and exited 0.
+
+Two changes. `--gpuid` narrows the `--ts` family (`--ts`, `--plot_ts`, `--stats`,
+`--classify`) to the named cards:
+
+```
+jobscope -j JOBID --nodename NODE --plot_ts --gpuid 0,1
+jobscope -j JOBID --ts 30m --csv --gpuid 2
+```
+
+It filters before the queries, as `--nodename` does, and names every id that matched
+nothing rather than silently charting a shorter list. MIG instances are addressed as
+they print (`0.1`).
+
+And a comma in a job ID is now an error — job IDs never contain one — pointing at
+`--gpuid` when `--gpu` was given.
+
 ### The summary block's `IDLE` column is now `USED`
 
 One number was being given three readings in a single screen. For a metric at 27%

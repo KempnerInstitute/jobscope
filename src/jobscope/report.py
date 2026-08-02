@@ -210,6 +210,9 @@ class RenderOptions:
     # --per-gpu only: report just this node's GPUs. The per-job table's NODE column
     # is a count, so there is no name there to match against.
     nodename: Optional[str] = None
+    # --ts only: report just these GPU ids (--gpuid 0,1). Strings, because a MIG
+    # instance is "0.1" rather than a number.
+    gpu_ids: Tuple[str, ...] = ()
     # Show the efficiency bars section. On by default: it is the fastest read in
     # the block, and behind a flag it was rarely seen. --no-plot switches it off.
     plot_avgeff: bool = True

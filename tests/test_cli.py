@@ -1311,3 +1311,28 @@ def test_each_view_gets_its_configured_metric_list(monkeypatch):
     assert "SM_ACT%" in captured["summary"] and "TENSOR%" not in captured["summary"]
     main(["-j", "1", "--dcgm"])
     assert "TEMP_C" in captured["summary"] and "SM_ACT%" not in captured["summary"]
+
+
+def test_a_comma_in_a_jobid_is_caught_and_points_at_gpuid(capsys):
+    """`--gpu 0,1` is what people type, expecting `jobscope plot`'s GPU filter.
+
+    --gpu takes no value here -- it picks the GPU *columns* -- so the list used to
+    fall through to the JOBID positional: the run warned about a job named "0,1",
+    charted every GPU, and exited 0. A silently wrong chart is worse than no chart.
+    """
+    with pytest.raises(SystemExit):
+        main(["-j", "123", "--plot_ts", "--gpu", "0,1"])
+    err = capsys.readouterr().err
+    assert "not a job ID" in err and "--gpuid 0,1" in err
+
+    # Without --gpu there is no GPU to suggest, but a comma is still not a job ID.
+    with pytest.raises(SystemExit):
+        main(["123,456"])
+    err = capsys.readouterr().err
+    assert "not a job ID" in err and "--gpuid" not in err
+
+
+def test_gpuid_needs_a_view_with_one_row_per_gpu(capsys):
+    with pytest.raises(SystemExit):
+        main(["-j", "123", "--gpuid", "0"])
+    assert "--gpuid needs --ts or --plot_ts" in capsys.readouterr().err

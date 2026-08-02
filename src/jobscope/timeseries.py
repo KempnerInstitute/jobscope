@@ -12,11 +12,11 @@ did, so the split costs no memory. The running collectors are not, because they 
 already batched -- one ``host_stats_many`` for the whole selection, then a thread pool
 -- and there is nothing to stream.
 
-``--nodename`` is resolved here rather than by the caller. It is not only a filter:
-dropping the other nodes' UUIDs *before* the queries is what makes a 4-node job cost a
-quarter of the range queries instead of fetching three nodes' samples to throw them
-away. :class:`NodeMatch` carries the bookkeeping that makes a name matching nothing an
-error naming the nodes that did run, rather than an empty report.
+``--nodename`` and ``--gpuid`` are resolved here rather than by the caller. They are
+not only filters: dropping the other units' UUIDs *before* the queries is what makes a
+4-node job cost a quarter of the range queries instead of fetching three nodes' samples
+to throw them away. :class:`UnitFilter` carries the bookkeeping that makes a name
+matching nothing an error naming what *did* run, rather than an empty report.
 """
 
 import sys
@@ -56,28 +56,64 @@ class JobSeries:
     hosts: Tuple[str, ...] = ()
 
 
-class NodeMatch:
-    """``--nodename`` bookkeeping, shared by every collector that takes the filter.
+class UnitFilter:
+    """``--nodename`` / ``--gpuid`` bookkeeping, shared by every collector.
 
-    Tracks which nodes the selection touched so that :meth:`check` can name them. A
-    filter that matched nothing raises there rather than returning nothing, because an
-    empty report reads as an idle node rather than as a typo.
+    Tracks which nodes and GPUs the selection touched so that :meth:`check` can name
+    them. A filter that matched nothing raises there rather than returning nothing,
+    because an empty report reads as an idle node rather than as a typo.
+
+    Checked after the last job rather than per job, because "job 7 has no GPU 3" is
+    not an error -- only "nothing in this selection has a GPU 3" is. A generator
+    cannot raise that on its own final step without doing it from inside the caller's
+    render loop, so the caller calls :meth:`check`.
     """
 
-    def __init__(self, nodename: Optional[str]):
+    def __init__(self, nodename: Optional[str] = None, gpu_ids=None):
         self.nodename = nodename
-        self.seen: set = set()
+        self.gpu_ids = tuple(gpu_ids) if gpu_ids else ()
+        self.seen: set = set()          # node names
+        self.seen_gpus: set = set()     # gpu ids, as strings -- MIG is "0.1"
+        self.hit_gpus: set = set()      # of gpu_ids, the ones something matched
         self.matched = False
 
     def __bool__(self) -> bool:
-        return self.nodename is not None
+        """Whether any filter is set at all -- the collectors' cheap early-out."""
+        return bool(self.nodename or self.gpu_ids)
+
+    def keep(self, uuid_to):
+        """``uuid_to`` narrowed to the wanted node and GPUs, recording what was seen.
+
+        Both dimensions at once, so a job filtered out by node never contributes its
+        GPU ids to the "available" list -- naming GPUs from a node the user excluded
+        would be a confusing answer to "which GPUs are there".
+        """
+        if self.nodename:
+            self.seen.update(node for node, _minor, _model in uuid_to.values())
+            uuid_to = {u: nm for u, nm in uuid_to.items() if nm[0] == self.nodename}
+            if not uuid_to:
+                return uuid_to
+            self.matched = True
+        if self.gpu_ids:
+            self.seen_gpus.update(str(minor) for _n, minor, _m in uuid_to.values())
+            uuid_to = {u: nm for u, nm in uuid_to.items() if str(nm[1]) in self.gpu_ids}
+            self.hit_gpus.update(str(minor) for _n, minor, _m in uuid_to.values())
+        return uuid_to
 
     def check(self) -> None:
-        """Raise if a filter was given and nothing matched it."""
+        """Raise if a filter was given and nothing in the selection matched it."""
         if self.nodename and not self.matched:
             raise JobscopeError(
                 "no rows for node %r in this selection; it ran on: %s"
                 % (self.nodename, ", ".join(sorted(self.seen)) or "(none)"))
+        missing = [g for g in self.gpu_ids if g not in self.hit_gpus]
+        if missing:
+            # Every one that matched nothing, not just the first: with a list it is
+            # the typo in the middle that is hard to spot. Same rule as plot.run's.
+            raise JobscopeError(
+                "no rows for GPU %s in this selection; it used: %s"
+                % (", ".join(repr(g) for g in missing),
+                   ", ".join(sorted(self.seen_gpus)) or "(none)"))
 
 
 def cgroup_hosts(nodes: dict, nodename: Optional[str]):
@@ -165,10 +201,10 @@ def _divisors(record: JobRecord, client: PrometheusClient,
 def finished_gpu(jobids: List[str], records: Dict[str, JobRecord],
                  specs: List[MetricSpec], client: PrometheusClient,
                  timeout: Optional[float], nodename: Optional[str] = None,
-                 window: Optional[int] = None, step: Optional[int] = None,
+                 gpu_ids=None, window: Optional[int] = None, step: Optional[int] = None,
                  with_host: bool = False,
                  host_specs: Optional[List[CgroupSpec]] = None,
-                 match: Optional[NodeMatch] = None) -> Iterator[JobSeries]:
+                 match: Optional[UnitFilter] = None) -> Iterator[JobSeries]:
     """Yield each finished job's GPU samples, optionally with its hosts' alongside.
 
     ``with_host`` is the default ``--ts`` view: GPU and host samples share one window
@@ -178,7 +214,7 @@ def finished_gpu(jobids: List[str], records: Dict[str, JobRecord],
     ``match`` is checked by the caller after the last job, not here: a generator that
     raised on its own final step would do so from inside the render loop.
     """
-    match = match if match is not None else NodeMatch(nodename)
+    match = match if match is not None else UnitFilter(nodename, gpu_ids)
     sampling_period = client.sampling_period
     cgroup = chosen_specs(host_specs)
 
@@ -191,14 +227,12 @@ def finished_gpu(jobids: List[str], records: Dict[str, JobRecord],
         uuid_to: GpuIdentity = {g["uuid"]: (g["node"], g["minor"], g.get("model", ""))
                                 for g in gpus}
         if match:
-            # Before the queries, not after: dropping the other nodes' UUIDs here
+            # Before the queries, not after: dropping the other units' UUIDs here
             # shrinks the regex, so a 4-node job costs a quarter of the range queries
             # instead of fetching three nodes' samples to throw them away.
-            match.seen.update(node for node, _minor, _model in uuid_to.values())
-            uuid_to = {u: nm for u, nm in uuid_to.items() if nm[0] == match.nodename}
+            uuid_to = match.keep(uuid_to)
             if not uuid_to:
                 continue
-            match.matched = True
         start, span = range_window(record.start, record.end, window,
                                    sampling_period, step)
         series = _gpu_samples(client, specs, uuid_to, start, record.end, span, timeout)
@@ -220,13 +254,13 @@ def finished_host(jobids: List[str], records: Dict[str, JobRecord],
                   nodename: Optional[str] = None, window: Optional[int] = None,
                   step: Optional[int] = None,
                   host_specs: Optional[List[CgroupSpec]] = None,
-                  match: Optional[NodeMatch] = None) -> Iterator[JobSeries]:
+                  match: Optional[UnitFilter] = None) -> Iterator[JobSeries]:
     """Yield each finished job's cgroup samples -- the ``--cpu --ts`` view.
 
     No GPU dimension, so :attr:`JobSeries.gpus` stays empty and the renderer leaves
     the GPU/MODEL columns blank, keeping one schema across every ``--ts`` view.
     """
-    match = match if match is not None else NodeMatch(nodename)
+    match = match if match is not None else UnitFilter(nodename)
     sampling_period = client.sampling_period
     cgroup = chosen_specs(host_specs)
 
@@ -253,7 +287,7 @@ def finished_host(jobids: List[str], records: Dict[str, JobRecord],
 
 def _running_windows(jobs: Dict[int, RunningJob], divisors: dict,
                      window: Optional[int], sampling_period: int,
-                     step: Optional[int], match: NodeMatch, warn: bool):
+                     step: Optional[int], match: UnitFilter, warn: bool):
     """``[(raw_jobid, divisors, hosts, begin, end, span)]`` for the jobs worth querying."""
     tasks = []
     for raw_jobid, job in jobs.items():
@@ -286,7 +320,7 @@ def running_host(jobs: Dict[int, RunningJob], client: PrometheusClient,
                  step: Optional[int] = None,
                  host_specs: Optional[List[CgroupSpec]] = None,
                  warn: bool = True,
-                 match: Optional[NodeMatch] = None) -> Dict[int, JobSeries]:
+                 match: Optional[UnitFilter] = None) -> Dict[int, JobSeries]:
     """Every running job's cgroup samples, keyed by raw job ID.
 
     Not a generator, unlike the finished collectors: the divisors come from one
@@ -296,7 +330,7 @@ def running_host(jobs: Dict[int, RunningJob], client: PrometheusClient,
     ``warn`` is off for the combined view, whose GPU rows are the report -- a job with
     no cgroup data there loses two columns, not its row, so saying so would be noise.
     """
-    match = match if match is not None else NodeMatch(nodename)
+    match = match if match is not None else UnitFilter(nodename)
     sampling_period = client.sampling_period
     cgroup = chosen_specs(host_specs)
     at = int(time.time())

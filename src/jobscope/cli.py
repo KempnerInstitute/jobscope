@@ -185,6 +185,10 @@ def build_parser():
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
                        help="--per-gpu / --ts: report only this node's GPUs")
+    shape.add_argument("--gpuid", "--gpuids", dest="gpuid", default=None,
+                       metavar="IDS",
+                       help="--ts / --plot_ts: only these GPUs, comma-separated "
+                            "(--gpuid 0,1). Not --gpu, which picks the GPU columns")
     block = shape.add_mutually_exclusive_group()
     block.add_argument("--cpu", action="store_const", const="cpu", dest="view",
                        help="CPU columns only")
@@ -483,6 +487,17 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
     """Validate the flag combination and build the :class:`Request`."""
     cfg = cfg or config.get_config()
     jobids = list(args.jobids) + list(getattr(args, "jobids_opt", None) or [])
+    # A comma is never valid in a job ID, and there is one thing people type that
+    # produces one: `--gpu 0,1`, expecting `jobscope plot`'s GPU filter. --gpu takes
+    # no value here -- it picks the GPU *columns* -- so the list falls through to this
+    # positional and the run charts every GPU while warning about a job named "0,1".
+    # A silently wrong chart is worse than no chart.
+    listy = [j for j in jobids if "," in str(j)]
+    if listy:
+        hint = (" Did you mean --gpuid %s? --gpu selects the GPU columns and takes no"
+                " value." % listy[0]) if args.view == "gpu" else ""
+        raise JobscopeError("%s is not a job ID -- job IDs have no commas.%s"
+                            % (", ".join(repr(j) for j in listy), hint))
     # An explicit `running` keeps the live path even with JOBIDs, narrowing within
     # squeue; an inferred mode yields to the IDs, which sacct resolves either way.
     running_ids = jobids and args.mode == RUNNING and getattr(args, "explicit_mode", False)
@@ -695,6 +710,11 @@ def handle_report(args) -> None:
         # nothing there to match; say so rather than filtering nothing.
         raise JobscopeError("--nodename needs --per-gpu or --ts, the views whose rows "
                             "carry a node name")
+    if args.gpuid and not args.ts:
+        # Only the time series has a row per GPU. The per-job table aggregates across
+        # them and --per-gpu addresses its rows by position, so neither can narrow.
+        raise JobscopeError("--gpuid needs --ts or --plot_ts, the views with one row "
+                            "per GPU")
     view = args.view or "all"
     show_dcgm = view in ("all", "gpu")
     # Which metrics each view collects, from [metrics] -- the built-in lists when a
@@ -722,7 +742,8 @@ def handle_report(args) -> None:
     options = RenderOptions(
         view=view, show_dcgm=show_dcgm, csv=args.csv, header=args.header,
         time_weighted=time_weighted, plot_avgeff=not args.no_plot,
-        nodename=args.nodename, window=_ts_window(args),
+        nodename=args.nodename, gpu_ids=tuple(plot.gpu_list(args.gpuid)) if args.gpuid else (),
+        window=_ts_window(args),
         color=_want_color(args), combined=ts_combined,
         worst_jobs=cfg.defaults.worst_jobs,
         long_running=parse_duration(cfg.defaults.long_running),

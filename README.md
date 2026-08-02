@@ -672,6 +672,22 @@ What `--nodename` does not work with is the per-job table, whose `NODE` column i
 *count*: there is no name there to match, so asking for one is an error rather than an
 empty report.
 
+`--gpuid` narrows the other dimension, for the `--ts` family only (`--ts`,
+`--plot_ts`, `--stats`, `--classify`) — those are the views with one row per GPU:
+
+```
+jobscope -j JOBID --nodename NODE --plot_ts --gpuid 0,1     # chart two of four cards
+jobscope -j JOBID --ts 30m --csv --gpuid 2                  # or tabulate one
+```
+
+It filters before the queries as `--nodename` does, and it names **every** id that
+matched nothing rather than quietly charting a shorter list — in `--gpuid 0,9` it is
+the `9` you need told about. MIG instances are addressed as they print, `0.1`.
+
+Note it is `--gpuid`, not `--gpu`: `--gpu` selects the GPU *columns* and takes no
+value. Writing `--gpu 0,1` used to leave `0,1` to be read as a job ID; it is now an
+error that points here.
+
 The charts follow the view, so `--cpu` narrows them to `CPU%` and `--dcgm` widens
 them, and `--no-plot` omits them.
 

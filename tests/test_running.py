@@ -41,7 +41,7 @@ from jobscope.slurm import JobRecord
 
 def _render_running_cpu(jobs, client, options, out, workers=1):
     """Collect then render the running --cpu --ts view, as select.py wires it."""
-    match = ts.NodeMatch(options.nodename)
+    match = ts.UnitFilter(options.nodename)
     collected = ts.running_host(jobs, client, None, workers=workers,
                                 window=options.window,
                                 host_specs=options.cgroup_specs, match=match)
