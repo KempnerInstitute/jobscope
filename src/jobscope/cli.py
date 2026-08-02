@@ -260,6 +260,9 @@ def build_parser():
     p_doctor.add_argument("--metrics", nargs="?", const="", metavar="JOBID",
                           help="also list the metrics the server carries for a job "
                                "(a recent GPU job if none is named)")
+    p_doctor.add_argument("--validate", nargs="?", const="", metavar="JOBID",
+                          help="compare one job's utilization across Prometheus, the "
+                               "jobstats blob and Slurm's own accounting")
     p_doctor.set_defaults(func=handle_doctor)
 
     return parser, subparsers
@@ -773,11 +776,12 @@ def handle_describe(args) -> None:
 
 def handle_doctor(args) -> None:
     cfg = _apply_config(args)
-    # args.metrics is None when the flag is absent, "" when given bare, and the job
-    # ID when given one -- so the bare form means "pick a job for me".
+    # Each flag is None when absent, "" when given bare, and the job ID when given
+    # one -- so the bare form means "pick a recent job for me".
     status = doctor.run(sys.stdout, cfg, args.config_path, cfg.defaults.timeout,
                         metrics=args.metrics is not None,
-                        jobid=args.metrics or None)
+                        validate=args.validate is not None,
+                        jobid=args.metrics or args.validate or None)
     if status:
         raise SystemExit(status)
 

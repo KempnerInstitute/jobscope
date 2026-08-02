@@ -28,7 +28,7 @@ import os
 import time
 from typing import Dict, List, Optional, Tuple
 
-from . import config
+from . import config, extra_metric
 from .cpu import CGROUP_METRICS
 from .dcgm import METRICS as GPU_METRICS
 from .errors import JobscopeError
@@ -469,7 +469,8 @@ def discover_metrics(out, client, jobid: Optional[str], timeout: Optional[float]
 # --- entry point -----------------------------------------------------------
 
 def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
-        metrics: bool = False, jobid: Optional[str] = None) -> int:
+        metrics: bool = False, validate: bool = False,
+        jobid: Optional[str] = None) -> int:
     """Print the report. Returns a process exit status."""
     check_slurm(out, timeout)
     sample = sample_jobs(timeout)
@@ -481,8 +482,16 @@ def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
               "an endpoint.", file=out)
         return 1
     check_labels(out, client, timeout)
+    if validate:
+        target = jobid or _recent_gpu_job(sample)
+        if not target:
+            print("\nno recently finished GPU job to compare; name one:"
+                  "\n  jobscope doctor --validate JOBID", file=out)
+            return 1
+        return extra_metric.validate(out, target, client, timeout)
     if metrics:
         return discover_metrics(out, client, jobid, timeout, sample)
     print("\nRun 'jobscope doctor --metrics' to list the metrics this server carries "
-          "for a real job,\nwith the short names [metrics] and [thresholds] take.", file=out)
+          "for a real job,\nand 'jobscope doctor --validate' to compare Prometheus "
+          "against Slurm's own accounting.", file=out)
     return 0

@@ -119,6 +119,23 @@ lists each series alongside the short name config takes, and marks it `ok`
 A metric jobscope names but your cluster lacks would otherwise just render blank
 forever.
 
+```bash
+jobscope doctor --validate           # do the exporters agree with the scheduler?
+```
+
+`--validate` puts one job's utilization side by side as each source measures it:
+Prometheus, the jobstats blob, and Slurm's own `jobacct_gather` /
+`AccountingStorageTRES` accounting, which needs neither of the other two.
+
+Expect Slurm to read a little **higher**, and do not treat that as an error. Across
+sixty finished GPU jobs here the median gap is +6 points on GPU% and +4.7 on CPU%,
+in the same direction every time, because Slurm accounts only while a step is
+running where NVML and cgroup average across the whole allocation -- setup,
+teardown and idle gaps included. For an efficiency tool the wider denominator is
+the point: allocated-but-idle time is exactly the waste jobscope is looking for.
+A *large* gap on a single job usually means a long warm-up; a large gap across
+many jobs is worth chasing.
+
 ### Pointing jobscope at Prometheus
 
 The GPU columns, and every column for a running job, need a Prometheus endpoint
