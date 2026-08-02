@@ -63,6 +63,43 @@ carrying it has empty metric cells rather than zeros, so a monitoring outage no 
 reads as a fleet of wasteful jobs. Anything that treats an unrecognised `LABEL` as an
 error should be taught this one.
 
+### `config.example.toml` reordered, and it no longer regrades on copy
+
+The template is required-first now — Prometheus, then which jobs, then which metrics,
+then how they read — with a divider below which everything is tuning. The prose that
+was longer than the setting it explained moved to [`docs/config.md`](docs/config.md).
+351 lines to 293, and 56 live settings to 31.
+
+**One behaviour change if you copied the old template.** It shipped three live values
+that were *opinions, not jobscope's defaults*, so copying it silently changed grading:
+
+| | old template | now |
+|---|---|---|
+| `[thresholds.summary.wasteful] sm_act` | 3 | 2 (the shared ladder) |
+| `[thresholds.timeslice.wasteful] cpu` | 8 | 5 (the built-in calibration) |
+| `[thresholds.timeslice.wasteful] sm_act` | 3 | 2 |
+
+Both are still in the file as commented suggestions one keystroke away, with the
+reasoning in `docs/config.md`. The template now resolves identically to running with
+no config at all, and a test enforces that. If you want the old numbers, uncomment
+those blocks. A config file you wrote yourself is unaffected.
+
+### New: `[thresholds] edges`, the one-line ladder
+
+```toml
+[thresholds]
+edges = [2, 10, 20, 40]   # wasteful, inefficient, needs improvement, average
+```
+
+Seeds both the summary and timeslice views, so the eight `[thresholds.<view>.<edge>]`
+tables collapse to one line for a site that grades a window the same way it grades a
+whole job. The per-view and per-metric tables still override it: narrowest wins.
+
+Note that retuning an edge switches **off** jobscope's built-in per-metric
+calibration for that edge — `edges = [3, …]` moves CPU% to 3 along with everything
+else, because "3 for everything I did not name" is an instruction and overriding it
+silently would be undebuggable. Name `cpu` explicitly to keep a different value.
+
 ### Other changes since v0.1.1
 
 Not exhaustive; the breaking change above is the only one that needs action.

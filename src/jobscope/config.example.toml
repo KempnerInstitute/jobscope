@@ -1,222 +1,271 @@
 # jobscope configuration.
 #
-# Copy this file to ~/.config/jobscope/config.toml (or point $JOBSCOPE_CONFIG at
-# it) and edit the values for your cluster. Every value is optional; jobscope
-# falls back to the built-in defaults shown here. Print this template any time
-# with: jobscope config --example
+# Copy to ~/.config/jobscope/config.toml (or point $JOBSCOPE_CONFIG at it) and edit.
+# Every value is optional; jobscope falls back to the built-in defaults shown here.
+# Print this template again with: jobscope config --example
+#
+# Sections are in the order you decide things: where the data comes from, which jobs,
+# which metrics, how they read. Stop at the divider two thirds down -- everything
+# below it is tuning you should not need until a number looks wrong.
+#
+# `jobscope config` prints what your file actually resolves to, after all overrides.
+# The reasoning behind the trickier settings -- how to choose a power floor, why the
+# two band tables inherit nothing -- is in docs/config.md rather than in here.
 
-# [classify] -- how a job's metrics become a verdict.
+
+# =============================================================================
+#  1. REQUIRED -- where the data comes from
+# =============================================================================
+
+[prometheus]
+# The endpoint serving the DCGM (DCGM_FI_*) and nvidia_gpu_* series. Required for the
+# GPU and DCGM views; the CPU-only and offline (blob) views never contact it.
 #
-# Two roles, and the difference is the whole model:
+# SECURITY: this URL often embeds a credential. Prefer $JOBSCOPE_PROM_URL so the
+# secret never lands in a file -- a value here is used only when that is unset.
+# url = "https://USER:TOKEN@prometheus.example.net/api/prom"
+
+# Seconds between scrapes on your cluster.
+sampling_period = 60
+
+# If your site runs jobstats, you probably need none of the above: jobscope reads
+# PROM_SERVER from the config.py next to the `jobstats` binary on your PATH. Set this
+# only to point at a config.py somewhere else.
+# site_jobstats_config_path = "/opt/jobstats"
+
+# [site] -- only when porting to a cluster that labels series differently. Each of
+# these fails SILENTLY when wrong (every node reads "?", CPU%/MEM% come back blank),
+# so run 'jobscope doctor' first: it names the labels your server actually uses.
 #
-#   vote   best-of-N. One busy measure is enough to call a job not-idle, so a vote
-#          can only ever RAISE a verdict.
-#   floor  can only LOWER one. A metric that must pull a verdict down cannot be a
-#          vote: under best-of-N a low reading is simply outvoted.
+# [site]
+# host_label      = "host"       # a stock Prometheus usually calls this "instance"
+# jobid_label     = "jobid"      # the label cgroup_* carry the job id in
+# gpu_job_join    = "nvidia_gpu_jobId"   # the series whose *value* is the job id
+# cgroup_selector = "step='',task=''"    # pins the job-level cgroup
+
+
+# =============================================================================
+#  2. WHICH JOBS -- the selection defaults, when you do not pass flags
+# =============================================================================
+
+[defaults]
+# The `finished` window when none of -D/-N/-S/-E is given.
+days = 1
+# Which job endings `finished` reports without -t: completed, failed, timeout,
+# cancelled, or all -- comma-separated, as -t takes. The default hides failures,
+# which is worth changing if your site cares about them routinely.
+state = "completed"
+# Runtime floor for the running view: younger jobs are hidden, because a job still
+# loading data or compiling kernels reads as idle. "0s" shows everything.
+min_elapsed = "10m"
+# Concurrent Prometheus query-sets for the GPU view.
+workers = 8
+# Seconds per sacct / Prometheus call (0 disables the sacct timeout).
+timeout = 60
+# How many jobs each Problem-jobs "Wasteful" row lists. The count beside the heading
+# says how many there were in total, so this is a lead, not a census.
+worst_jobs = 3
+# A Wasteful entry whose job ran at least this long is highlighted: hours of idle
+# hardware do not come back.
+long_running = "3h"
+
+
+# =============================================================================
+#  3. WHICH METRICS
+# =============================================================================
 #
-# POWER_W is the floor that ships. A job spinning on a trivial kernel reads busy on
-# GPU% and draws idle watts, and watts are the one signal a duty cycle cannot fake --
-# measured here, 8 GPU jobs in 94 looked healthy on their percentages while the board
-# sat below its idle floor.
+# Three families, and they are NOT symmetrically optional:
+#
+#   cgroup   CPU%, MEM%                    droppable -- a GPU-only site
+#   nvml     GPU%, GMEM%                   REQUIRED, beyond its own three metrics:
+#                                          nvidia_gpu_jobId is the only join between
+#                                          Slurm and *either* GPU exporter, so
+#                                          dropping it blinds dcgm too
+#   dcgm     SM_ACT%, TENSOR%, DRAM%, ...  droppable -- no dcgm-exporter
+#
+# There is no families switch and none is needed: a metric you leave out of the lists
+# below is never queried. 'jobscope doctor' reports which exporters answer here, and
+# 'jobscope doctor --metrics' lists every series they carry for a real job.
+
+[metrics]
+# Which GPU/DCGM metrics each view collects and shows. GPU-side only: the CPU side is
+# CPU%/MEM% and fixed, because there are two cgroup queries and no catalog to choose.
+#
+#   summary     the per-job table's profiling block (jobscope -p PART -a)
+#   timeseries  --ts / --plot_ts / --classify
+#   extended    what --dcgm/--ext widens to; "all" or an explicit list
+#
+# Short names, the same ones [thresholds] takes. 'jobscope describe --dcgm --ext'
+# lists the catalog. Order does not matter; columns print in catalog order.
+#
+# NOT covered: --per-gpu keeps a fixed four (SM_ACT%, TENSOR%, DRAM%, POWER_W) -- its
+# rows are addressed by position, so its width is not free to change. And naming a
+# blob-backed metric (gpu, mem, memtot) in `summary` has no effect: GPU%/GMEM% already
+# have their own columns there, from the sacct blob.
+summary    = ["sm_act", "tensor", "dram", "power"]
+timeseries = ["gpu", "sm_act", "tensor", "dram", "power"]
+extended   = "all"
+
+
+# =============================================================================
+#  4. HOW THEY READ -- bands, verdicts, output
+# =============================================================================
+
+[thresholds]
+# The band ladder, in one line: every %-metric is graded into five tiers, and these
+# are the four numbers separating them.
+#
+#   below 2   wasteful           (red)      20..40   average   (green)
+#     2..10   inefficient        (red)     above 40  good      (green)
+#    10..20   needs improvement  (yellow)
+#
+# This seeds BOTH views. Split them only if a --ts window should be graded
+# differently from a whole job -- see the tuning block below, and docs/config.md.
+#
+# CAREFUL: jobscope ships one per-metric calibration -- CPU% wasteful 5, since a GPU
+# job legitimately idles its cores. Retuning `wasteful` here switches it OFF: "3 for
+# everything I did not name" is an instruction, and overriding it silently would be
+# undebuggable. Name cpu in the tuning block below to keep a different value.
+edges = [2, 10, 20, 40]
+
+# POWER_W is graded in WATTS, so it has no bands -- just a floor: a GPU drawing less
+# counts as idle. This is the fallback for any model not listed in the tuning block.
+# Idle draw runs from 27 W on a V100 to 165 W on an RTX PRO 6000, so one number is
+# wrong at one end of a mixed fleet: docs/config.md has measured figures and a method.
+power_w = 100
+
+# [classify] -- how a job's metrics become a verdict. Two roles:
+#   vote   best-of-N; one busy measure calls a job not-idle, so it can only RAISE
+#   floor  can only LOWER. A metric that must pull a verdict down cannot be a vote,
+#          because under best-of-N a low reading is simply outvoted.
+#
+# Omit `vote` and jobscope derives it: every graded percentage that is not a capacity
+# reading. That follows the catalog as it grows, which is usually what you want. Set
+# it to stop --dcgm widening the ballot from four metrics to fifteen.
 #
 # [classify]
 # vote = ["gpu", "sm_act", "tensor", "dram", "cpu"]
-#   Omit `vote` and jobscope derives it: every graded percentage that is not a
-#   capacity reading. That is usually what you want, because it follows the catalog
-#   as it grows. Set it to stop --dcgm widening the ballot from four metrics to
-#   fifteen -- a job busy on ENC% alone would otherwise read good.
+
+[plot]
+# Chart defaults, shared by `jobscope plot` and --plot_ts so a chart looks the same
+# whichever way it was drawn.
+#
+# `metrics` is what a time series draws without --metric. Short names or plain column
+# headers; one the CSV does not carry is skipped rather than charted empty, which is
+# how one list serves files with different columns -- and why DUTY%, the pre-rename
+# spelling of GPU%, is listed: a CSV saved before that rename still charts.
+metrics = ["gpu", "DUTY%", "gmem", "sm_act", "occ", "tensor", "dram"]
+# One 256-colour code per series, cycled. Distinct from [colors], which grades a
+# value by its band -- these only tell series apart, so neighbours must differ.
+palette = [196, 46, 33, 208, 201, 51, 226, 129, 244, 39]
+# Heatmap row cap (--max-rows overrides per run), and how many panels --by metric
+# may place side by side before it starts dropping them.
+max_rows = 40
+panels   = 12
+
+[report]
+# Which sections print below the job table, and in what order. The table itself is
+# always the report; these three follow it.
+#
+#   metrics     "Summary by metric" -- each metric pooled, with its band split
+#   efficiency  the horizontal utilization bars (--no-plot drops these anyway)
+#   problems    "Problem jobs" -- the Wasteful rows and the job counts
+#
+# Drop one by leaving it out, reorder by listing them differently. Numbering follows
+# what actually printed, so there is never a gap.
+sections = ["metrics", "efficiency", "problems"]
+
+[colors]
+# What each tier looks like. Takes the eight ANSI colours and their bright_ variants,
+# or color(N) for the 256-colour cube. Both the tables and `jobscope plot` read
+# these, so a job is the same colour in a report and in a chart.
+#
+# Two tiers sharing a colour is the default, not a requirement -- give all five
+# distinct values for a colourblind-safe palette.
+wasteful    = "red"
+inefficient = "red"
+improvement = "yellow"   # the "needs improvement" tier
+average     = "green"
+good        = "green"
+# Not a tier: a Problem-jobs entry whose job ran past [defaults] long_running.
+long_running = "red"
+
+
+# #############################################################################
+#
+#   Everything above is enough to run jobscope. Below is tuning: per view, per
+#   metric, per GPU model. Skip it until a number looks wrong.
+#
+#   docs/config.md explains the reasoning; this is the syntax.
+#
+# #############################################################################
+
+
+# --- Per-view, per-metric band edges -----------------------------------------
+#
+# `edges` above sets one ladder for both views. Split them here when a --ts window
+# should be graded differently from a whole job: [thresholds.summary] grades one
+# average over a job's elapsed runtime, [thresholds.timeslice] grades samples pooled
+# inside a window, and a two-hour slice catching a checkpoint pause is not a two-hour
+# idle job.
+#
+# NOTHING IS INHERITED between the two -- a table you leave out keeps `edges` (or the
+# built-in ladder), it does not copy the other view. jobscope prints a note when only
+# one is set. `default` covers every %-metric you do not name, which is what keeps the
+# ~18 extra columns under --dcgm graded without listing them.
+#
+# The values below are SUGGESTIONS, not the built-ins -- uncommenting any of them
+# changes how jobs are graded. As shipped, this template resolves exactly like no
+# config file at all, so copying it is never a silent regrade. Only CPU% wasteful 5
+# is built in; sm_act 3 and the timeslice cpu 8 are opinions worth trying.
+# Edges must not decrease within a metric.
+#
+# [thresholds.summary.wasteful]
+# default = 2
+# cpu     = 5      # a GPU job idling its cores is normal; 2% would flag them all
+# sm_act  = 3      # SM residency sits structurally below GPU% on the same work
+# [thresholds.summary.inefficient]
+# default = 10
+#
+# [thresholds.timeslice.wasteful]
+# default = 2
+# cpu     = 8      # a short window dips further than a whole-job average
+# sm_act  = 3
+
+# --- Per-model power floors ---------------------------------------------------
+#
+# Keys are the model string the exporter reports (`name` on nvidia_gpu_*, `modelName`
+# on DCGM_FI_*), matched exactly -- copy it verbatim. 'jobscope <job> --per-gpu' shows
+# which cards a job ran on. docs/config.md has measured idle/busy figures per model
+# and the method for choosing a value.
 #
 # [classify.floor.power]
-# default = 100                        # watts; below this, cap the verdict at
-#                                      # `inefficient` however good the percentages
-# "NVIDIA H100 80GB HBM3" = 130        # per card, matched on the exporter's own
-# "Tesla V100-PCIE-32GB"  = 45         # model string. Idle draw is hardware: it runs
-#                                      # from 27 W on a V100 to 165 W on an
-#                                      # RTX PRO 6000, so one number is wrong at one
-#                                      # end or the other.
+# default = 100
+# "NVIDIA H100 80GB HBM3" = 130
+# "Tesla V100-PCIE-32GB"  = 45
 #
-# Write a bare `[classify.floor]` with nothing under it for NO floors. That is legal
-# and it re-opens what the floor closes: a job at GPU% 48 drawing 80 W goes back to
-# reading `good`. ([thresholds] power_w still works as the older spelling.)
+# A bare [classify.floor] with nothing under it means NO floors, which re-opens what
+# the floor closes: a job at GPU% 48 drawing 80 W goes back to reading `good`.
+# ([thresholds.power_w_by_model] still works as the older spelling.)
+
+# --- Vote ceilings ------------------------------------------------------------
+#
+# A ceiling caps how high a metric may vote without stopping it voting. CPU%'s is
+# built in at `inefficient`: a busy host is not evidence the cards were needed, so
+# CPU% lifts a GPU-idle job off `wasteful` but never calls it healthy. It still BANDS
+# and COLOURS normally -- a job at CPU% 50 paints green. Two questions, one number.
 #
 # [classify.ceiling]
-# cpu = "inefficient"                  # the best tier this metric may vote for
-#   A ceiling caps how high a metric votes without stopping it voting. CPU%'s is
-#   built in at `inefficient`: a busy host is not evidence the cards were needed, so
-#   CPU% lifts a GPU-idle job off `wasteful` but never calls it healthy. It still
-#   BANDS and COLOURS on the ordinary ladder -- a job at CPU% 50 is genuinely half
-#   used and paints green. Two different questions about one number.
-#   The ceiling lifts when nothing else could carry a verdict, so a --cpu view and a
-#   genuinely CPU-only job are judged on their own terms.
+# cpu = "inefficient"
 
-# [site] -- the label conventions your exporters use.
+# --- Defining or repointing a metric -------------------------------------------
 #
-# Only needed when porting jobscope to a cluster whose Prometheus labels series
-# differently. Every one of these fails *silently* if wrong, which is why
-# 'jobscope doctor' checks each against the live server: read the wrong host label
-# and every node shows as "?", the cgroup divisor lookup misses, and CPU%/MEM%
-# come back blank with no error.
-#
-# Run 'jobscope doctor' first -- it names the label your server actually uses.
-#
-# [site]
-# host_label   = "host"        # the node a series came from. A stock Prometheus
-#                              # usually calls this "instance".
-# jobid_label  = "jobid"       # the label cgroup_* series carry the job id in
-# gpu_job_join = "nvidia_gpu_jobId"
-#                              # the series whose *value* is the job id holding
-#                              # each card. GPU metrics carry no job label, so
-#                              # this is the only join to Slurm.
-# cgroup_selector = "step='',task=''"
-#                              # appended to every cgroup_* query, to pin the
-#                              # job-level cgroup rather than a per-step one.
-#                              # ='' also matches the label being absent.
-
-[prometheus]
-# Endpoint that serves the DCGM (DCGM_FI_*) and nvidia_gpu_* series that jobstats
-# scrapes. Required for the GPU and DCGM views; the CPU-only and offline (blob)
-# views never contact it.
-#
-# SECURITY: this URL often embeds a credential (e.g. a Grafana Cloud token).
-# Prefer supplying it through the JOBSCOPE_PROM_URL environment variable so the
-# secret never lands in a file. A value set here is used only when that variable
-# is unset.
-# url = "https://USER:TOKEN@prometheus.example.net/api/prom"
-
-# Seconds between DCGM scrapes on your cluster (the Prometheus sampling period).
-sampling_period = 60
-
-# Backward-compatibility bridge: instead of setting url above, jobscope can read
-# PROM_SERVER (and SAMPLING_PERIOD) from an existing jobstats config.py. Give the
-# directory that holds that config.py; it is imported (by full path) only when no
-# Prometheus URL is available otherwise. jobscope ALREADY auto-discovers this
-# next to the 'jobstats' binary on your PATH, so wherever jobstats is installed
-# you need no config file at all. Set this only to point at a config.py elsewhere.
-# site_jobstats_config_path = "/opt/jobstats"
-
-# THE BAND EDGES. Every %-metric is graded into five tiers -- wasteful,
-# inefficient, needs improvement, average, good -- and these are the four numbers
-# that separate them. Below `wasteful`: wasteful (red). At or below `inefficient`:
-# inefficient (red, still -- see the note on what red actually catches). At or
-# below `improvement`: needs improvement (yellow). At or below `average`: average
-# (green). Above: good (green).
-#
-# TWO TABLES, ONE PER VIEW, and nothing is inherited between them:
-#
-#   [thresholds.summary]    the plain report -- one average over each job's whole
-#                           elapsed runtime (jobscope -p PART -a, jobscope -j ID)
-#   [thresholds.timeslice]  --ts / --plot_ts / --classify -- samples pooled inside
-#                           a window, which is a different statistic and can want
-#                           a different bar: a two-hour slice that catches a
-#                           checkpoint pause is not a two-hour idle job
-#
-# A table you leave out keeps the built-in edges below; it does NOT copy the other
-# one. `jobscope config` prints both as they actually resolve.
-#
-# PER METRIC, because the metrics do not mean the same thing. A GPU job
-# legitimately holds cores it never uses, so CPU% at 4% is ordinary where GPU% at
-# 4% is idle; SM_ACT% sits structurally below GPU% on the same work. `default`
-# covers every %-metric you do not name, which is what keeps the ~18 extra columns
-# under --dcgm graded without listing them. Name metrics by their column header,
-# lowercase and without the % -- gpu, cpu, mem, gmem, sm_act, tensor, dram, occ,
-# and so on.
-#
-# Both tables are spelled out below rather than left commented, so that copying
-# this file gives you every knob in view. NOTE that the values are a suggested
-# starting point, not the built-in defaults: `cpu` and `sm_act` are deliberately
-# looser here (see the comments on each). Delete a line to fall back to `default`,
-# or delete a whole table to fall back to the built-in 2/10/20/40.
-
-[thresholds.summary.wasteful]
-default = 2
-gpu     = 2
-tensor  = 2
-dram    = 2
-cpu     = 5      # a GPU job idling its cores is normal; 2% would flag them all
-sm_act  = 3      # SM residency sits structurally below GPU% on the same work
-[thresholds.summary.inefficient]
-default = 10
-[thresholds.summary.improvement]
-default = 20
-[thresholds.summary.average]
-default = 40
-
-[thresholds.timeslice.wasteful]
-default = 2
-gpu     = 2
-tensor  = 2
-dram    = 2
-cpu     = 8      # a short window dips further than a whole-job average
-sm_act  = 3
-[thresholds.timeslice.inefficient]
-default = 10
-[thresholds.timeslice.improvement]
-default = 20
-[thresholds.timeslice.average]
-default = 40
-
-# Edges must not decrease within a metric, counting the defaults it falls back to:
-# setting only `inefficient.cpu = 1` against the default `wasteful = 2` would leave
-# CPU% a band nothing can ever land in, and jobscope rejects it rather than grade
-# by it. Equal neighbours are allowed -- they collapse a band on purpose.
-
-[thresholds]
-# Note red/yellow/green catch *pathological* jobs, not inefficient ones -- at an
-# `inefficient` of 10, a job at 21% is green while leaving four fifths of its
-# allocation unused. Read the IDLE column of the summary for efficiency, and the
-# Problem-jobs "Wasteful" rows (the stricter `wasteful` cutoff) for the jobs
-# actually worth a look.
-
-# POWER_W is graded in WATTS, not percent, so it has no bands at all -- just a
-# floor: a GPU drawing less than this counts as idle. That is the one idle signal a
-# duty cycle cannot fake -- a job spinning on a trivial kernel reads busy on GPU%
-# while drawing idle watts. Shared by both views, unlike the edges above: idle draw
-# is a property of the hardware and means the same thing in a slice as over a job.
-#
-# This value is the fallback, used for any model not listed below.
-power_w = 100
-
-# Idle draw is a property of the hardware, so one number cannot serve a mixed fleet.
-# Keys are the model string the exporter itself reports (the `name` label on
-# nvidia_gpu_*, `modelName` on DCGM_FI_*); jobscope matches it exactly, so copy it
-# verbatim -- `jobscope <job> --per-gpu` shows which cards a job ran on.
-#
-# HOW TO CHOOSE A VALUE. A floor belongs between what a model draws idle and what it
-# draws working, so measure both: take every GPU of that model at one instant, split
-# on whether its duty cycle is zero, and put the floor between the idle 90th
-# percentile and the busy 10th. Measuring only the idle side gives a number that
-# flags working cards -- on the fleet below, a flat 150 W would have called busy
-# H200s (10th percentile 122 W) idle.
-#
-# Measured on one cluster, for illustration -- these are not defaults, and hardware
-# elsewhere will differ:
-#
-#   model                            idle p90   busy p10   floor
-#   NVIDIA RTX PRO 6000 Blackwell      288 W      373 W      330
-#   NVIDIA H100 80GB HBM3              121 W      141 W      130
-#   NVIDIA H200                        117 W      122 W      120
-#   NVIDIA A100-SXM4-80GB               98 W       99 W      100
-#   NVIDIA A100-SXM4-40GB               55 W      121 W       90
-#   NVIDIA A40                          35 W         --        40
-#   Tesla V100-PCIE-32GB                39 W         --        45
-#
-# Note the spread: an idle RTX PRO 6000 draws more than a working V100, so a single
-# floor is wrong at one end or the other whatever value it takes.
-#
-# [thresholds.power_w_by_model]
-# "NVIDIA RTX PRO 6000 Blackwell Server Edition" = 330
-# "NVIDIA H100 80GB HBM3" = 130
-# "NVIDIA H200" = 120
-# "Tesla V100-PCIE-32GB" = 45
-
-# Defining a metric jobscope does not ship, or repointing one it does.
-#
-# Run 'jobscope doctor --metrics' first: it lists every series your server carries
-# for a real job, and marks "new" the ones with no jobscope name. A table here gives
-# one a name, which [metrics] and [thresholds] then accept.
+# Run 'jobscope doctor --metrics' first: it marks "new" every series your server
+# carries that has no jobscope name. 'jobscope doctor --toml' emits them as a block
+# like this one, ready to edit.
 #
 # The family says how the series joins to a job: dcgm and nvml are GPU metrics
-# (uppercase UUID and lowercase uuid respectively), cgroup is per-job host metrics.
+# (uppercase UUID and lowercase uuid), cgroup is per-job host metrics.
 #
 # [metrics.dcgm.gpu_util]              # -> the config name "gpu_util"
 # query    = "DCGM_FI_DEV_GPU_UTIL"    # the series, exactly as doctor lists it
@@ -224,8 +273,7 @@ power_w = 100
 # decimals = 0
 # reducer  = "avg"                     # over the window: avg | max | delta
 # agg      = "mean"                    # across a job's GPUs: mean | sum | max
-# scale    = 1                         # multiplier on the raw value (100 for a
-#                                      # 0-1 fraction shown as a percent)
+# scale    = 1                         # 100 for a 0-1 fraction shown as a percent
 #
 # [metrics.cgroup.swap]
 # query  = "cgroup_memsw_used_bytes"
@@ -234,118 +282,14 @@ power_w = 100
 #                                      # cpus | total_memory
 # kind   = "gauge"                     # gauge | rate (a counter)
 #
-# A defined metric joins the *extended* catalog, so it appears under --dcgm or in
-# any view that names it. It never joins the default view on its own: defining one
-# cannot silently widen every report, or the queries every sweep pays for.
+# A defined metric joins the EXTENDED catalog, so it shows under --dcgm or wherever
+# it is named -- never the default view on its own, or defining one would silently
+# widen every report and the queries every sweep pays for.
 #
-# The same table with a BUILT-IN's name overrides it -- how a cluster whose exporter
-# uses different series names ports without patching jobscope. An override changes
-# only what it names; header, tier, group and roles are inherited, so this does not
-# rename the CPU% column or take it out of the classifier:
+# The same table with a BUILT-IN's name overrides it, which is how a cluster whose
+# exporter uses different series names ports without patching jobscope. An override
+# changes only what it names -- header, tier, group and roles are inherited, so this
+# does not rename the CPU% column or take it out of the classifier:
 #
 # [metrics.cgroup.cpu]
 # query = "container_cpu_usage_seconds_total"
-
-[metrics]
-# Which GPU/DCGM metrics each view collects and shows. GPU-side only: the CPU side
-# is CPU%/MEM% and fixed, because there are exactly two cgroup queries and no
-# catalog to choose from.
-#
-#   summary     the per-job table's profiling block (jobscope -p PART -a)
-#   timeseries  --ts / --plot_ts / --classify
-#   extended    what --dcgm/--ext widens to; "all" or an explicit list
-#
-# Name metrics by their short name -- the same ones [thresholds] takes: gpu, cpu,
-# sm_act, tensor, dram, occ, power, temp, energy, and so on. Run
-# 'jobscope describe --dcgm --ext' for the full catalog with descriptions, or
-# 'jobscope config' to see what your lists resolve to. Order here does not matter;
-# columns always print in catalog order.
-#
-# NOT covered: --per-gpu keeps a fixed four (SM_ACT%, TENSOR%, DRAM%, POWER_W). Its
-# rows are addressed by position, so its width is not free to change.
-#
-# Naming a blob-backed metric (gpu, mem, memtot) in `summary` is harmless and has no
-# effect -- GPU% and GMEM% already have their own columns there, from the sacct blob.
-summary    = ["sm_act", "tensor", "dram", "power"]
-timeseries = ["gpu", "sm_act", "tensor", "dram", "power"]
-extended   = "all"
-
-[colors]
-# What each classified tier looks like. The tier names are the ones [thresholds]
-# uses, plus `good`, which has a colour but no edge.
-#
-# Two tiers sharing a colour is the default, not a requirement -- for a
-# colourblind-safe palette, give all five distinct values.
-#
-# Takes the eight ANSI colours and their bright_ variants (black, red, green,
-# yellow, blue, magenta, cyan, white, bright_red, ...), or color(N) for the
-# 256-colour cube, e.g. color(33). Both the report's own output and 'jobscope plot'
-# read these, so a job is the same colour in a table and in a chart.
-wasteful    = "red"
-inefficient = "red"
-improvement = "yellow"   # the "needs improvement" tier
-average     = "green"
-good        = "green"
-# Not a tier: an entry on a Problem-jobs row whose job ran past
-# [defaults] long_running, which is the expensive kind of waste.
-long_running = "red"
-
-# Note the summary table's RED/YELLOW/GREEN columns keep those names whatever you
-# set here -- they are the three band *counts*, and the --csv output names them too,
-# so a script reading it does not break when you recolour the display.
-
-[defaults]
-# Default number of concurrent Prometheus query-sets for the GPU view.
-workers = 8
-# Default seconds per sacct / Prometheus call (0 disables the sacct timeout).
-timeout = 60
-# Runtime floor for the running view: jobs younger than this are hidden, because a
-# job still loading data or compiling kernels reads as idle. --min-elapsed overrides
-# it per invocation; "0s" shows everything.
-min_elapsed = "10m"
-# The `finished` window when none of -D/-N/-S/-E is given.
-days = 1
-# Which job endings `finished` reports without -t: completed (the default), failed,
-# timeout, cancelled, or all -- comma-separated, as -t takes. The default hides
-# failures, which is worth changing here if your site cares about them routinely.
-state = "completed"
-# How many jobs each Problem-jobs "Wasteful" row lists. The count beside the row's
-# heading says how many there were in total, so this is a lead, not a census.
-worst_jobs = 3
-# A Wasteful-row entry whose job ran at least this long is highlighted (see
-# [colors] long_running): hours of idle hardware do not come back.
-long_running = "3h"
-
-[report]
-# Which sections of the block below the job table print, and in what order. The
-# table itself is always the report; these three are what follows it.
-#
-#   metrics     "Summary by metric" -- each metric pooled, with its band split
-#   efficiency  the horizontal utilization bars (--no-plot drops these anyway)
-#   problems    "Problem jobs" -- the Wasteful rows and the job counts
-#
-# Drop one by leaving it out; reorder by listing them differently. A site that
-# reads Problem jobs first can put it first rather than scrolling past the rest.
-# Sections are numbered as printed, so the numbering follows this order.
-sections = ["metrics", "efficiency", "problems"]
-
-[plot]
-# Chart defaults, for both `jobscope plot` and --plot_ts, so a chart looks the same
-# whichever way it was drawn.
-
-# Which series a time-series chart draws when --metric is not given. Takes the same
-# short names as [metrics] and [thresholds] (gpu, sm_act, dram, ...) or plain column
-# headers. A name the CSV does not carry is skipped rather than charted empty, which
-# is how one list serves files with different columns -- and why the default can list
-# DUTY%, the old spelling of GPU%, so a CSV saved before the rename still charts.
-metrics = ["gpu", "DUTY%", "gmem", "sm_act", "occ", "tensor", "dram"]
-
-# One 256-colour code per charted series, cycled if there are more series than
-# codes. Distinct from [colors], which grades a value by its band -- these only tell
-# series apart, so what matters is that neighbours differ.
-palette = [196, 46, 33, 208, 201, 51, 226, 129, 244, 39]
-
-# Heatmap row cap. --max-rows overrides it per run.
-max_rows = 40
-# How many panels --by metric may place side by side before it starts dropping them.
-panels = 12

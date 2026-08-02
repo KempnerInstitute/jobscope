@@ -606,6 +606,17 @@ def test_the_shipped_example_reproduces_the_built_in_behaviour():
     assert dict(cfg.palette.colors) == dict(Palette().colors)
     assert (cfg.defaults.days, cfg.defaults.state, cfg.defaults.worst_jobs,
             cfg.defaults.long_running) == (1, "completed", 3, "3h")
+    # Thresholds too, which this did not used to cover. The template shipped
+    # `sm_act = 3` and a timeslice `cpu = 8` as live values -- opinions, not
+    # built-ins -- so copying it quietly regraded every job. They are commented
+    # suggestions now, and this is what keeps them that way.
+    from jobscope.config import DEFAULT_BANDS
+    for bands in (cfg.thresholds, cfg.timeslice_thresholds):
+        for key, value in DEFAULT_BANDS.items():
+            assert bands.edge(key) == value
+            assert bands.edge(key, "SM_ACT%") == value
+        assert bands.edge("wasteful", "CPU%") == 5      # the one built-in calibration
+
 
 
 # --- [site]: the label conventions a port has to change -------------------
@@ -1009,3 +1020,79 @@ def test_plot_rejects_bad_values(hermetic_config, tmp_path, body, expect):
     with pytest.raises(JobscopeError) as excinfo:
         load_config(str(path))
     assert expect in str(excinfo.value)
+
+
+# --- [thresholds] edges: the one-line ladder ---------------------------------
+
+def _edges_config(tmp_path, body):
+    path = tmp_path / "c.toml"
+    path.write_text(body)
+    return load_config(str(path))
+
+
+def test_edges_seeds_both_views(hermetic_config, tmp_path):
+    """One line replaces eight tables, and it reaches the timeslice view too."""
+    cfg = _edges_config(tmp_path, "[thresholds]\nedges = [5, 15, 25, 50]\n")
+    for bands in (cfg.thresholds, cfg.timeslice_thresholds):
+        assert [bands.edge(k) for k in config_module.EDGE_KEYS] == [5, 15, 25, 50]
+
+
+def test_a_per_view_table_overrides_edges(hermetic_config, tmp_path):
+    """Narrowest wins: DEFAULT_BANDS < edges < the view's default < per-metric."""
+    cfg = _edges_config(tmp_path, "[thresholds]\nedges = [5, 15, 25, 50]\n"
+                                  "[thresholds.summary.wasteful]\ncpu = 9\n")
+    assert cfg.thresholds.edge("wasteful", "CPU%") == 9      # per-metric
+    assert cfg.thresholds.edge("wasteful", "GPU%") == 5      # edges
+    assert cfg.thresholds.edge("average", "CPU%") == 50      # edges, untouched
+    # The other view saw the same edges and none of the override.
+    assert cfg.timeslice_thresholds.edge("wasteful", "CPU%") == 5
+
+
+def test_edges_matching_the_builtins_keeps_the_calibrations(hermetic_config, tmp_path):
+    """Writing out the default ladder must not be a way to lose CPU%'s own cutoff.
+
+    _with_calibrations detects "the site retuned this edge" by comparing against
+    DEFAULT_BANDS, so edges equal to it reads as no instruction at all -- which is
+    the answer that keeps `jobscope config --example` honest, since the example
+    prints the ladder it is documenting.
+    """
+    cfg = _edges_config(tmp_path, "[thresholds]\nedges = [2, 10, 20, 40]\n")
+    assert cfg.thresholds.edge("wasteful", "CPU%") == 5
+
+
+def test_retuned_edges_drop_the_calibrations(hermetic_config, tmp_path):
+    """The other side of the same rule, pinned because it surprises.
+
+    Moving `wasteful` by one silently takes CPU% off its own 5% cutoff and onto the
+    shared ladder. That is deliberate -- an explicit instruction beats our opinion --
+    but it is invisible unless a test says so.
+    """
+    cfg = _edges_config(tmp_path, "[thresholds]\nedges = [3, 10, 20, 40]\n")
+    assert cfg.thresholds.edge("wasteful", "CPU%") == 3
+    # Only the edge that moved loses its calibration; the rest stay.
+    assert cfg.thresholds.edge("average", "CPU%") == 40
+
+
+@pytest.mark.parametrize("body,expect", [
+    ("edges = [40, 10, 20, 2]", "must not decrease"),
+    ("edges = [1, 2, 3]", "takes 4 numbers"),
+    ("edges = 2", "must be a list of 4 numbers"),
+    ('edges = "2,10,20,40"', "must be a list of 4 numbers"),
+    ('edges = ["a", 2, 3, 4]', "is not a number"),
+])
+def test_edges_rejects_a_bad_ladder(hermetic_config, tmp_path, body, expect):
+    with pytest.raises(JobscopeError) as excinfo:
+        _edges_config(tmp_path, "[thresholds]\n%s\n" % body)
+    assert expect in str(excinfo.value)
+
+
+def test_the_one_view_note_names_edges_when_they_are_set(hermetic_config, tmp_path, capsys):
+    """The note said the other view "keeps the built-in edges", which edges makes
+    false -- it keeps those. Naming the wrong one sends someone hunting a number
+    that is not there."""
+    _edges_config(tmp_path, "[thresholds]\nedges = [5, 15, 25, 50]\n"
+                            "[thresholds.summary.wasteful]\ndefault = 6\n")
+    assert "keeps the [thresholds] edges" in capsys.readouterr().err
+
+    _edges_config(tmp_path, "[thresholds.summary.wasteful]\ndefault = 6\n")
+    assert "keeps the built-in edges" in capsys.readouterr().err

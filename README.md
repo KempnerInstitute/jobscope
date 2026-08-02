@@ -203,7 +203,13 @@ to a site's conventions is a TOML edit rather than a patch:
 | `[plot]` | chart defaults: which series, which colours, the row and panel caps |
 
 `jobscope config` prints all of it as it actually resolves; `jobscope config
---example` is the full commented template.
+--example` is the commented template, ordered required-first with everything below
+its divider being tuning. [`docs/config.md`](docs/config.md) carries the reasoning
+that is longer than the setting — how to choose a power floor, which metric families
+you can do without, why the two band tables inherit nothing from each other.
+
+The template resolves exactly like no config file at all, so copying it is never a
+silent regrade.
 
 The Prometheus URL commonly embeds a credential, so jobscope treats it as a
 secret: no command prints it, and a `config.toml` in a repo checkout is

@@ -15,7 +15,7 @@ import shutil
 import sys
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
-from typing import Mapping, Optional, Tuple
+from typing import Dict, Mapping, Optional, Tuple
 
 from .errors import JobscopeError
 
@@ -866,18 +866,25 @@ def load_config(path: Optional[str] = None,
 
     power_w = float(thr.get("power_w", DEFAULT_POWER_W))
     by_model = {str(k): float(v) for k, v in (thr.get("power_w_by_model") or {}).items()}
+    edges = _edges(thr.get("edges"))
     named = [view for view in BAND_VIEWS if view in thr]
     if len(named) == 1:
         # Nothing is inherited between the two, by design -- so a config that tunes
         # one and forgets the other grades the same job differently depending on
         # whether --ts was passed. Say so once; it stops as soon as both are set.
+        #
+        # What the other view falls back to depends on whether `edges` was given, and
+        # naming the wrong one sends someone looking for a number that is not there.
         other = [view for view in BAND_VIEWS if view != named[0]][0]
         print("note: [thresholds.%s] is set but [thresholds.%s] is not, so the two"
-              " views grade differently -- %s keeps the built-in edges (nothing is"
-              " inherited between them). 'jobscope config' prints both."
-              % (named[0], other, other), file=sys.stderr)
+              " views grade differently -- %s keeps %s (nothing is inherited between"
+              " them). 'jobscope config' prints both."
+              % (named[0], other, other,
+                 "the [thresholds] edges" if edges else "the built-in edges"),
+              file=sys.stderr)
     vote, floors, ceilings = _classify(data.get("classify") or {}, power_w, by_model)
-    bands = {view: _band_table(thr.get(view) or {}, view, floors, vote, ceilings)
+    bands = {view: _band_table(thr.get(view) or {}, view, floors, vote, ceilings,
+                               base=edges)
              for view in BAND_VIEWS}
 
     defaults = Defaults(
@@ -1275,13 +1282,50 @@ def _known_percent_headers() -> frozenset:
                         if spec.header.endswith("%")])
 
 
+def _edges(raw) -> Dict[str, float]:
+    """``[thresholds] edges = [2, 10, 20, 40]`` -> the four defaults, or ``{}``.
+
+    The one-line form of the ladder, for a site that wants the same bands everywhere.
+    It seeds *both* views, which the per-view tables then override -- so the whole
+    of ``[thresholds.summary.*]`` and ``[thresholds.timeslice.*]`` collapses to one
+    line when a site is not treating a window differently from a whole job.
+
+    A list rather than four named keys because the order *is* the meaning: the edges
+    have to be non-decreasing, and reading them left to right is how you check that.
+    ``_check_order`` still verifies it per view once the tables are merged in.
+    """
+    if raw is None:
+        return {}
+    example = "edges = [%s]" % ", ".join("%g" % DEFAULT_BANDS[k] for k in EDGE_KEYS)
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        raise JobscopeError("[thresholds] edges must be a list of %d numbers -- %s"
+                            % (len(EDGE_KEYS), example))
+    if len(raw) != len(EDGE_KEYS):
+        raise JobscopeError(
+            "[thresholds] edges takes %d numbers, one per band edge (%s), not %d"
+            " -- %s" % (len(EDGE_KEYS), ", ".join(EDGE_KEYS), len(raw), example))
+    out = {}
+    for key, value in zip(EDGE_KEYS, raw):
+        try:
+            out[key] = float(value)
+        except (TypeError, ValueError):
+            raise JobscopeError("[thresholds] edges: %r is not a number -- %s"
+                                % (value, example))
+    return out
+
+
 def _band_table(table: Mapping, view: str, floors: Mapping,
-                vote: Optional[Tuple[str, ...]], ceilings: Mapping) -> Thresholds:
+                vote: Optional[Tuple[str, ...]], ceilings: Mapping,
+                base: Optional[Mapping[str, float]] = None) -> Thresholds:
     """One view's ``[thresholds.<view>]`` block -> a :class:`Thresholds`.
 
     Each ``[thresholds.<view>.<edge>]`` sub-table gives that edge a ``default`` plus
-    any per-metric overrides. Absent entirely, the view keeps :data:`DEFAULT_BANDS`
-    -- it never falls back to the other view.
+    any per-metric overrides. Absent entirely, the view keeps ``base`` -- and absent
+    that, :data:`DEFAULT_BANDS`. It never falls back to the other view.
+
+    ``base`` is ``[thresholds] edges``, shared by both views. Four layers, narrowest
+    last: DEFAULT_BANDS, then ``edges``, then this view's ``default``, then this
+    view's per-metric entries.
     """
     where = "[thresholds.%s]" % view
     if not isinstance(table, Mapping):
@@ -1294,7 +1338,7 @@ def _band_table(table: Mapping, view: str, floors: Mapping,
             "  [thresholds.%s.wasteful]\n  default = 2\n  gpu = 2\n  cpu = 5"
             % (where, ", ".join(sorted(unknown)), ", ".join(EDGE_KEYS), view))
 
-    defaults, by_metric = {}, {}
+    defaults, by_metric = dict(base or {}), {}
     for key in EDGE_KEYS:
         if key not in table:
             continue
