@@ -11,7 +11,8 @@ column flags answer *how to show them* and are shared by all three, which the
 earlier per-view subcommands could not do -- ``live`` had no ``--cpu``, the
 historical views had no ``--min-elapsed``, and so on.
 
-``plot``, ``describe`` and ``config`` are utilities and take the first slot too.
+``plot``, ``describe``, ``config`` and ``doctor`` are utilities and take the first
+slot too.
 The old ``summary``/``detail``/``dcgm``/``live`` subcommands survive as deprecated
 aliases; see :data:`DEPRECATED`.
 """
@@ -23,7 +24,7 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
-from . import __version__, config, plot
+from . import __version__, config, doctor, plot
 from .dcgm import DCGM_HEADERS
 from .errors import JobscopeError
 from .live import format_duration, parse_duration
@@ -41,7 +42,7 @@ from .sacct import DEFAULT_STATE, default_user
 from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
 
 MODES = (RUNNING, FINISHED)
-UTILITIES = ("plot", "describe", "config")
+UTILITIES = ("plot", "describe", "config", "doctor")
 
 # Flags an explicit JOBID makes inert -- the IDs are the selection, so there is
 # nothing left for a window or a filter to narrow. build_request names these in its
@@ -252,6 +253,14 @@ def build_parser():
     p_config.add_argument("--path", action="store_true",
                           help="print the config path jobscope would read")
     p_config.set_defaults(func=handle_config)
+
+    p_doctor = subparsers.add_parser(
+        "doctor", parents=[base],
+        help="check what this cluster exposes and whether jobscope can read it")
+    p_doctor.add_argument("--metrics", nargs="?", const="", metavar="JOBID",
+                          help="also list the metrics the server carries for a job "
+                               "(a recent GPU job if none is named)")
+    p_doctor.set_defaults(func=handle_doctor)
 
     return parser, subparsers
 
@@ -760,6 +769,17 @@ def handle_describe(args) -> None:
         describe_dcgm(list(wide if args.ext else cfg.metrics.summary), extended=wide)
     else:
         describe()
+
+
+def handle_doctor(args) -> None:
+    cfg = _apply_config(args)
+    # args.metrics is None when the flag is absent, "" when given bare, and the job
+    # ID when given one -- so the bare form means "pick a job for me".
+    status = doctor.run(sys.stdout, cfg, args.config_path, cfg.defaults.timeout,
+                        metrics=args.metrics is not None,
+                        jobid=args.metrics or None)
+    if status:
+        raise SystemExit(status)
 
 
 def handle_config(args) -> None:

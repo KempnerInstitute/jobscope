@@ -96,10 +96,35 @@ uv run --extra dev pytest     # run the test suite
 
 ## Configuration
 
+### Start with `jobscope doctor`
+
+Before configuring anything, ask the cluster what it has:
+
+```bash
+jobscope doctor              # can jobscope reach Slurm and Prometheus, and how far back
+jobscope doctor --metrics    # every metric this server carries for a real job
+```
+
+`doctor` reads nothing but your cluster and writes nothing at all, and each check
+fails independently -- so it is useful precisely when jobscope does *not* yet
+work. It reports which Slurm accounting sources are populated, whether jobstats
+blobs are being written, how far back Prometheus actually holds data, and whether
+the join labels are the ones the collectors assume.
+
+`--metrics` is the one to run before editing `[metrics]` or `[thresholds]`: it
+lists each series alongside the short name config takes, and marks it `ok`
+(catalogued and present), `new` (present, jobscope has no name for it yet) or
+`absent` (catalogued but this server does not carry it -- for example
+`DCGM_FI_PROF_PIPE_TENSOR_DFMA_ACTIVE`, which A100s do not export and H100s do).
+A metric jobscope names but your cluster lacks would otherwise just render blank
+forever.
+
+### Pointing jobscope at Prometheus
+
 The GPU columns, and every column for a running job, need a Prometheus endpoint
 serving the DCGM, `nvidia_gpu_*` and `cgroup_*` series. (`finished --cpu`, and
-everything under `describe` and `config`, need nothing.) Provide it one of these
-ways.
+everything under `describe`, `config` and the non-metric half of `doctor`, need
+nothing.) Provide it one of these ways.
 
 ```bash
 # Preferred: environment variable (keeps a credential out of any file)
@@ -133,10 +158,14 @@ to a site's conventions is a TOML edit rather than a patch:
 `jobscope config` prints all of it as it actually resolves; `jobscope config
 --example` is the full commented template.
 
-The Prometheus URL commonly embeds a credential: jobscope never prints it, and a
-`config.toml` in a repo checkout is git-ignored. On sites already running
-jobstats, `site_jobstats_config_path` reuses that install's `PROM_SERVER`, so the
-secret is never copied.
+The Prometheus URL commonly embeds a credential, so jobscope treats it as a
+secret: no command prints it, and a `config.toml` in a repo checkout is
+git-ignored. The single exception is `jobscope doctor`, which has to name the
+endpoint it is talking to and shows it with the credential replaced --
+`https://***@prometheus.example.net/api/prom` -- so its output stays safe to
+paste into a ticket. On sites already running jobstats,
+`site_jobstats_config_path` reuses that install's `PROM_SERVER`, so the secret is
+never copied.
 
 ## Quick start
 
@@ -702,6 +731,7 @@ the display.
 | `jobscope plot` | render `--csv` output as a terminal chart |
 | `jobscope describe` | plain-English column and metric reference (`--dcgm` for the catalog) |
 | `jobscope config` | show the config path or print an example |
+| `jobscope doctor` | check what this cluster exposes and whether jobscope can read it |
 
 ## Running jobs
 

@@ -699,7 +699,8 @@ def resolve_prometheus(cfg: Config) -> Tuple[str, int]:
     the directory of the ``jobstats`` binary auto-discovered on ``PATH`` (skipped
     silently when it holds no usable config). Raises :class:`JobscopeError` with
     actionable guidance when none is available. The URL can embed a credential,
-    so callers must never log or print it.
+    so callers must never log or print it -- :func:`redact_url` exists for the one
+    caller that has to show the user which endpoint it is talking to.
     """
     url = cfg.prometheus_url
     sampling_period = cfg.sampling_period
@@ -742,6 +743,28 @@ def _import_site_prometheus(config_path: str,
                 "could not import the site jobstats config from %r: %s" % (config_path, exc))
         return None, None
     return getattr(site, "PROM_SERVER", None), getattr(site, "SAMPLING_PERIOD", None)
+
+
+def redact_url(url: str) -> str:
+    """``url`` with any embedded credential replaced, safe to print.
+
+    Grafana Cloud and Mimir endpoints commonly carry ``user:token@`` in the
+    netloc, so the configured URL is a secret even though it looks like an
+    address. Everything else is kept, because the host and path are exactly what
+    someone diagnosing a wrong endpoint needs to see.
+
+    Only the userinfo is removed -- a query string is left alone, since none of
+    the supported forms put a credential there and blanking it would hide a real
+    misconfiguration.
+    """
+    scheme, sep, rest = str(url).partition("://")
+    if not sep:
+        return str(url)
+    netloc, slash, path = rest.partition("/")
+    if "@" not in netloc:
+        return str(url)
+    _userinfo, _, host = netloc.rpartition("@")
+    return "%s://%s%s%s" % (scheme, "***@" + host, slash, path)
 
 
 def _no_endpoint_message(cfg: Config) -> str:

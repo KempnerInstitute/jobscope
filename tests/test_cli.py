@@ -826,7 +826,7 @@ def test_the_top_level_help_is_untouched(capsys):
     with pytest.raises(SystemExit):
         main(["--help"])
     body = capsys.readouterr().out
-    assert "{running,finished,plot,describe,config}" in body
+    assert "{running,finished,plot,describe,config,doctor}" in body
     assert "hiding" not in body
 
 
