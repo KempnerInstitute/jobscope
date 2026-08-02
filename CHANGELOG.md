@@ -63,6 +63,41 @@ carrying it has empty metric cells rather than zeros, so a monitoring outage no 
 reads as a fleet of wasteful jobs. Anything that treats an unrecognised `LABEL` as an
 error should be taught this one.
 
+### `doctor` is now `probe`, and `probe --init` sets up a site
+
+`doctor` said nothing about what it examines. It probes the telemetry sources — Slurm,
+the jobstats blob, the Prometheus exporters — and reports what each can answer.
+`jobscope doctor` is an error naming the new spelling.
+
+Everything it discovered used to be printed and thrown away; a person porting jobscope
+read the output and hand-wrote a config repeating it. `probe --init` writes that config
+instead:
+
+```
+$ jobscope probe            # what does this cluster expose
+$ jobscope probe --init     # write a config from what it just found
+```
+
+It writes only if nothing is there — an existing config turns it into stdout plus a
+note, since a config is hand-tuned within a week and that tuning has no other copy.
+`--full` appends every remaining knob, commented.
+
+Detected: `sampling_period` (from raw sample spacing), the `[site]` join labels,
+`[metrics]` narrowed to series this server carries, and per-model power floors.
+Thresholds are deliberately absent — a band edge is policy, not a property of the
+cluster.
+
+The power floors matter most: the flat 100 W default is wrong for most hardware, and
+about half of any fleet's models measure cleanly at once, so `--init` emits floors for
+those and comments the rest with the reason. A wrong floor silently caps healthy jobs
+at `inefficient`.
+
+### `jobscope config` shows the endpoint
+
+It printed every band table but never the Prometheus URL — the one setting that has to
+be right first — nor which of the three sources supplied it. Redacted, because the URL
+commonly embeds a credential.
+
 ### Breaking: the old subcommands and eight duplicate flag spellings are gone
 
 `summary`, `detail`, `dcgm` and `live` were rewritten into flags with a deprecation

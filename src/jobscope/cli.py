@@ -270,6 +270,11 @@ def build_parser():
     p_probe.add_argument("--toml", nargs="?", const="", metavar="JOBID",
                           help="print the discovered metrics as an editable [metrics] "
                                "block, to append to a config file")
+    p_probe.add_argument("--init", action="store_true",
+                         help="write a config for this site from what was detected "
+                              "(only if none exists; otherwise prints it)")
+    p_probe.add_argument("--full", action="store_true",
+                         help="with --init, append every remaining knob, commented")
     p_probe.add_argument("--validate", nargs="?", const="", metavar="JOBID",
                           help="compare one job's utilization across Prometheus, the "
                                "jobstats blob and Slurm's own accounting")
@@ -794,13 +799,29 @@ def handle_describe(args) -> None:
 
 
 def handle_probe(args) -> None:
-    cfg = _apply_config(args)
+    # --init is the one command whose named config file is *expected* to be absent --
+    # that is the file it is about to write. Everywhere else a missing -c path is a
+    # typo and must stay an error, so the tolerance is scoped to this flag.
+    if args.init:
+        try:
+            cfg = _apply_config(args)
+        except JobscopeError:
+            # Fall back to built-in defaults, dropping only $JOBSCOPE_CONFIG -- the
+            # env copy keeps $JOBSCOPE_PROM_URL, which is how --init finds the
+            # endpoint it is about to describe. A bare load_config() would consult
+            # the same missing path and raise again.
+            env = {k: v for k, v in os.environ.items() if k != config.CONFIG_ENV}
+            config.set_config(config.load_config(env=env))
+            cfg = config.get_config()
+    else:
+        cfg = _apply_config(args)
     # Each flag is None when absent, "" when given bare, and the job ID when given
     # one -- so the bare form means "pick a recent job for me".
     status = probe.run(sys.stdout, cfg, args.config_path, cfg.defaults.timeout,
                         metrics=args.metrics is not None,
                         validate=args.validate is not None,
                         toml=args.toml is not None,
+                        init=args.init, full=args.full,
                         jobid=args.metrics or args.validate or args.toml or None)
     if status:
         raise SystemExit(status)

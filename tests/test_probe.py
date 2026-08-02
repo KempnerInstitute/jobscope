@@ -4,6 +4,7 @@ import io
 
 import pytest
 
+from jobscope import config as config_module
 from jobscope import probe
 from jobscope.config import redact_url
 
@@ -316,7 +317,6 @@ def test_the_output_is_a_loadable_config(gpu_record, monkeypatch, tmp_path,
                                         hermetic_config):
     """The whole point: `probe --toml >> config.toml` has to produce a config file,
     and the live blocks have to take effect."""
-    from jobscope import config as config_module
     from jobscope import dcgm
     monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"cgroup": ["cgroup_memory_rss_bytes", "cgroup_memsw_used_bytes"],
@@ -420,3 +420,98 @@ def test_power_floors_fall_back_to_a_margin_above_idle_when_nothing_was_busy():
     value, why = floors["V100"]
     assert value == 40                        # 31 x 1.15, to the nearest 10
     assert "no busy samples" in why
+
+
+# --- probe --init: the generated site config ---------------------------------
+
+class _InitClient:
+    """Enough of a server to answer every detector --init runs."""
+
+    url = "http://prom:9090/api/v1"
+    sampling_period = 60
+
+    def query(self, query, at, timeout=None):
+        if query.endswith("[10m]"):                       # detect_scrape
+            return [{"metric": {}, "values": [[t, "1"] for t in range(0, 600, 30)]}]
+        if "quantile" in query:                           # measure_power_floors
+            watts = 40.0 if "0.9" in query else 200.0
+            return [{"metric": {"modelName": "Tesla V100"}, "value": [at, str(watts)]}]
+        if "count by" in query:                           # detect_labels
+            label = query.split("(", 1)[1].split(")", 1)[0]
+            return [{"metric": {label: "n1"}, "value": [at, "1"]}]
+        return [{"metric": {}, "value": [at, "1"]}]
+
+
+def _init_text(tmp_path, monkeypatch, full=False):
+    monkeypatch.setattr(probe, "_scontrol_config", lambda t: {"ClusterName": "testbed"})
+    monkeypatch.setattr(probe, "probe_series", lambda *a, **k: None)
+    out = io.StringIO()
+    probe.emit_config(out, _InitClient(), config_module.get_config(), 30, full=full)
+    return out.getvalue()
+
+
+def test_init_emits_only_detected_values(hermetic_config, tmp_path, monkeypatch):
+    """Thresholds are absent on purpose: a band edge is a policy choice about what
+    counts as waste, not a property of the cluster."""
+    text = _init_text(tmp_path, monkeypatch)
+    assert "[thresholds" not in text
+    assert "sampling_period = 30" in text            # measured, not the client's 60
+    assert 'host_label   = "host"' in text
+    assert "testbed" in text                         # named the cluster it probed
+
+
+def test_init_never_writes_the_endpoint(hermetic_config, tmp_path, monkeypatch):
+    """The URL commonly embeds a Grafana Cloud token; a generated file must not be
+    where that lands."""
+    text = _init_text(tmp_path, monkeypatch)
+    assert "prom:9090" not in text
+    assert "No url" in text and "credential" in text
+
+
+def test_init_parses_as_toml(hermetic_config, tmp_path, monkeypatch):
+    """The whole point: this is a config file, not a report about one."""
+    data = config_module._toml.loads(_init_text(tmp_path, monkeypatch))
+    assert set(data) == {"prometheus", "site", "metrics", "classify"}
+    assert data["classify"]["floor"]["power"]["Tesla V100"] == 120   # (40 + 200) / 2
+
+
+def test_init_full_appends_only_commented_knobs(hermetic_config, tmp_path, monkeypatch):
+    """--full appends the template's tuning half. It must stay parseable: two
+    [prometheus] blocks in one file is a TOML error, not an override, so only the
+    all-comments section below the divider can be concatenated."""
+    text = _init_text(tmp_path, monkeypatch, full=True)
+    assert text.count("[prometheus]") == 1
+    data = config_module._toml.loads(text)
+    assert set(data) == {"prometheus", "site", "metrics", "classify"}
+
+
+def test_init_refuses_to_overwrite_an_existing_config(hermetic_config, tmp_path,
+                                                     monkeypatch):
+    """A config is hand-tuned within a week of being written, and the tuning has no
+    other copy. So an existing file turns --init into stdout plus a note."""
+    monkeypatch.setattr(probe, "_scontrol_config", lambda t: {})
+    monkeypatch.setattr(probe, "probe_series", lambda *a, **k: None)
+    path = tmp_path / "c.toml"
+    path.write_text("# hand-tuned, do not lose\n")
+
+    out, notes = io.StringIO(), io.StringIO()
+    status = probe.write_config(out, notes, _InitClient(), config_module.get_config(),
+                                str(path), 30, None, None, False)
+    assert status == 0
+    assert path.read_text() == "# hand-tuned, do not lose\n"      # untouched
+    assert "already exists" in notes.getvalue()
+    assert "[site]" in out.getvalue()                             # printed instead
+
+
+def test_init_writes_when_nothing_is_there(hermetic_config, tmp_path, monkeypatch):
+    monkeypatch.setattr(probe, "_scontrol_config", lambda t: {})
+    monkeypatch.setattr(probe, "probe_series", lambda *a, **k: None)
+    path = tmp_path / "sub" / "c.toml"                 # parent does not exist either
+    out, notes = io.StringIO(), io.StringIO()
+    status = probe.write_config(out, notes, _InitClient(), config_module.get_config(),
+                               str(path), 30, None, None, False)
+    assert status == 0 and out.getvalue() == ""
+    assert "[site]" in path.read_text()
+    assert "wrote" in notes.getvalue()
+    # And what it wrote is loadable.
+    assert config_module.load_config(str(path)).site.host_label == "host"

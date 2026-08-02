@@ -96,16 +96,53 @@ uv run --extra dev pytest     # run the test suite
 
 ## Configuration
 
-### Start with `jobscope probe`
+### Setting up a site: two commands
 
-Before configuring anything, ask the cluster what it has:
+```bash
+jobscope probe              # what does this cluster expose, and can jobscope read it
+jobscope probe --init       # write a config from what it just found
+```
+
+`--init` turns the findings into a config instead of prose. It writes to the path
+jobscope will read (`-c`, then `$JOBSCOPE_CONFIG`, then
+`~/.config/jobscope/config.toml`) — but **only if nothing is there**. An existing
+file turns it into stdout plus a note, because a config is hand-tuned within a week
+of being written and that tuning has no other copy.
+
+What it detects, all of it measured rather than assumed:
+
+| setting | how |
+|---|---|
+| `[prometheus] sampling_period` | the spacing of raw samples — **not** `query_range`, which returns whatever step you pass |
+| `[site]` labels | probed against real series, trying `instance`/`host`/`node`/`nodename` when the configured one answers nothing |
+| `[metrics]` lists | narrowed to series this server actually carries, so a missing exporter does not leave columns blank forever |
+| `[classify.floor.power]` | per GPU model: idle p90 vs busy p10, floor between them |
+
+**Thresholds are deliberately absent.** A band edge is a policy choice about what
+counts as waste, not a property of the cluster, so the built-ins apply until you set
+them. `jobscope probe --init --full` appends every remaining knob, commented.
+
+The power floors are the part worth reading. The built-in flat 100 W is wrong for most
+hardware — an idle RTX PRO 6000 draws more than a working V100 — and `--init` measures
+each model instead. Roughly half of them measure cleanly at any given moment, so it
+emits floors only for those and **comments the rest with the reason**:
+
+```toml
+"NVIDIA H100 80GB HBM3" = 130   # idle p90 111 W, busy p10 141 W
+# "NVIDIA A100-SXM4-40GB"  -- idle p90 97 W and busy p10 96 W overlap;
+#                             measure again over a longer window
+```
+
+A wrong floor is worse than none: it silently caps healthy jobs at `inefficient`.
+
+### What `probe` reports
 
 ```bash
 jobscope probe              # can jobscope reach Slurm and Prometheus, and how far back
 jobscope probe --metrics    # every metric this server carries for a real job
 ```
 
-`probe` reads nothing but your cluster and writes nothing at all, and each check
+`probe` reads nothing but your cluster, and apart from `--init` writes nothing. Each check
 fails independently -- so it is useful precisely when jobscope does *not* yet
 work. It reports which Slurm accounting sources are populated, whether jobstats
 blobs are being written, how far back Prometheus actually holds data, and whether

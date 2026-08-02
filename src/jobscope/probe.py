@@ -742,13 +742,14 @@ column stays blank.""" % (NEW, ABSENT), file=out)
 
 def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
         metrics: bool = False, validate: bool = False, toml: bool = False,
-        jobid: Optional[str] = None) -> int:
+        jobid: Optional[str] = None, init: bool = False, full: bool = False) -> int:
     """Print the report. Returns a process exit status."""
     # With --toml, stdout has to be a config file and nothing else: the documented
     # move is `jobscope probe --toml >> config.toml`, and a diagnosis section
     # appended ahead of it is prose where TOML belongs. The checks still run, and
     # still print -- to stderr, where a redirect leaves them visible.
-    notes = sys.stderr if toml else out
+    # With --toml or --init, stdout is a config file and nothing else.
+    notes = sys.stderr if (toml or init) else out
     check_slurm(notes, timeout)
     sample = sample_jobs(timeout)
     check_blob(notes, sample)
@@ -759,6 +760,9 @@ def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
               "an endpoint.", file=notes)
         return 1
     check_labels(notes, client, timeout)
+    if init:
+        return write_config(out, notes, client, cfg, config_path, timeout, jobid,
+                            sample, full)
     if toml:
         return emit_toml(out, client, jobid, timeout, sample)
     if validate:
@@ -771,11 +775,186 @@ def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
     if metrics:
         return discover_metrics(out, client, jobid, timeout, sample)
     print("\nNext:\n"
+          "  jobscope probe --init       write a config for this site from the above\n"
           "  jobscope probe --metrics    what this server carries, and its config names\n"
           "  jobscope probe --toml       the same as an editable [metrics] block\n"
           "  jobscope probe --validate   compare Prometheus against Slurm's accounting",
           file=out)
     return 0
+
+
+def write_config(out, notes, client, cfg, config_path: Optional[str],
+                 timeout: Optional[float], jobid: Optional[str], sample,
+                 full: bool) -> int:
+    """Write the generated config to the default path, or print it if one is there.
+
+    Writing is the whole point -- "one command to set up a site" is not one command if
+    it ends in a redirect -- but never *over* a file. A config is hand-tuned within a
+    week of being written, and a tool that silently replaces it has destroyed work
+    that has no other copy. So an existing file turns this into stdout plus a note,
+    which is the behaviour ``--toml`` has always had.
+    """
+    import io as _io
+
+    buffer = _io.StringIO()
+    emit_config(buffer, client, cfg, timeout, jobid, sample, full)
+    text = buffer.getvalue()
+
+    # The same precedence load_config reads: the -c argument, then $JOBSCOPE_CONFIG,
+    # then the default path. Writing somewhere other than where jobscope will look for
+    # it is the one outcome that would make this command actively misleading.
+    path = (config_path or os.environ.get(config.CONFIG_ENV)
+            or str(config.default_config_path()))
+    if os.path.exists(path):
+        print("\nnote: %s already exists, so this is stdout rather than a write.\n"
+              "      Compare it, or redirect if you mean to replace it." % path,
+              file=notes)
+        out.write(text)
+        return 0
+    directory = os.path.dirname(path)
+    try:
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+    except OSError as exc:
+        print("\ncannot write %s: %s -- here it is instead." % (path, exc), file=notes)
+        out.write(text)
+        return 1
+    print("\nwrote %s (%d lines)\n\n"
+          "  next: jobscope config                 # what it resolves to\n"
+          "        jobscope -j <a recent job>      # try it\n"
+          "        jobscope probe --init --full    # the same, plus every knob commented"
+          % (path, len(text.splitlines())), file=notes)
+    return 0
+
+
+# --- the generated site config ------------------------------------------------
+
+def _present_series(client, jobid: Optional[str], timeout: Optional[float],
+                    sample=None) -> Optional[set]:
+    """Every series name this server carries for one real job, or None if unprobed."""
+    probed = probe_series(client, jobid, timeout, sample)
+    if probed is None:
+        return None
+    _record, families = probed
+    return {name for _family, names in families for name in names}
+
+
+def _view_metrics(view: str, present: Optional[set]) -> Tuple[List[str], List[str]]:
+    """``(kept, dropped)`` config names for ``view``, against what the server carries.
+
+    Narrowing matters for a site without one of the exporters: a metric jobscope asks
+    for and the server does not have renders as a blank column on every report,
+    forever, with nothing saying why. Naming the dropped ones in a comment is what
+    makes that recoverable when the exporter arrives later.
+    """
+    specs = getattr(config.get_config().metrics, view)
+    if present is None:
+        return [s.key for s in specs], []
+    kept = [s.key for s in specs if s.metric in present]
+    dropped = [s.key for s in specs if s.metric not in present]
+    return kept, dropped
+
+
+def _toml_str(value: str) -> str:
+    return '"%s"' % value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def emit_config(out, client, cfg, timeout: Optional[float],
+                jobid: Optional[str] = None, sample=None, full: bool = False) -> None:
+    """Write a minimal config for this site, from what was actually detected.
+
+    Only detected values. Thresholds are absent on purpose: a band edge is a policy
+    choice about what counts as waste, not a property of the cluster, and a generated
+    file that quietly set them would be the tool deciding site policy.
+
+    No ``url`` line either. The endpoint comes from jobstats auto-discovery or
+    ``$JOBSCOPE_PROM_URL``, and writing it here would put a Grafana Cloud token in a
+    file -- which is what ``[prometheus] url``'s own comment warns against.
+    """
+    cluster = ""
+    try:
+        cluster = _scontrol_config(timeout).get("ClusterName", "")
+    except Exception:
+        pass
+    print("# jobscope site configuration, generated by 'jobscope probe --init'%s.\n"
+          "#\n"
+          "# Detected values only. Thresholds are deliberately absent: a band edge is a\n"
+          "# policy choice about what counts as waste, not a property of this cluster, so\n"
+          "# jobscope's built-ins apply until you set them. 'jobscope config --example'\n"
+          "# prints every knob with its reasoning.\n"
+          "#\n"
+          "# Re-run to see fresh values; this file is never rewritten in place."
+          % (" on %s" % cluster if cluster else ""), file=out)
+
+    scrape = detect_scrape(client, timeout)
+    print("\n[prometheus]", file=out)
+    if scrape:
+        print("sampling_period = %d       # measured from raw sample spacing" % scrape,
+              file=out)
+    else:
+        print("# sampling_period       # could not measure it; %d is the built-in default"
+              % client.sampling_period, file=out)
+    print("# No url: it comes from $JOBSCOPE_PROM_URL or the jobstats config.py, and\n"
+          "# writing it here would put a credential in a file. 'jobscope config' shows\n"
+          "# which of those answered.", file=out)
+
+    labels = detect_labels(client, timeout)
+    print("\n[site]", file=out)
+    for field, what in (("host_label", "node names on cgroup series"),
+                        ("jobid_label", "job join for cgroup series"),
+                        ("gpu_job_join", "the only job-to-GPU join there is")):
+        value = labels.get(field)
+        if value:
+            print("%-12s = %-22s # confirmed: %s" % (field, _toml_str(value), what),
+                  file=out)
+        else:
+            print("# %-10s   -- nothing answered; %s is missing here. jobscope cannot\n"
+                  "#                guess this one: name the equivalent series yourself."
+                  % (field, what), file=out)
+
+    present = _present_series(client, jobid, timeout, sample)
+    print("\n[metrics]", file=out)
+    if present is None:
+        print("# Not narrowed: no recently finished GPU job to probe with. Re-run as\n"
+              "#   jobscope probe --init JOBID\n"
+              "# to drop metrics this server does not carry.", file=out)
+    for view in ("summary", "timeseries"):
+        kept, dropped = _view_metrics(view, present)
+        print("%-11s = [%s]" % (view, ", ".join(_toml_str(k) for k in kept)), file=out)
+        if dropped:
+            print("#             dropped, not carried by this server: %s"
+                  % ", ".join(dropped), file=out)
+
+    floors = measure_power_floors(client, timeout)
+    print("\n[classify.floor.power]", file=out)
+    print("default = %g              # watts; below this a GPU counts as idle"
+          % config.DEFAULT_POWER_W, file=out)
+    if not floors:
+        print("# No per-model figures: DCGM power or SM-activity series not found.",
+              file=out)
+    for model, (value, why) in sorted(floors.items()):
+        if value is None:
+            print("# %-46s -- %s" % (_toml_str(model), why), file=out)
+        else:
+            print("%-48s = %-5d # %s" % (_toml_str(model), value, why), file=out)
+
+    if full:
+        print("\n\n# " + "#" * 74, file=out)
+        print("#\n#   Below: every remaining knob, commented, from\n"
+              "#   'jobscope config --example'. Uncomment what you want to tune.\n#",
+              file=out)
+        print("# " + "#" * 74, file=out)
+        # Only the template's tuning half, which is entirely comments -- appending its
+        # live [prometheus]/[metrics] blocks would redeclare tables already written
+        # above, and a table declared twice is a TOML parse error rather than an
+        # override.
+        text = config.example_config_text()
+        marker = "Everything above is enough to run"
+        tail = text.split(marker, 1)
+        if len(tail) == 2:
+            print("\n" + tail[1].split("\n", 1)[1].rstrip(), file=out)
 
 
 # --- the editable name table ------------------------------------------------
