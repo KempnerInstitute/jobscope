@@ -22,7 +22,7 @@ itself, so ``denom`` names a blob field.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from .prometheus import PrometheusClient
 
@@ -43,6 +43,19 @@ class CgroupSpec:
     denom: str      # the blob field that divides it: "cpus" or "total_memory"
     decimals: int   # display precision
     group: str      # "default" (always available) or "all" (opt-in via [metrics])
+    # What the metric is *for*; read by jobscope.metrics rather than restated in
+    # the header lists report.py used to keep. Same vocabulary as MetricSpec.roles.
+    roles: FrozenSet[str] = frozenset()
+
+    @property
+    def label(self) -> str:
+        """Short row-label form, e.g. ``CPU%`` -> ``CPU``."""
+        return self.header.rstrip("%")
+
+    @property
+    def share_tag(self) -> str:
+        """Suffix in a combined share, e.g. ``35%gpu+24%cpu``."""
+        return self.label.lower()
 
     def query(self, raw_jobid: str, step: int, sampling_period: int) -> str:
         """This metric's PromQL over a job's own cgroup.
@@ -64,10 +77,16 @@ class CgroupSpec:
 # cannot have them), and being outside the default group also keeps them out of the
 # default --classify ballot, which they have no business deciding.
 CGROUP_METRICS: List[CgroupSpec] = [
+    # `split` divides the worst band into wasteful-cpu-gpu and wasteful-gpu: a job
+    # idle on the GPU but busy on the host is a different finding from one idle on
+    # both. `resource` pairs it with GPU% as the two distinct things a job holds.
     CgroupSpec("cpu", "CPU%", "cgroup_cpu_total_seconds",
-               "rate", "cpus", 0, "default"),
+               "rate", "cpus", 0, "default",
+               roles=frozenset({"worst", "split", "resource"})),
+    # `memory`: held bytes are not work. See GMEM%'s note in dcgm.py.
     CgroupSpec("mem", "MEM%", "cgroup_memory_rss_bytes",
-               "gauge", "total_memory", 0, "default"),
+               "gauge", "total_memory", 0, "default",
+               roles=frozenset({"memory"})),
     # The user/system split. Sums to roughly CPU%, which is the point: 40% CPU that
     # is 30% system time is thrashing in the kernel, not working.
     CgroupSpec("cpu_user", "CPU_USER%", "cgroup_cpu_user_seconds",
@@ -77,13 +96,13 @@ CGROUP_METRICS: List[CgroupSpec] = [
     # Page cache, which MEM% (RSS only) cannot see: a job can hold a lot of memory
     # and still read light.
     CgroupSpec("cache", "CACHE%", "cgroup_memory_cache_bytes",
-               "gauge", "total_memory", 1, "all"),
+               "gauge", "total_memory", 1, "all", roles=frozenset({"memory"})),
     # usage_in_bytes, i.e. roughly RSS + cache. Read the caveat in
     # config.example.toml before acting on it: because it counts *reclaimable*
     # cache, a job streaming a dataset drives this to ~100% with nothing at risk.
     # It is the figure the OOM limit is enforced on, not a utilization measure.
     CgroupSpec("mem_used", "MEM_USED%", "cgroup_memory_used_bytes",
-               "gauge", "total_memory", 1, "all"),
+               "gauge", "total_memory", 1, "all", roles=frozenset({"memory"})),
 ]
 
 SPEC_BY_KEY: Dict[str, CgroupSpec] = {spec.key: spec for spec in CGROUP_METRICS}

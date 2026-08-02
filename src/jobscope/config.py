@@ -99,11 +99,6 @@ BAND_VIEWS = ("summary", "timeslice")
 LEGACY_THRESHOLD_KEYS = ("gpu", "gmem", "mem", "default", "red", "cpu",
                          "wasteful", "inefficient", "improvement", "average")
 
-# %-metrics that do not come from DCGM, so a validator built from that catalog
-# would not know them. Both are read from the sacct blob (see report._BLOB_HEADERS)
-# and `cpu` is the single likeliest key a site sets.
-_BLOB_PERCENT_HEADERS = ("CPU%", "MEM%")
-
 # The colour each tier is painted, and the one role that is not a tier: an entry on
 # a Wasteful row whose job ran longer than [defaults] long_running. Two tiers
 # sharing a colour is the default, not a requirement -- a site wanting five distinct
@@ -593,13 +588,20 @@ def _palette(table: Mapping) -> Palette:
 def _known_percent_headers() -> frozenset:
     """Every %-column a metric key may name, for typo-checking the config.
 
-    The DCGM catalog is imported inside the function on purpose: at module scope it
-    would close the cycle config -> dcgm -> prometheus -> config. The two blob-backed
-    columns are not in that catalog and have to be added by hand.
+    Both catalogs are imported inside the function on purpose: at module scope
+    either would close the cycle config -> dcgm/cpu -> prometheus -> config.
+
+    The host columns come from the cgroup catalog rather than a hand-kept pair, so
+    a metric added there is threshold-tunable the moment it exists. It used to be
+    literally ``("CPU%", "MEM%")``, which meant any new host column was silently
+    dropped from a config with a note saying it was unknown.
     """
+    from .cpu import CGROUP_METRICS
     from .dcgm import ALL_SPECS, columns_for
     return frozenset([header for _key, header, _dec in columns_for(ALL_SPECS)
-                      if header.endswith("%")] + list(_BLOB_PERCENT_HEADERS))
+                      if header.endswith("%")]
+                     + [spec.header for spec in CGROUP_METRICS
+                        if spec.header.endswith("%")])
 
 
 def _band_table(table: Mapping, view: str, power_w: float,

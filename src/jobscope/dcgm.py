@@ -9,7 +9,7 @@ jobstats uses. Each value is the time-average (or max/delta) over the job's
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
 from .prometheus import PrometheusClient
 from .sacct import JobRecord
@@ -24,8 +24,14 @@ class MetricSpec:
     shown) or ``all`` (only with the extended catalog). ``reducer`` collapses the
     window (avg | max | delta); ``agg`` reduces across a job's GPUs for the overall
     row (mean | sum | max); ``uuid_label`` is the Prometheus label holding the GPU
-    UUID. The last three default to the common case and are set only where a metric
+    UUID. Those three default to the common case and are set only where a metric
     differs.
+
+    ``roles`` is what the metric is *for* -- see :mod:`jobscope.metrics`, which
+    reads it instead of the hand-kept header lists that used to say the same thing
+    in five places. ``slug`` and ``tag`` are its short forms for a row label and a
+    combined-share suffix; both derive from the header and are set only where that
+    derivation reads badly.
     """
 
     key: str
@@ -38,14 +44,32 @@ class MetricSpec:
     agg: str = "mean"
     uuid_label: str = "UUID"
     show: bool = True   # False = queried only to feed a derived column
+    roles: FrozenSet[str] = frozenset()
+    slug: str = ""      # row-label form; defaults to the header without its "%"
+    tag: str = ""       # share-tag form; defaults to the lowercased slug
+
+    @property
+    def label(self) -> str:
+        """Short row-label form, e.g. ``SM_ACT%`` -> ``SM``."""
+        return self.slug or self.header.rstrip("%")
+
+    @property
+    def share_tag(self) -> str:
+        """Suffix in a combined share, e.g. ``35%gpu+24%cpu``."""
+        return self.tag or self.label.lower()
 
 
 METRICS: List[MetricSpec] = [
-    MetricSpec("duty", "GPU%", "nvidia_gpu_duty_cycle", 1, 0, "default", uuid_label="uuid"),
-    MetricSpec("smact", "SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE", 100, 1, "default"),
+    MetricSpec("duty", "GPU%", "nvidia_gpu_duty_cycle", 1, 0, "default", uuid_label="uuid",
+               roles=frozenset({"worst", "resource"})),
+    MetricSpec("smact", "SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE", 100, 1, "default",
+               roles=frozenset({"worst"}), slug="SM"),
     MetricSpec("tensor", "TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE", 100, 1, "default"),
     MetricSpec("dram", "DRAM%", "DCGM_FI_PROF_DRAM_ACTIVE", 100, 1, "default"),
-    MetricSpec("power", "POWER_W", "DCGM_FI_DEV_POWER_USAGE", 1, 0, "default"),
+    # POWER_W is a watt reading, not a percentage, so it never votes on its own --
+    # it only ever pulls a verdict down. See classify()'s cap.
+    MetricSpec("power", "POWER_W", "DCGM_FI_DEV_POWER_USAGE", 1, 0, "default",
+               roles=frozenset({"worst", "cap"}), slug="POWER", tag="pw"),
     # OCC% sits here, right after the default group, so the extended catalog's
     # column order keeps DEFAULT_SPECS as a contiguous prefix -- it is the first
     # "all"-only metric rather than interspersed among the default ones.
@@ -79,7 +103,7 @@ METRICS: List[MetricSpec] = [
     # a bare MEM% means HOST memory there, and reusing it for GPU memory both reads
     # as the wrong quantity and grades against the host threshold in plots.
     MetricSpec("mem", "GMEM_GB", "nvidia_gpu_memory_used_bytes", 1 / 1024 ** 3, 1, "default",
-               reducer="max", agg="max", uuid_label="uuid"),
+               reducer="max", agg="max", uuid_label="uuid", roles=frozenset({"memory"})),
     MetricSpec("memtot", "GMEM_TOTAL_GB", "nvidia_gpu_memory_total_bytes", 1 / 1024 ** 3, 1,
                "default", reducer="max", agg="max", uuid_label="uuid", show=False),
 ]
@@ -94,6 +118,7 @@ class Derived(NamedTuple):
     deps: Tuple[str, ...]   # metric keys it needs; absent -> the column is skipped
     fn: Callable[[Dict[str, Optional[float]]], Optional[float]]
     source: str             # what it is computed from, for --describe
+    roles: FrozenSet[str] = frozenset()   # as MetricSpec.roles; see jobscope.metrics
 
 
 def _gmem_percent(values: Dict[str, Optional[float]]) -> Optional[float]:
@@ -109,8 +134,10 @@ def _gmem_percent(values: Dict[str, Optional[float]]) -> Optional[float]:
 # where those were actually collected. ``fn`` receives a dict keyed by metric key,
 # which callers storing values by header must build first -- see values_by_key.
 DERIVED_COLUMNS: List[Derived] = [
+    # `memory`: a capacity reading, not a utilization one. A job that fills the
+    # card's memory and then computes nothing is idle, so this must never vote.
     Derived("gmempct", "GMEM%", 1, ("mem", "memtot"), _gmem_percent,
-            "GMEM_GB / nvidia_gpu_memory_total"),
+            "GMEM_GB / nvidia_gpu_memory_total", roles=frozenset({"memory"})),
 ]
 
 

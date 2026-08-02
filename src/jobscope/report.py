@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
+from . import metrics
 from .blob import GIB, blob_capacity, blob_detail, blob_metrics
 from .config import (
     DEFAULT_LONG_RUNNING,
@@ -483,20 +484,13 @@ _RESOURCES = {
 
 _BLOB_HEADERS = ("CPU%", "MEM%", "GPU%", "GMEM%")
 
-# The measures the Worst rows rank by, in print order. Four rather than every graded
-# column: these say distinct things -- duty cycle, SM residency, board watts, and
-# the host -- while the DCGM catalog would add a dozen near-duplicates.
-WORST_METRICS = ("GPU%", "SM_ACT%", "POWER_W", "CPU%")
-# The two combined rankings: the distinct *resources*, then every measure.
-COMBINED_2 = ("GPU%", "CPU%")
+# The measures the Worst rows rank by, in print order, and the two combined
+# rankings: the distinct *resources*, then every measure. Read off the catalog's
+# roles rather than restated here -- see jobscope.metrics for why the four, and
+# for the short row-label and share-tag forms that used to be two more tables.
+WORST_METRICS = metrics.headers_with_role(metrics.WORST)
+COMBINED_2 = metrics.headers_with_role(metrics.RESOURCE)
 COMBINED_4 = WORST_METRICS
-# Short tags for a combined row's component shares, e.g. "35%gpu+24%cpu".
-_SHARE_TAG = {"GPU%": "gpu", "SM_ACT%": "sm", "POWER_W": "pw", "CPU%": "cpu"}
-
-
-# Row-label form of each metric name, short enough that "Wasteful SM_ACT:" does
-# not swamp the heading it shares with the row's own criteria.
-_WORST_SLUG = {"GPU%": "GPU", "SM_ACT%": "SM", "POWER_W": "POWER", "CPU%": "CPU"}
 
 
 def _worst_groups(entries):
@@ -529,13 +523,13 @@ def _combined_cell(jid: str, values, tallies) -> str:
         if value is None:
             continue
         unit = "W" if tallies[header].value_unit == "W" else "%"
-        parts.append("%s%d%s" % (_SHARE_TAG[header], round(value), unit))
+        parts.append("%s%d%s" % (metrics.share_tag(header), round(value), unit))
     return "%s %s" % (jid, " ".join(parts))
 
 
 def _worst_slug(header: str) -> str:
     """Row-label form of a metric name, e.g. ``SM_ACT%`` -> ``SM``."""
-    return _WORST_SLUG.get(header, header.rstrip("%"))
+    return metrics.label(header)
 
 
 def _blob_value(metrics, header: str) -> Optional[float]:
@@ -1274,12 +1268,13 @@ class SummaryRenderer:
         """
         options = self.options
         thresholds = _bands(options)
-        # POWER_W and the two memory columns never vote -- only the graded, non-
-        # memory, non-power percentage metrics do. POWER_W is watts, not a percent,
-        # so leaving it in here would let its raw wattage win classify()'s max()
-        # outright regardless of actual GPU utilization.
+        # The GPU side of the ballot: graded percentages that are not memory, less
+        # CPU% (which is the host, and votes separately so the worst band can be
+        # split). POWER_W drops out on the `%` test -- it is watts, and leaving it
+        # in would let a raw wattage win classify()'s comparison outright whatever
+        # the GPU was doing; it caps the verdict instead.
         gpu_values = {h: v for h, v in self._last_values.items()
-                     if h not in CLASSIFY_SKIP and h not in ("CPU%", "POWER_W")}
+                     if h in metrics.votable(self._last_values) and h != "CPU%"}
         cpu_value = self._last_values.get("CPU%")
         power = self._last_values.get("POWER_W")
         floor = (options.thresholds.floor_for(self._last_model)
@@ -1988,15 +1983,14 @@ def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
 # _tier_criteria()/_tier_range()).
 CATEGORIES = tuple((name, name) for name, _key in TIERS)
 
-# Occupancy of memory is not use of a resource -- a job can reserve 80GB (GPU or
-# host) and compute nothing -- so neither memory column votes on the verdict. Both
-# still print.
-CLASSIFY_SKIP = ("GMEM%", "MEM%")
-
-
 def classify_metrics(columns) -> List[str]:
-    """The ``%`` columns a verdict is taken over, in CSV order."""
-    return [c for c in columns if c.endswith("%") and c not in CLASSIFY_SKIP]
+    """The ``%`` columns a verdict is taken over, in CSV order.
+
+    Memory columns are excluded by their catalog role rather than by name, so a
+    cgroup or GPU memory metric added later cannot quietly start voting -- see
+    jobscope.metrics.MEMORY.
+    """
+    return metrics.votable(columns)
 
 
 _VERDICT_ORDER = {name: i for i, (name, _role) in enumerate(CATEGORIES)}
