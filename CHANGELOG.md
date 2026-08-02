@@ -63,6 +63,37 @@ carrying it has empty metric cells rather than zeros, so a monitoring outage no 
 reads as a fleet of wasteful jobs. Anything that treats an unrecognised `LABEL` as an
 error should be taught this one.
 
+### Breaking: the old subcommands and eight duplicate flag spellings are gone
+
+`summary`, `detail`, `dcgm` and `live` were rewritten into flags with a deprecation
+note. Naming one is now an error — one that says what to type instead, because the
+alternative is the word falling through as a job ID and Slurm answering
+`sacct: fatal: Bad job/step specified: dcgm`.
+
+| was | now |
+|---|---|
+| `jobscope summary -D 3` | `jobscope finished -D 3` |
+| `jobscope detail JOBID` | `jobscope JOBID --per-gpu` |
+| `jobscope dcgm --ts JOBID` | `jobscope JOBID --ts` |
+| `jobscope live -a` | `jobscope -a` |
+| `--hwdetail` | `--per-gpu` |
+| `--min-runtime` | `--min-elapsed` |
+| `--timeseries` | `--ts` |
+| `--extended` | `--ext` |
+| `--stats_per_node`, `--stats_per_job`, `--all_categories` | the `-` spellings |
+| `--plot_avgeff` | nothing — it only printed "that is the default now" |
+
+`--plot_ts` and `--node` keep both spellings: those are what the docs and most
+command lines actually use. `contrib/jobscope_live.py` now rewrites `--min-runtime`
+rather than relying on the alias, so the old wrapper is unaffected.
+
+### Fixed: `--ext` meant two different things
+
+On a report `--ext` is `--dcgm`. Under `describe` it was a *separate* flag that did
+nothing on its own — `jobscope describe --ext` printed the column list, and you
+needed `describe --dcgm --ext` for the full catalog. `--ext` now implies `--dcgm`
+there, so the word means "the full DCGM catalog" everywhere.
+
 ### `--nodename` and `--gpuid` now work on the summary too
 
 They used to be rejected there — the per-job table has no row per unit to filter.

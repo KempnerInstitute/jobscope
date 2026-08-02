@@ -13,8 +13,6 @@ historical views had no ``--min-elapsed``, and so on.
 
 ``plot``, ``describe``, ``config`` and ``doctor`` are utilities and take the first
 slot too.
-The old ``summary``/``detail``/``dcgm``/``live`` subcommands survive as deprecated
-aliases; see :data:`DEPRECATED`.
 """
 
 import argparse
@@ -58,19 +56,20 @@ _JOBID_IGNORES = (
     ("-t/--state", "state"),
 )
 
+# The subcommands that were rewritten into flags, and what replaced each. They are no
+# longer accepted, but they stay named here: dropped silently, the word falls through
+# as a would-be JOBID and the user gets "sacct: fatal: Bad job/step specified: dcgm",
+# which says nothing about what to type instead.
+RETIRED = {
+    "summary": "the default (jobscope finished ...)",
+    "detail": "--per-gpu",
+    "dcgm": "--dcgm",
+    "live": "running",
+}
+
 # Flags that select a past window; their presence means sacct rather than squeue.
 _WINDOW_FLAGS = ("-D", "--days", "-N", "--lastn", "-S", "--starttime",
                  "-E", "--endtime", "-t", "--state")
-
-# Old subcommand -> (extra argv, how to spell it now). Kept because
-# `dcgm --ts --csv | jobscope plot` appears in the README and the docs, and
-# contrib/jobscope_live.py shells out to `live`.
-DEPRECATED = {
-    "summary": ([], "the default"),
-    "detail": (["--per-gpu"], "--per-gpu"),
-    "dcgm": (["--dcgm"], "--dcgm"),
-    "live": ([], "running"),
-}
 
 _DESC = (
     "Slurm job efficiency and GPU utilization reporting.\n"
@@ -127,7 +126,7 @@ def build_parser():
                             "2026-07-15T09:00:00; without -E, that day alone")
     scope.add_argument("-E", "--endtime", metavar="TIME",
                        help="finished: window end, same format as -S")
-    scope.add_argument("--min-elapsed", "--min-runtime", dest="min_elapsed",
+    scope.add_argument("--min-elapsed", dest="min_elapsed",
                        metavar="DURATION", default=None,
                        help="running: only jobs running longer than this (default from "
                             "config: %s; e.g. '5m', '2h', '0s' for no floor)"
@@ -149,10 +148,9 @@ def build_parser():
 
     shape = report.add_argument_group("granularity and columns")
     grain = shape.add_mutually_exclusive_group()
-    grain.add_argument("--per-gpu", "--hwdetail", dest="per_gpu", action="store_true",
-                       help="one row per GPU, with node name and GPU number "
-                            "(--hwdetail is the old name for it)")
-    grain.add_argument("--ts", "--timeseries", dest="ts", nargs="?", const=True,
+    grain.add_argument("--per-gpu", dest="per_gpu", action="store_true",
+                       help="one row per GPU, with node name and GPU number")
+    grain.add_argument("--ts", dest="ts", nargs="?", const=True,
                        default=False, metavar="WINDOW",
                        help="the per-scrape time series as CSV (pipes to 'jobscope plot'). "
                             "Takes an optional window -- '--ts 1h' is the last hour of "
@@ -166,11 +164,11 @@ def build_parser():
     level.add_argument("--stats", action="store_const", const="gpu", dest="stats",
                        help="--ts: summarize the series instead of writing it -- "
                             "min/mean/max/last per GPU per metric, over the window")
-    level.add_argument("--stats-per-node", "--stats_per_node", action="store_const",
+    level.add_argument("--stats-per-node", action="store_const",
                        const="node", dest="stats",
                        help="the same, pooled per node: one set of figures for the "
                             "job's GPUs on each host")
-    level.add_argument("--stats-per-job", "--stats_per_job", action="store_const",
+    level.add_argument("--stats-per-job", action="store_const",
                        const="job", dest="stats",
                        help="the same, pooled across every node and GPU the job held")
     shape.add_argument("--classify", action="store_true",
@@ -179,16 +177,17 @@ def build_parser():
                             "-- by each one's best metric. The cutoffs are per metric "
                             "and come from [thresholds.timeslice] in your config; each "
                             "heading states the ones it used")
-    shape.add_argument("--all-categories", "--all_categories", dest="all_categories",
+    shape.add_argument("--all-categories", dest="all_categories",
                        action="store_true",
                        help="--classify: list the 'good' jobs too, instead of counting them")
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
-                       help="--per-gpu / --ts: report only this node's GPUs")
-    shape.add_argument("--gpuid", "--gpuids", dest="gpuid", default=None,
+                       help="report only this node -- narrows any view, including "
+                            "the summary, whose numbers are recomputed over it")
+    shape.add_argument("--gpuid", dest="gpuid", default=None,
                        metavar="IDS",
-                       help="--ts / --plot_ts: only these GPUs, comma-separated "
-                            "(--gpuid 0,1). Not --gpu, which picks the GPU columns")
+                       help="only these GPUs, comma-separated (--gpuid 0,1); ids are "
+                            "per node. Not --gpu, which picks the GPU columns")
     block = shape.add_mutually_exclusive_group()
     block.add_argument("--cpu", action="store_const", const="cpu", dest="view",
                        help="CPU columns only")
@@ -205,10 +204,6 @@ def build_parser():
                             "compare the two, or where jobstats is not deployed)")
     shape.add_argument("--no-plot", dest="no_plot", action="store_true",
                        help="omit the efficiency-bars section (shown by default)")
-    # Superseded: the bars are the default now. Accepted so a command that named it
-    # still runs, with one note, as the deprecated subcommand aliases do.
-    shape.add_argument("--plot-avgeff", "--plot_avgeff", dest="plot_avgeff",
-                       action="store_true", help=argparse.SUPPRESS)
 
     out = report.add_argument_group("output")
     out.add_argument("-n", "--noheader", dest="header", action="store_false",
@@ -250,8 +245,8 @@ def build_parser():
         "describe", parents=[base], help="describe the columns and metrics")
     p_describe.add_argument("--dcgm", action="store_true",
                             help="describe the DCGM metric catalog instead of the columns")
-    p_describe.add_argument("--ext", "--extended", dest="ext", action="store_true",
-                            help="with --dcgm, describe the full metric catalog")
+    p_describe.add_argument("--ext", dest="ext", action="store_true",
+                            help="the full DCGM metric catalog (implies --dcgm)")
     p_describe.set_defaults(func=handle_describe)
 
     p_config = subparsers.add_parser(
@@ -307,8 +302,7 @@ def mode_was_explicit(argv) -> bool:
     running view of it -- an instant snapshot, with --avg available. Without this the
     explicit word would be silently discarded.
     """
-    # `live` always meant running jobs, so it counts as naming the mode.
-    return bool(argv) and (argv[0] in MODES or argv[0] == "live")
+    return bool(argv) and argv[0] in MODES
 
 
 def _was_given(args, dest: str) -> bool:
@@ -415,25 +409,16 @@ def narrow_help(sub, argv, explicit: bool) -> List[str]:
 
 
 def resolve_argv(argv):
-    """Normalize ``argv`` to ``[mode, ...]``, expanding the deprecated aliases.
+    """Normalize ``argv`` to ``[mode, ...]``.
 
     A bare JOBID keeps working as the first word, and no first word at all means
-    ``running``. Deprecated subcommands are rewritten to their replacement flags
-    with a note, so old invocations keep producing their old output.
+    ``running``.
     """
     if not argv:
         return [RUNNING]
     first = argv[0]
     if first in ("-h", "--help", "--version") or first in MODES or first in UTILITIES:
         return list(argv)
-    if first in DEPRECATED:
-        extra, spelling = DEPRECATED[first]
-        rest = list(argv[1:]) + extra
-        print("jobscope: note: '%s' is deprecated; use '%s'" % (first, spelling),
-              file=sys.stderr)
-        # `live` always meant running jobs; the others kept the sacct default.
-        mode = RUNNING if first == "live" else default_mode(rest)
-        return [mode] + rest
     return [default_mode(argv)] + list(argv)
 
 
@@ -492,6 +477,10 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
     # no value here -- it picks the GPU *columns* -- so the list falls through to this
     # positional and the run charts every GPU while warning about a job named "0,1".
     # A silently wrong chart is worse than no chart.
+    retired = [j for j in jobids if str(j) in RETIRED]
+    if retired:
+        raise JobscopeError("'%s' is no longer a subcommand; use %s"
+                            % (retired[0], RETIRED[str(retired[0])]))
     listy = [j for j in jobids if "," in str(j)]
     if listy:
         hint = (" Did you mean --gpuid %s? --gpu selects the GPU columns and takes no"
@@ -688,9 +677,6 @@ def handle_report(args) -> None:
     timeout = _timeout(args, cfg)
     workers = _workers(args, cfg)
 
-    if args.plot_avgeff:
-        print("note: --plot_avgeff is the default now; use --no-plot to omit the "
-              "efficiency bars", file=sys.stderr)
     if args.classify and not args.ts:
         raise JobscopeError("--classify sorts a time series into categories; add --ts "
                             "(optionally with a window, e.g. --ts 10m)")
@@ -792,7 +778,9 @@ def handle_plot(args) -> None:
 
 def handle_describe(args) -> None:
     cfg = _apply_config(args)
-    if args.dcgm:
+    # --ext implies --dcgm: it means "the full DCGM catalog" on a report, and it used
+    # to mean nothing at all here without --dcgm beside it. One word, one meaning.
+    if args.dcgm or args.ext:
         wide = cfg.metrics.extended
         describe_dcgm(list(wide if args.ext else cfg.metrics.summary), extended=wide)
     else:

@@ -304,7 +304,7 @@ job that is running right now.
 | option | effect |
 |---|---|
 | *(default)* | one row per job |
-| `--per-gpu` | one row per GPU, with node name and GPU number (see below). `--hwdetail` is the old name and still works |
+| `--per-gpu` | one row per GPU, with node name and GPU number (see below) |
 | `--ts [WINDOW]` | the per-scrape time series as CSV; `--ts 1h` is the last hour of the run |
 | `--stats` | with `--ts`: summarize that series instead -- min/mean/max/last per GPU per metric |
 | `--stats-per-node` | the same, pooled per node |
@@ -880,7 +880,8 @@ reports the physical `GPU-…` one and nothing in the metrics maps between them.
 
 ## Moving from the old subcommands
 
-The old positional subcommands are deprecated and print a note, but still work:
+The positional subcommands are **gone**. They were accepted with a deprecation note
+for a while; naming one now is an error that tells you what to type instead:
 
 | was | now |
 |---|---|
@@ -889,11 +890,24 @@ The old positional subcommands are deprecated and print a note, but still work:
 | `jobscope dcgm --ext JOBID` | `jobscope JOBID --dcgm` |
 | `jobscope dcgm --ts JOBID` | `jobscope JOBID --ts` |
 | `jobscope live -a` | `jobscope -a` |
-| `--cgpu` | the default (removed) |
+| `--cgpu` | the default |
 
-Note that bare `jobscope` now shows **running** jobs rather than the last day of
-finished ones, and that `--min-runtime` now means the runtime floor
-(`--min-elapsed`) in every mode.
+Retired flag spellings, each a duplicate of the one beside it:
+
+| was | now |
+|---|---|
+| `--hwdetail` | `--per-gpu` |
+| `--min-runtime` | `--min-elapsed` |
+| `--timeseries` | `--ts` |
+| `--stats_per_node`, `--stats_per_job`, `--all_categories` | the `-` spellings |
+| `--extended` | `--ext` |
+| `--plot_avgeff` | nothing — the bars are the default; `--no-plot` omits them |
+
+`--plot_ts` and `--node` keep both spellings: they are what the docs and most
+command lines actually use.
+
+Note that bare `jobscope` shows **running** jobs rather than the last day of
+finished ones.
 
 ## Useful commands
 
@@ -960,8 +974,8 @@ of the others do: `GPU%` 96 with `GMEM%` 3 is under-batched.
 ```bash
 jobscope --gpu  --csv JOBID      | jobscope plot                 # bar gauges (one job)
 jobscope --gpu  --csv -D 7       | jobscope plot --kind hist      # distribution (many jobs)
-jobscope dcgm   --csv -D 7       | jobscope plot                 # heatmap (jobs/GPUs x metrics)
-jobscope dcgm --ts --csv JOBID   | jobscope plot --compact        # time series
+jobscope finished --dcgm --csv -D 7 | jobscope plot              # heatmap (jobs/GPUs x metrics)
+jobscope JOBID --ts --csv        | jobscope plot --compact        # time series
 ```
 
 ### Which time-series layout

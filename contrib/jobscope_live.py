@@ -9,7 +9,7 @@ existing command lines and scripts keep working.
 
 Flag translation:
   (mode)             ->  running             the running selection
-  --min-runtime DUR  ->  --min-elapsed DUR   accepted as an alias, no rewrite
+  --min-runtime DUR  ->  --min-elapsed DUR   rewritten; the alias is gone
   no -u given        ->  --all-users         this script showed every user;
                                              jobscope defaults to you
   --all / --ext      ->  --dcgm              the full metric catalog
@@ -50,12 +50,23 @@ def _repo_root() -> str:
 def _translate(argv):
     """Map this script's old flags onto the current ones.
 
-    ``--min-runtime`` needs no rewriting -- it is still accepted as an alias of
-    ``--min-elapsed``. Two things do differ: this script showed every user's jobs
-    unless ``-u`` narrowed it, where jobscope defaults to your own; and the
-    extended catalog moved from ``--all`` to ``--dcgm``.
+    ``--min-runtime`` is rewritten to ``--min-elapsed``: jobscope accepted it as an
+    alias until the flag surface was pruned, and this wrapper exists precisely so
+    that pruning does not reach the people still typing the old script's spellings.
+    Two things also differ in meaning: this script showed every user's jobs unless
+    ``-u`` narrowed it, where jobscope defaults to your own; and the extended catalog
+    moved from ``--all`` to ``--dcgm``.
     """
-    out = ["--dcgm" if a in ("--all", "--ext") else a for a in argv]
+    out = []
+    for a in argv:
+        if a in ("--all", "--ext"):
+            out.append("--dcgm")
+        elif a == "--min-runtime":
+            out.append("--min-elapsed")
+        elif a.startswith("--min-runtime="):
+            out.append("--min-elapsed=" + a.split("=", 1)[1])
+        else:
+            out.append(a)
     selects_user = any(a in ("-u", "--user", "-a", "--all-users")
                        or a.startswith("--user=") for a in out)
     return out if selects_user else out + ["--all-users"]

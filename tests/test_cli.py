@@ -54,27 +54,19 @@ def test_a_jobid_needs_no_mode_word():
     assert _request(jobids=["35244230"]).mode == JOBIDS
 
 
-# --- deprecated aliases -----------------------------------------------------
+# --- the modes ---------------------------------------------------------------
 
-@pytest.mark.parametrize("old,expected,spelling", [
-    ("summary", [FINISHED], "the default"),
-    ("detail", [RUNNING, "--per-gpu"], "--per-gpu"),
-    ("dcgm", [FINISHED, "--dcgm"], "--dcgm"),
-    ("live", [RUNNING], "running"),
-])
-def test_deprecated_subcommands_still_resolve(old, expected, spelling, capsys):
-    argv = resolve_argv([old] + (["-D", "1"] if old in ("summary", "dcgm") else []))
-    assert argv[0] == expected[0]
-    assert spelling in capsys.readouterr().err
+def test_an_old_subcommand_is_now_an_ordinary_word():
+    """summary/detail/dcgm/live used to be rewritten to flags with a note.
 
-
-def test_deprecated_dcgm_keeps_its_extended_catalog():
-    assert "--dcgm" in resolve_argv(["dcgm", "-N", "2"])
-
-
-def test_deprecated_live_is_always_running():
-    # Even though `live` never accepted window flags, be explicit about the mode.
-    assert resolve_argv(["live", "-a"])[0] == RUNNING
+    They are gone. The word is no longer special, so it falls through as a would-be
+    JOBID and argparse rejects it downstream -- which is what an unrecognised first
+    word should do, rather than quietly meaning something.
+    """
+    for old in ("summary", "detail", "dcgm", "live"):
+        argv = resolve_argv([old])
+        assert argv[0] in (RUNNING, FINISHED)
+        assert old in argv[1:]
 
 
 # --- level 2/3: validation --------------------------------------------------
@@ -180,12 +172,12 @@ def test_partition_survives_in_both_modes():
 
 # --- granularity and columns compose ---------------------------------------
 
-@pytest.mark.parametrize("flag", ["--per-gpu", "--hwdetail"])
-def test_hwdetail_is_still_accepted_as_the_old_spelling(flag):
-    """The rename must not break a script, alias or shell history line."""
+def test_per_gpu_is_the_only_spelling():
+    """--hwdetail was the pre-rename name for it, and is gone."""
     _, subparsers = build_parser()
-    args = subparsers.choices[RUNNING].parse_intermixed_args([flag])
-    assert args.per_gpu is True
+    assert subparsers.choices[RUNNING].parse_intermixed_args(["--per-gpu"]).per_gpu
+    with pytest.raises(SystemExit):
+        subparsers.choices[RUNNING].parse_intermixed_args(["--hwdetail"])
 
 
 def test_per_gpu_and_ts_are_mutually_exclusive():
@@ -632,11 +624,12 @@ def test_no_plot_switches_the_bars_off(monkeypatch):
     assert not _options_for(["finished", "-D", "1", "--no-plot"], monkeypatch).plot_avgeff
 
 
-def test_the_old_plot_flag_is_accepted_and_notes(monkeypatch, capsys):
-    """It shipped for one commit; a command naming it should still run."""
+def test_the_old_plot_flag_is_gone():
+    """--plot_avgeff only ever printed "that is the default now"."""
+    _, subparsers = build_parser()
     for spelling in ("--plot_avgeff", "--plot-avgeff"):
-        assert _options_for(["finished", "-D", "1", spelling], monkeypatch).plot_avgeff
-        assert "is the default now" in capsys.readouterr().err
+        with pytest.raises(SystemExit):
+            subparsers.choices[RUNNING].parse_intermixed_args([spelling])
 
 
 def test_the_timeseries_path_cannot_reach_the_summary_renderer(monkeypatch):
@@ -1177,8 +1170,8 @@ def test_stats_composes_with_the_window(monkeypatch, capsys):
 
 @pytest.mark.parametrize("flag,level", [
     ("--stats", "gpu"),
-    ("--stats-per-node", "node"), ("--stats_per_node", "node"),
-    ("--stats-per-job", "job"), ("--stats_per_job", "job"),
+    ("--stats-per-node", "node"),
+    ("--stats-per-job", "job"),
 ])
 def test_the_stats_level_flags(flag, level):
     _, subparsers = build_parser()
