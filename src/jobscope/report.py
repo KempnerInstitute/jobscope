@@ -30,7 +30,7 @@ from .config import (
 # kind of waste: a short bad job costs little, whereas hours of idle hardware do
 # not come back. Its entry is highlighted. [defaults] long_running overrides it.
 LONG_RUNNING = parse_duration(DEFAULT_LONG_RUNNING)
-from .cpu import host_series
+from .cpu import DEFAULT_CGROUP_SPECS, CgroupSpec, host_series
 from .dcgm import (
     ALL_SPECS,
     DCGM_BLOB_HEADERS,
@@ -226,6 +226,10 @@ class RenderOptions:
     # takes precedence over this when combined is False (cpu-only), and combined
     # takes precedence over view=="cpu" when both are set (see select.emit_timeseries).
     combined: bool = False
+    # --ts only: which cgroup metrics the host series carries ([metrics.cgroup]).
+    # None keeps the default two, CPU%/MEM%, which is what every view showed before
+    # the catalog existed.
+    cgroup_specs: Optional[List["CgroupSpec"]] = None
 
 
 def no_such_node(nodename: str, seen) -> JobscopeError:
@@ -1753,7 +1757,42 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         raise no_such_node(options.nodename, nodes_seen)
 
 
-CPU_TS_HEADERS = ("CPU%", "MEM%")
+def _cgroup_specs(options: "RenderOptions") -> List[CgroupSpec]:
+    """The cgroup metrics this run's host series should carry.
+
+    The default is the two the summary and detail views have always shown,
+    CPU%/MEM%; ``[metrics.cgroup]`` will widen it.
+    """
+    return list(options.cgroup_specs
+                if options.cgroup_specs is not None else DEFAULT_CGROUP_SPECS)
+
+
+def _cgroup_cells(cells: dict, specs: List[CgroupSpec]) -> List[str]:
+    """One CSV cell per cgroup spec, at that spec's own precision.
+
+    Per spec rather than a fixed 0 decimals: CPU%/MEM% read as integers as they
+    always have, while the finer columns keep a decimal that rounding would erase
+    (CACHE% of 0.4 is not the same story as 0).
+    """
+    return [format_number(cells.get(spec.header), spec.decimals, missing="")
+            for spec in specs]
+
+
+def _cgroup_hosts(nodes: dict, nodename: Optional[str]):
+    """``(divisors, row hosts)`` for a cgroup series over ``nodes``.
+
+    ``divisors`` is the per-node blob dict itself -- each spec names the field that
+    divides it -- and the row set is the hosts that resolved a *core* count. That
+    second part is deliberate and unchanged: it is also the "did anything resolve"
+    guard, so a node reporting memory but no cores yields no rows, exactly as it
+    did before the catalog existed.
+    """
+    hosts = [host for host, node in nodes.items() if node.get("cpus")]
+    if nodename is None:
+        return nodes, hosts
+    if nodename not in hosts:
+        return nodes, []
+    return {nodename: nodes[nodename]}, [nodename]
 
 
 def cpu_timeseries(jobids: List[str], records: Dict[str, JobRecord],
@@ -1771,12 +1810,13 @@ def cpu_timeseries(jobids: List[str], records: Dict[str, JobRecord],
     out = out or sys.stdout
     writer = csv.writer(out, lineterminator="\n")
     sampling_period = client.sampling_period
+    cgroup = _cgroup_specs(options)
     nodes_seen, matched, wrote_header = set(), False, False
 
     def write(row) -> None:
         nonlocal wrote_header
         if options.header and not wrote_header:
-            writer.writerow(TS_ID_COLUMNS + list(CPU_TS_HEADERS))
+            writer.writerow(TS_ID_COLUMNS + [spec.header for spec in cgroup])
             wrote_header = True
         writer.writerow(row)
 
@@ -1794,31 +1834,26 @@ def cpu_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         if not nodes:
             print("warn: job %s has no CPU/memory records" % jid, file=sys.stderr)
             continue
-        cpus_by_host = {h: n.get("cpus") for h, n in nodes.items() if n.get("cpus")}
-        mem_by_host = {h: n.get("total_memory") for h, n in nodes.items()
-                       if n.get("total_memory")}
         if options.nodename:
-            nodes_seen.update(cpus_by_host)
-            if options.nodename not in cpus_by_host:
-                continue
-            cpus_by_host = {options.nodename: cpus_by_host[options.nodename]}
-            mem_by_host = {options.nodename: mem_by_host[options.nodename]} \
-                if options.nodename in mem_by_host else {}
+            nodes_seen.update(h for h, n in nodes.items() if n.get("cpus"))
+        divisors, hosts = _cgroup_hosts(nodes, options.nodename)
+        if not hosts:
+            continue
+        if options.nodename:
             matched = True
         start, span = range_window(record.start, record.end, options.window,
                                    sampling_period, step)
-        series = host_series(record.jobid_raw, cpus_by_host, mem_by_host,
-                             start, record.end, span, sampling_period, client, timeout)
+        series = host_series(record.jobid_raw, divisors, start, record.end, span,
+                             sampling_period, client, timeout, cgroup)
         rows = []  # (host, ts, csv_row)
-        for host in cpus_by_host:
+        for host in hosts:
             for stamp in sorted(series.get(host, {})):
                 cells = series[host][stamp]
                 rows.append((host, stamp,
                              [jid, record.user, stamp,
                               time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
                               host, "", ""]
-                             + [format_number(cells.get(h), 0, missing="")
-                                for h in CPU_TS_HEADERS]))
+                             + _cgroup_cells(cells, cgroup)))
         for _, _, row in sorted(rows, key=lambda x: (x[0], x[1])):
             write(row)
 
@@ -1846,6 +1881,7 @@ def combined_timeseries(jobids: List[str], records: Dict[str, JobRecord],
     columns = columns_for(specs)
     derived = applicable_derived(specs)
     sampling_period = client.sampling_period
+    cgroup = _cgroup_specs(options)
     writer = csv.writer(out, lineterminator="\n")
     nodes_seen, matched, wrote_header = set(), False, False
 
@@ -1853,7 +1889,7 @@ def combined_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         nonlocal wrote_header
         if options.header and not wrote_header:
             writer.writerow(TS_ID_COLUMNS + [header for _key, header, _dec in columns]
-                            + list(CPU_TS_HEADERS))
+                            + [spec.header for spec in cgroup])
             wrote_header = True
         writer.writerow(row)
 
@@ -1894,12 +1930,10 @@ def combined_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         if not nodes and record and record.jobid_raw and record.duration:
             nodes = host_stats(record.jobid_raw, record.duration, record.end, client, timeout)
         nodes = nodes or {}
-        cpus_by_host = {h: n.get("cpus") for h, n in nodes.items() if n.get("cpus")}
-        mem_by_host = {h: n.get("total_memory") for h, n in nodes.items()
-                       if n.get("total_memory")}
-        cpu_series = (host_series(record.jobid_raw, cpus_by_host, mem_by_host,
-                                  start, record.end, span, sampling_period, client, timeout)
-                     if cpus_by_host else {})
+        divisors, hosts = _cgroup_hosts(nodes, None)
+        cpu_series = (host_series(record.jobid_raw, divisors, start, record.end, span,
+                                  sampling_period, client, timeout, cgroup)
+                     if hosts else {})
 
         rows = []  # (node, minor_sort, ts, csv_row)
         for uuid, (node, minor, model) in uuid_to.items():
@@ -1916,8 +1950,7 @@ def combined_timeseries(jobids: List[str], records: Dict[str, JobRecord],
                               node, minor, model]
                              + [format_number(cells.get(h), d, missing="")
                                 for _k, h, d in columns]
-                             + [format_number(cpu_cells.get(h), 0, missing="")
-                                for h in CPU_TS_HEADERS]))
+                             + _cgroup_cells(cpu_cells, cgroup)))
         for _, _, _, row in sorted(rows, key=lambda x: (x[0], x[1], x[2])):
             write(row)
 
@@ -2431,6 +2464,7 @@ def live_cpu_timeseries(jobs: Dict[int, LiveJob], client: PrometheusClient,
     out = out or sys.stdout
     writer = csv.writer(out, lineterminator="\n")
     sampling_period = client.sampling_period
+    cgroup = _cgroup_specs(options)
     at = int(time.time())
     elapsed_by_job = {raw: job["elapsed_seconds"] for raw, job in jobs.items()
                       if (job.get("elapsed_seconds") or 0) > 0}
@@ -2445,58 +2479,52 @@ def live_cpu_timeseries(jobs: Dict[int, LiveJob], client: PrometheusClient,
                   file=sys.stderr)
             continue
         by_host = divisors.get(raw_jobid, {})
-        cpus_by_host = {h: n.get("cpus") for h, n in by_host.items() if n.get("cpus")}
-        mem_by_host = {h: n.get("total_memory") for h, n in by_host.items()
-                       if n.get("total_memory")}
-        if not cpus_by_host:
+        if not any(node.get("cpus") for node in by_host.values()):
             print("warn: job %s has no CPU/memory records" % job["jobid"], file=sys.stderr)
             continue
         if options.nodename:
-            nodes_seen.update(cpus_by_host)
-            if options.nodename not in cpus_by_host:
-                continue
-            cpus_by_host = {options.nodename: cpus_by_host[options.nodename]}
-            mem_by_host = {options.nodename: mem_by_host[options.nodename]} \
-                if options.nodename in mem_by_host else {}
+            nodes_seen.update(h for h, n in by_host.items() if n.get("cpus"))
+        job_divisors, hosts = _cgroup_hosts(by_host, options.nodename)
+        if not hosts:
+            continue
+        if options.nodename:
             matched = True
         end = start + elapsed
         begin, span = range_window(start, end, options.window, sampling_period, step)
-        tasks.append((raw_jobid, cpus_by_host, mem_by_host, begin, end, span))
+        tasks.append((raw_jobid, job_divisors, hosts, begin, end, span))
     if not tasks:
         if options.nodename and not matched:
             raise no_such_node(options.nodename, nodes_seen)
         return
 
     def run(task):
-        raw_jobid, cpus_by_host, mem_by_host, begin, end, span = task
-        return raw_jobid, host_series(str(raw_jobid), cpus_by_host, mem_by_host,
-                                      begin, end, span, sampling_period, client, timeout)
+        raw_jobid, job_divisors, _hosts, begin, end, span = task
+        return raw_jobid, host_series(str(raw_jobid), job_divisors, begin, end, span,
+                                      sampling_period, client, timeout, cgroup)
 
     results: Dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=max(1, min(workers, len(tasks)))) as pool:
         for raw_jobid, series in pool.map(run, tasks):
             results[raw_jobid] = series
-    by_jobid = {raw_jobid: (cpus_by_host, mem_by_host)
-               for raw_jobid, cpus_by_host, mem_by_host, _b, _e, _s in tasks}
+    hosts_by_jobid = {raw_jobid: hosts
+                      for raw_jobid, _d, hosts, _b, _e, _s in tasks}
 
     wrote_header = False
     for raw_jobid in sorted(results, key=lambda j: job_sort_key(jobs[j])):
         job = jobs[raw_jobid]
-        cpus_by_host, _mem_by_host = by_jobid[raw_jobid]
         series = results[raw_jobid]
         rows = []  # (host, ts, csv_row)
-        for host in cpus_by_host:
+        for host in hosts_by_jobid[raw_jobid]:
             for stamp in sorted(series.get(host, {})):
                 cells = series[host][stamp]
                 rows.append((host, stamp,
                              [job["jobid"], job.get("user", "?"), stamp,
                               time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
                               host, "", ""]
-                             + [format_number(cells.get(h), 0, missing="")
-                                for h in CPU_TS_HEADERS]))
+                             + _cgroup_cells(cells, cgroup)))
         for _, _, row in sorted(rows, key=lambda x: (x[0], x[1])):
             if options.header and not wrote_header:
-                writer.writerow(TS_ID_COLUMNS + list(CPU_TS_HEADERS))
+                writer.writerow(TS_ID_COLUMNS + [spec.header for spec in cgroup])
                 wrote_header = True
             writer.writerow(row)
 
@@ -2523,6 +2551,7 @@ def live_combined_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[i
     derived = applicable_derived(specs)
     writer = csv.writer(out, lineterminator="\n")
     sampling_period = client.sampling_period
+    cgroup = _cgroup_specs(options)
     at = int(time.time())
     elapsed_by_job = {raw: job["elapsed_seconds"] for raw, job in jobs.items()
                       if (job.get("elapsed_seconds") or 0) > 0}
@@ -2533,20 +2562,19 @@ def live_combined_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[i
         start, elapsed = job.get("start_epoch"), job.get("elapsed_seconds")
         if not start or not elapsed or elapsed <= 0:
             continue
-        by_host = divisors.get(raw_jobid, {})
-        cpus_by_host = {h: n.get("cpus") for h, n in by_host.items() if n.get("cpus")}
-        mem_by_host = {h: n.get("total_memory") for h, n in by_host.items()
-                       if n.get("total_memory")}
-        if not cpus_by_host:
+        # No --nodename narrowing here: the GPU rows were already filtered before
+        # this was called, and a row's node comes from its GPU.
+        job_divisors, hosts = _cgroup_hosts(divisors.get(raw_jobid, {}), None)
+        if not hosts:
             continue
         end = start + elapsed
         begin, span = range_window(start, end, options.window, sampling_period, step)
-        tasks.append((raw_jobid, cpus_by_host, mem_by_host, begin, end, span))
+        tasks.append((raw_jobid, job_divisors, begin, end, span))
 
     def run(task):
-        raw_jobid, cpus_by_host, mem_by_host, begin, end, span = task
-        return raw_jobid, host_series(str(raw_jobid), cpus_by_host, mem_by_host,
-                                      begin, end, span, sampling_period, client, timeout)
+        raw_jobid, job_divisors, begin, end, span = task
+        return raw_jobid, host_series(str(raw_jobid), job_divisors, begin, end, span,
+                                      sampling_period, client, timeout, cgroup)
 
     cpu_results: Dict[int, dict] = {}
     if tasks:
@@ -2556,7 +2584,7 @@ def live_combined_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[i
 
     if options.header:
         writer.writerow(TS_ID_COLUMNS + [header for _k, header, _d in columns]
-                        + list(CPU_TS_HEADERS))
+                        + [spec.header for spec in cgroup])
 
     for job, gpu in _live_rows(jobs, gpus):
         if gpu is None:
@@ -2573,8 +2601,7 @@ def live_combined_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[i
                  gpu.host, gpu.csv_id, gpu.model]
                 + [format_number(values.get(key), dec, missing="")
                    for key, _h, dec in columns]
-                + [format_number(cpu_cells.get(h), 0, missing="")
-                   for h in CPU_TS_HEADERS])
+                + _cgroup_cells(cpu_cells, cgroup))
 
 
 def describe(out=None) -> None:

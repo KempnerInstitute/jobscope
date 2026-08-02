@@ -1,23 +1,28 @@
-"""cgroup CPU%/MEM% time series -- the host analogue of jobscope.dcgm's GPU one.
+"""cgroup host metric time series -- the host analogue of jobscope.dcgm's GPU one.
 
-jobstats' own Prometheus exporter already scrapes four per-job ``cgroup_*`` series
-(see :mod:`jobscope.live_blob`), labeled directly by ``jobid`` -- no GPU-UUID-style
-join needed, unlike DCGM/nvidia-exporter metrics. :mod:`jobscope.live_blob` only
-ever reduces them to one aggregate figure per job (client-side, via an instant
-query); this module range-queries the two that vary over a job's run --
-``cgroup_cpu_total_seconds`` (a counter) and ``cgroup_memory_rss_bytes`` (a gauge)
--- to build a genuine CPU%/MEM% series.
+jobstats' own Prometheus exporter scrapes per-job ``cgroup_*`` series labeled
+directly by ``jobid`` -- no GPU-UUID-style join needed, unlike DCGM/nvidia-exporter
+metrics. :mod:`jobscope.live_blob` only ever reduces four of them to one aggregate
+figure per job (client-side, via an instant query); this module range-queries the
+ones that vary over a job's run, to build genuine per-sample series.
 
-Only two fixed metrics with two different formulas exist here, so unlike dcgm.py
-there is no ``MetricSpec`` catalog -- that would be over-engineering for two
-metrics. The (mostly constant per job) divisors -- cores allocated, bytes
-allocated -- are resolved by the caller rather than here: a finished job already
+There is a catalog here, but a separate one from :class:`jobscope.dcgm.MetricSpec`
+rather than a reuse of it, because these metrics are shaped differently in two ways
+that matter. A DCGM value is multiplied by a constant ``scale``; a cgroup value is
+divided by a *dynamic* denominator (cores allocated, bytes allocated) that varies
+per host and per job. And the CPU series are counters needing ``rate()`` where the
+memory series are gauges read directly. ``kind`` and ``denom`` carry exactly those
+two differences.
+
+The denominators are resolved by the caller rather than here: a finished job already
 has them in its stored blob, a running job gets them from one batched
 ``live_blob.host_stats_many`` call, and neither varies enough within a job's
-lifetime to be worth re-querying per sample.
+lifetime to be worth re-querying per sample. They arrive as the per-node blob dict
+itself, so ``denom`` names a blob field.
 """
 
-from typing import Dict, Optional
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 from .prometheus import PrometheusClient
 
@@ -27,69 +32,134 @@ from .prometheus import PrometheusClient
 RATE_LOOKBACK_SCRAPES = 4
 
 
-def _rate_window(step: int, sampling_period: int) -> int:
-    """The ``rate()`` lookback, at least a few scrapes regardless of ``step``."""
-    return max(step, RATE_LOOKBACK_SCRAPES * sampling_period)
+@dataclass(frozen=True)
+class CgroupSpec:
+    """One per-job cgroup metric and how to query, normalise and display it."""
+
+    key: str        # the name config selects it by: cpu, cpu_user, mem, cache, ...
+    header: str     # the column header: CPU%, CPU_USER%, MEM%, CACHE%, ...
+    metric: str     # the Prometheus series
+    kind: str       # "rate" for a counter, "gauge" for a level read directly
+    denom: str      # the blob field that divides it: "cpus" or "total_memory"
+    decimals: int   # display precision
+    group: str      # "default" (always available) or "all" (opt-in via [metrics])
+
+    def query(self, raw_jobid: str, step: int, sampling_period: int) -> str:
+        """This metric's PromQL over a job's own cgroup.
+
+        ``step``/``task`` are pinned empty to select the job-level cgroup rather
+        than a per-step one; an ``=''`` matcher also matches the label being absent,
+        which is the case on exporters that do not emit it at all.
+        """
+        selector = "%s{jobid='%s',step='',task=''}" % (self.metric, raw_jobid)
+        if self.kind != "rate":
+            return selector
+        window = max(step, RATE_LOOKBACK_SCRAPES * sampling_period)
+        return "rate(%s[%ds])" % (selector, window)
 
 
-def cpu_query(raw_jobid: str, step: int, sampling_period: int) -> str:
-    """PromQL for instantaneous CPU utilization (cores in use) over time."""
-    window = _rate_window(step, sampling_period)
-    return "rate(cgroup_cpu_total_seconds{jobid='%s',step='',task=''}[%ds])" % (
-        raw_jobid, window)
+# CPU% and MEM% are `default` -- the two the summary and detail views have always
+# shown, and the only two a stored sacct blob can reconstruct. The rest are `all`:
+# they exist only in a --ts series (see the module docstring on why the summary
+# cannot have them), and being outside the default group also keeps them out of the
+# default --classify ballot, which they have no business deciding.
+CGROUP_METRICS: List[CgroupSpec] = [
+    CgroupSpec("cpu", "CPU%", "cgroup_cpu_total_seconds",
+               "rate", "cpus", 0, "default"),
+    CgroupSpec("mem", "MEM%", "cgroup_memory_rss_bytes",
+               "gauge", "total_memory", 0, "default"),
+    # The user/system split. Sums to roughly CPU%, which is the point: 40% CPU that
+    # is 30% system time is thrashing in the kernel, not working.
+    CgroupSpec("cpu_user", "CPU_USER%", "cgroup_cpu_user_seconds",
+               "rate", "cpus", 1, "all"),
+    CgroupSpec("cpu_sys", "CPU_SYS%", "cgroup_cpu_system_seconds",
+               "rate", "cpus", 1, "all"),
+    # Page cache, which MEM% (RSS only) cannot see: a job can hold a lot of memory
+    # and still read light.
+    CgroupSpec("cache", "CACHE%", "cgroup_memory_cache_bytes",
+               "gauge", "total_memory", 1, "all"),
+    # usage_in_bytes, i.e. roughly RSS + cache. Read the caveat in
+    # config.example.toml before acting on it: because it counts *reclaimable*
+    # cache, a job streaming a dataset drives this to ~100% with nothing at risk.
+    # It is the figure the OOM limit is enforced on, not a utilization measure.
+    CgroupSpec("mem_used", "MEM_USED%", "cgroup_memory_used_bytes",
+               "gauge", "total_memory", 1, "all"),
+]
+
+SPEC_BY_KEY: Dict[str, CgroupSpec] = {spec.key: spec for spec in CGROUP_METRICS}
+DEFAULT_CGROUP_SPECS: List[CgroupSpec] = [s for s in CGROUP_METRICS
+                                          if s.group == "default"]
+# Every header this module can produce, for the config's typo check.
+CGROUP_HEADERS: Tuple[str, ...] = tuple(spec.header for spec in CGROUP_METRICS)
+CGROUP_NAMES: Tuple[str, ...] = tuple(spec.key for spec in CGROUP_METRICS)
+_ORDER: Dict[str, int] = {spec.key: i for i, spec in enumerate(CGROUP_METRICS)}
 
 
-def mem_query(raw_jobid: str) -> str:
-    """PromQL for RSS bytes over time -- a gauge, so no ``rate()`` needed."""
-    return "cgroup_memory_rss_bytes{jobid='%s',step='',task=''}" % raw_jobid
+def spec_named(name: str) -> Optional[CgroupSpec]:
+    """The cgroup spec ``name`` refers to, by key or by header."""
+    text = str(name).strip().lower()
+    found = SPEC_BY_KEY.get(text)
+    if found is not None:
+        return found
+    header = text.upper() if text.endswith("%") else text.upper() + "%"
+    return next((s for s in CGROUP_METRICS if s.header == header), None)
+
+
+def specs_named(names) -> List[CgroupSpec]:
+    """Resolve cgroup metric names to specs, in catalog order, dropping duplicates.
+
+    Catalog order rather than the order given, for the same reason
+    :func:`jobscope.dcgm.specs_named` does it: column order is a property of the
+    report, not of how a site listed them. Unknown names are the caller's to
+    validate -- they are skipped here.
+    """
+    found = {}
+    for name in names:
+        spec = spec_named(name)
+        if spec is not None:
+            found[spec.key] = spec
+    return [found[key] for key in sorted(found, key=_ORDER.__getitem__)]
 
 
 def _host_of(series: dict) -> str:
     return str(series["metric"].get("host", "?")).split(":")[0]
 
 
-def host_series(raw_jobid: str, cpus_by_host: Dict[str, float],
-                mem_total_by_host: Dict[str, float], start: int, end: int, step: int,
-                sampling_period: int, client: PrometheusClient,
-                timeout: Optional[float]) -> Dict[str, Dict[int, Dict[str, float]]]:
-    """``{host: {epoch: {"CPU%": v, "MEM%": v}}}`` over ``[start, end]`` at ``step``.
+def host_series(raw_jobid: str, divisors: Dict[str, Dict[str, float]],
+                start: int, end: int, step: int, sampling_period: int,
+                client: PrometheusClient, timeout: Optional[float],
+                specs: Optional[List[CgroupSpec]] = None
+                ) -> Dict[str, Dict[int, Dict[str, float]]]:
+    """``{host: {epoch: {header: percent}}}`` over ``[start, end]`` at ``step``.
 
-    Each sample is divided by that host's own divisor -- cores allocated for CPU%,
-    bytes allocated for MEM% -- so a host missing from ``cpus_by_host``/
-    ``mem_total_by_host`` (no divisor resolved for it) is silently skipped rather
-    than dividing by zero.
+    ``divisors`` is the per-node blob dict -- ``{host: {"cpus": n, "total_memory":
+    b, ...}}`` -- which every caller already holds; each spec names the field that
+    divides it. A host with no value for a given spec's ``denom`` is skipped for
+    that spec rather than divided by zero, so a node reporting cores but not memory
+    still gets its CPU columns.
+
+    One range query per spec, so a wide selection costs proportionally more; the
+    caller decides how many specs are worth that.
     """
     series: Dict[str, Dict[int, Dict[str, float]]] = {}
-    try:
-        cpu_result = client.query_range(cpu_query(raw_jobid, step, sampling_period),
-                                        start, end, step, timeout)
-    except Exception:
-        cpu_result = []
-    for result in cpu_result:
-        host = _host_of(result)
-        cpus = cpus_by_host.get(host)
-        if not cpus:
+    for spec in (DEFAULT_CGROUP_SPECS if specs is None else specs):
+        try:
+            found = client.query_range(spec.query(raw_jobid, step, sampling_period),
+                                       start, end, step, timeout)
+        except Exception:
+            # A failed query leaves that column empty rather than killing the
+            # series: a partial answer is worth more here than none.
             continue
-        for stamp, value in result.get("values", []):
-            try:
-                pct = 100 * float(value) / cpus
-            except (TypeError, ValueError):
+        for result in found:
+            host = _host_of(result)
+            divisor = (divisors.get(host) or {}).get(spec.denom)
+            if not divisor:
                 continue
-            series.setdefault(host, {}).setdefault(int(float(stamp)), {})["CPU%"] = pct
-
-    try:
-        mem_result = client.query_range(mem_query(raw_jobid), start, end, step, timeout)
-    except Exception:
-        mem_result = []
-    for result in mem_result:
-        host = _host_of(result)
-        total = mem_total_by_host.get(host)
-        if not total:
-            continue
-        for stamp, value in result.get("values", []):
-            try:
-                pct = 100 * float(value) / total
-            except (TypeError, ValueError):
-                continue
-            series.setdefault(host, {}).setdefault(int(float(stamp)), {})["MEM%"] = pct
+            for stamp, value in result.get("values", []):
+                try:
+                    pct = 100 * float(value) / divisor
+                except (TypeError, ValueError):
+                    continue
+                series.setdefault(host, {}).setdefault(
+                    int(float(stamp)), {})[spec.header] = pct
     return series
