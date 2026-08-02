@@ -84,7 +84,7 @@ def test_a_view_left_out_keeps_the_built_in_edges(tmp_path, capsys):
     path.write_text("[thresholds.summary.wasteful]\ncpu = 5\n")
     cfg = load_config(str(path))
     assert cfg.thresholds.edge("wasteful", "CPU%") == 5
-    assert cfg.timeslice_thresholds.edge("wasteful", "CPU%") == 2
+    assert cfg.timeslice_thresholds.edge("wasteful", "CPU%") == 5   # CPU%'s built-in
     err = capsys.readouterr().err
     assert "[thresholds.summary] is set but [thresholds.timeslice] is not" in err
 
@@ -382,7 +382,8 @@ def test_an_unknown_metric_key_is_dropped_with_a_note(tmp_path, capsys):
     path.write_text("[thresholds.summary.wasteful]\ngpuu = 2\n")
     cfg = load_config(str(path))
     assert "names no metric GPUU%" in capsys.readouterr().err
-    assert dict(cfg.thresholds.by_metric) == {}
+    assert "GPUU%" not in cfg.thresholds.by_metric        # the typo, dropped
+    assert dict(cfg.thresholds.by_metric) == {"CPU%": {"wasteful": 5.0}}
 
 
 def test_the_blob_backed_metrics_are_known(tmp_path, capsys):

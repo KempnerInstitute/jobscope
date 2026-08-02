@@ -924,8 +924,8 @@ def test_single_job_classification_describes_the_voting_metrics():
     text = _finish(records, view="all", show_dcgm=True, dcgm_data=dcgm_data,
                   thresholds=_thresholds())
     assert "Classified by best of GPU%" in text
-    assert "POWER_W caps the verdict when idle" in text
-    assert "CPU% splits the worst band" in text
+    assert "POWER_W lowers it below the floor" in text
+    assert "CPU% can vote no higher than inefficient" in text
 
 
 def test_single_job_classification_description_omits_cpu_for_a_gpu_view():
@@ -938,7 +938,7 @@ def test_single_job_classification_description_omits_cpu_for_a_gpu_view():
 def test_single_job_classification_description_for_a_cpu_view():
     records = {"1": _gpu_job("1", None)}
     text = _finish(records, view="cpu")
-    assert "Classified by CPU% alone" in text
+    assert "Classified by best of CPU%" in text
 
 
 def test_single_job_with_no_blob_gets_no_classification_line():
@@ -984,8 +984,9 @@ def test_the_stat_table_carries_a_legend():
     renderer.finish()
     text = out.getvalue()
     # "at or below": the boundary is inclusive -- exactly 10.0 bands inefficient,
-    # which is red -- and the old wording said "below 10", which excluded it.
-    assert "red at or below 10%, yellow at or below 20%, green above" in text
+    # which is red. The per-metric form is what prints by default now, since CPU%
+    # ships with its own cutoff of 5; either way the edges are stated, not implied.
+    assert "at or below 20%" in text or "CPU% 5/10/20" in text
     assert "POWER_W red below 100 W" in text and "Counts are jobs" in text
     assert "IDLE measures efficiency" in text
     # Directly above the header it explains, and inside the table width.
@@ -1016,11 +1017,24 @@ def test_the_legend_names_each_metrics_cutoffs_once_they_differ():
     assert all(len(ln) <= 132 for ln in lines)        # and wrapped to the table width
 
 
-def test_the_legend_stays_one_sentence_while_the_metrics_agree():
-    """Which for a site that has tuned nothing is always."""
+def test_the_legend_is_one_sentence_only_while_the_metrics_really_agree():
+    """The short form asserts one pair of numbers is true of the whole table, so it
+    is only reachable when it is. CPU% ships with its own wasteful cutoff of 5 (a GPU
+    job holds cores it never uses), so out of the box the metrics do *not* agree and
+    the per-metric form is the honest one."""
+    from jobscope.config import Thresholds
     out = io.StringIO()
+
+    # Out of the box: CPU% differs, so the legend names each metric.
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
     text = " ".join(renderer._legend(["CPU%", "GPU%", "SM_ACT%"]))
+    assert "each metric's own cutoffs" in text and "CPU% 5/10/20" in text
+
+    # Bring CPU% back onto the ladder and the short form returns.
+    agreed = RenderOptions(view="all", header=True,
+                           thresholds=Thresholds(by_metric={"CPU%": {"wasteful": 2.0}}))
+    text = " ".join(report.SummaryRenderer(CTX, agreed, out)._legend(
+        ["CPU%", "GPU%", "SM_ACT%"]))
     assert "red at or below 10%, yellow at or below 20%, green above" in text
     assert "each metric's own cutoffs" not in text
 
@@ -1371,8 +1385,9 @@ def test_narrow_views_show_only_their_own_worst_row():
 def test_wasteful_headings_state_their_own_criteria():
     """Every heading -- single-metric and combined -- names the cutoff it used,
     not a bare number the reader has to look up, so it stays true after a site
-    tunes config.toml. The cutoff is `wasteful` (default 2%) -- the same edge
-    --ts --classify's own "wasteful" tier is graded against."""
+    tunes config.toml. The cutoff is `wasteful` -- the same edge --ts --classify's
+    own "wasteful" tier is graded against -- and CPU%'s own default is 5, not the
+    catalog-wide 2, because a GPU job legitimately holds cores it never uses."""
     records = {
         "gpuhog": _timed_job("gpuhog", 3600, gpu_util=0.0, gpus=10, cores=2,
                              cpu_seconds=6480),
@@ -1388,8 +1403,8 @@ def test_wasteful_headings_state_their_own_criteria():
     renderer.finish()
     text = out.getvalue()
     assert "Wasteful GPU (" in text and "GPU < 2%" in text
-    assert "Wasteful CPU (" in text and "CPU < 2%" in text
-    assert "Wasteful gpu-cpu (" in text and "GPU < 2%, CPU < 2%" in text
+    assert "Wasteful CPU (" in text and "CPU < 5%" in text
+    assert "Wasteful gpu-cpu (" in text and "GPU < 2%, CPU < 5%" in text
 
 
 def test_a_custom_wasteful_cutoff_changes_membership_and_the_heading():
@@ -2344,14 +2359,6 @@ def test_an_empty_ballot_yields_no_verdict_rather_than_wasteful():
     classify() as an empty dict, so it cannot tell them apart and must not guess --
     the caller knows which it is holding."""
     assert report.classify({}, _thresholds()) is None
-
-
-def test_the_split_does_not_invent_a_flavour_for_a_verdict_never_reached():
-    """classify_combined splits *which* worst a unit is. With nothing judged there
-    is no worst to split, so it must not answer wasteful-cpu-gpu."""
-    assert report.classify_combined({}, 0.5, _thresholds()) is None
-
-
 def test_a_cpu_only_job_in_a_combined_sweep_is_still_judged_on_cpu():
     """The case the old default was written for has to keep working: the caller
     routes an empty GPU ballot to a CPU%-only classify() rather than relying on
@@ -2370,62 +2377,99 @@ def test_the_category_is_the_best_metric_not_the_worst():
     assert report.classify({"GPU%": 0.0, "SM_ACT%": 0.0, "DRAM%": 0.0}, t) == "wasteful"
 
 
-def test_power_is_ignored_without_a_floor_to_check_it_against():
-    """The old, power-blind call shape: no power/floor args means no cap at all."""
+def _with_floor(thresholds, watts):
+    """``thresholds`` with POWER_W's floor set, as for_model() leaves it."""
+    from jobscope.config import power_floors
+    return dataclasses.replace(thresholds, floors=power_floors(watts))
+
+
+def test_no_floor_reading_means_no_cap():
+    """A floor needs both halves: a configured floor and a measured value."""
     t = _thresholds()
-    assert report.classify({"GPU%": 0.0}, t) == "wasteful"     # whatever the watts
-    assert report.classify({"GPU%": 45.0}, t) == "good"
-    assert report.classify({"GPU%": 45.0}, t, power=50.0) == "good"     # floor missing
-    assert report.classify({"GPU%": 45.0}, t, floor=100.0) == "good"    # power missing
+    assert report.classify({"GPU%": 45.0}, t) == "good"           # no readings at all
+    assert report.classify({"GPU%": 45.0}, t, {"POWER_W": None}) == "good"   # not measured
+    assert report.classify({"GPU%": 45.0}, dataclasses.replace(t, floors={}),
+                           {"POWER_W": 50.0}) == "good"           # no floor configured
 
 
 @pytest.mark.parametrize("verdict,best", [
     ("good", 45.0), ("average", 25.0), ("needs improvement", 15.0),
 ])
-def test_idle_power_caps_a_healthy_verdict_at_inefficient(verdict, best):
-    """A duty-cycle-style metric can read busy while the card draws idle watts."""
+def test_a_floor_caps_a_healthy_verdict_at_inefficient(verdict, best):
+    """A duty-cycle-style metric can read busy while the card draws idle watts, and
+    watts are the one signal a duty cycle cannot fake."""
     t = _thresholds()
     assert report.classify({"GPU%": best}, t) == verdict          # uncapped, for contrast
-    assert report.classify({"GPU%": best}, t, power=67.0, floor=100.0) == "inefficient"
+    assert report.classify({"GPU%": best}, _with_floor(t, 100.0),
+                           {"POWER_W": 67.0}) == "inefficient"
 
 
-def test_idle_power_never_upgrades_an_already_worse_verdict():
-    """The cap only pushes a verdict down; it cannot promote wasteful to inefficient."""
-    assert report.classify({"GPU%": 1.0}, _thresholds(),
-                           power=67.0, floor=100.0) == "wasteful"
+def test_a_floor_never_upgrades_an_already_worse_verdict():
+    """A floor only pushes down; it cannot promote wasteful to inefficient."""
+    assert report.classify({"GPU%": 1.0}, _with_floor(_thresholds(), 100.0),
+                           {"POWER_W": 67.0}) == "wasteful"
 
 
-def test_power_at_or_above_the_floor_does_not_cap():
+def test_a_reading_at_or_above_the_floor_does_not_cap():
+    t = _with_floor(_thresholds(), 100.0)
+    assert report.classify({"GPU%": 45.0}, t, {"POWER_W": 100.0}) == "good"
+    assert report.classify({"GPU%": 45.0}, t, {"POWER_W": 219.5}) == "good"
+
+
+def test_any_one_low_floor_is_enough_to_cap():
+    """Two floors do not cancel out -- each asserts "below this is idle"."""
+    from jobscope.config import Thresholds
+    t = dataclasses.replace(_thresholds(),
+                            floors={"POWER_W": {"": 100.0}, "SMCLK_MHz": {"": 500.0}})
+    assert isinstance(t, Thresholds)
+    assert report.classify({"GPU%": 45.0}, t,
+                           {"POWER_W": 300.0, "SMCLK_MHz": 200.0}) == "inefficient"
+    assert report.classify({"GPU%": 45.0}, t,
+                           {"POWER_W": 300.0, "SMCLK_MHz": 900.0}) == "good"
+
+
+# --- CPU% votes, but cannot vote a job healthy -----------------------------
+
+def test_cpu_votes_but_is_capped_at_inefficient_on_a_gpu_job():
+    """This replaces the wasteful-cpu-gpu / wasteful-gpu split. A busy host is not
+    evidence the cards were needed, so CPU% lifts a GPU-idle job off `wasteful` but
+    no further."""
     t = _thresholds()
-    assert report.classify({"GPU%": 45.0}, t, power=100.0, floor=100.0) == "good"
-    assert report.classify({"GPU%": 45.0}, t, power=219.5, floor=100.0) == "good"
+    assert report.classify({"GPU%": 0.5, "CPU%": 1.0}, t) == "wasteful"      # idle both
+    assert report.classify({"GPU%": 0.5, "CPU%": 36.0}, t) == "inefficient"  # host busy
+    assert report.classify({"GPU%": 0.5, "CPU%": 95.0}, t) == "inefficient"  # very busy
 
 
-def test_classify_combined_splits_only_the_worst_band():
-    """CPU idle (<2%) plus GPU idle (<2%) -> wasteful-cpu-gpu; CPU busy -> wasteful-gpu."""
+def test_cpu_cannot_drag_a_healthy_gpu_job_down_either():
+    """The ceiling is a ceiling, not a floor: best-of-N means a low CPU% is simply
+    outvoted by a working GPU."""
     t = _thresholds()
-    assert report.classify_combined({"GPU%": 0.5}, 1.0, t) == "wasteful-cpu-gpu"
-    assert report.classify_combined({"GPU%": 0.5}, 95.0, t) == "wasteful-gpu"
+    for cpu in (0.0, 1.0, 50.0, 95.0):
+        assert report.classify({"GPU%": 45.0, "CPU%": cpu}, t) == "good"
+        assert report.classify({"GPU%": 25.0, "CPU%": cpu}, t) == "average"
 
 
-def test_classify_combined_missing_cpu_data_is_the_less_alarming_label():
-    assert report.classify_combined({"GPU%": 0.5}, None, _thresholds()) == "wasteful-gpu"
-
-
-def test_classify_combined_leaves_non_worst_verdicts_alone():
-    """CPU never touches a verdict better than wasteful, whatever its own value."""
+def test_a_cpu_only_ballot_votes_freely():
+    """A CPU-only job has no GPU allocation to justify, so the ceiling lifts -- it is
+    the only thing that could carry a verdict at all."""
     t = _thresholds()
-    for cpu in (0.0, 1.0, 50.0, None):
-        assert report.classify_combined({"GPU%": 45.0}, cpu, t) == "good"
-        assert report.classify_combined({"GPU%": 25.0}, cpu, t) == "average"
-        assert report.classify_combined({"GPU%": 15.0}, cpu, t) == "needs improvement"
-        assert report.classify_combined({"GPU%": 5.0}, cpu, t) == "inefficient"
+    assert report.classify({"CPU%": 50.0}, t) == "good"
+    assert report.classify({"CPU%": 1.0}, t) == "wasteful"
 
 
-def test_classify_combined_still_caps_on_power():
-    """The POWER_W cap (classify()'s own) still applies before the CPU split."""
-    assert report.classify_combined({"GPU%": 45.0}, 95.0, _thresholds(),
-                                    power=50.0, floor=100.0) == "inefficient"
+def test_the_ceiling_binds_on_the_columns_not_the_readings():
+    """A combined series that carries GPU% but has no value for this unit has a gap,
+    and a busy host must not fill it -- that is what `columns` distinguishes."""
+    t = _thresholds()
+    assert report.classify({"CPU%": 50.0}, t, columns=["CPU%"]) == "good"
+    assert report.classify({"CPU%": 50.0}, t,
+                           columns=["GPU%", "CPU%"]) == "inefficient"
+
+
+def test_a_floor_still_applies_with_cpu_in_the_ballot():
+    assert report.classify({"GPU%": 45.0, "CPU%": 95.0},
+                           _with_floor(_thresholds(), 100.0),
+                           {"POWER_W": 50.0}) == "inefficient"
 
 
 def test_gmem_takes_no_part_in_the_verdict():
@@ -2497,35 +2541,22 @@ def test_every_tier_heading_enumerates_its_own_metrics_and_range():
     assert "good (best of GPU%, SM_ACT%: >40%)" in text
 
 
-def test_a_combined_series_uses_the_split_categories_worst_first():
-    """CPU% coexisting with real GPU metrics switches classify onto
-    COMBINED_CATEGORIES -- worst split by whether CPU is also idle."""
+def test_cpu_in_a_combined_series_lifts_a_gpu_idle_unit_off_wasteful():
+    """This is what replaced the wasteful-cpu-gpu / wasteful-gpu split. CPU% votes,
+    so a GPU-idle unit with a busy host separates from one idle on both -- as a
+    different *band* rather than a different flavour of the same one."""
     jobs = {"1": {"GPU%": 90, "CPU%": 80},           # good
-            "2": {"GPU%": 0.5, "CPU%": 1.0},         # wasteful-cpu-gpu (CPU idle too)
-            "3": {"GPU%": 0.5, "CPU%": 90.0},        # wasteful-gpu (CPU busy)
+            "2": {"GPU%": 0.5, "CPU%": 1.0},         # wasteful: idle on both
+            "3": {"GPU%": 0.5, "CPU%": 90.0},        # inefficient: host busy, cards idle
             "4": {"GPU%": 15, "CPU%": 1.0}}          # needs improvement
     text = _classify(jobs, columns=("GPU%", "CPU%"))
     order = [ln.strip().split(" (")[0] for ln in text.splitlines()
              if ln.startswith("  ") and not ln.startswith("    ") and ln.endswith("jobs")]
-    assert order == ["wasteful-cpu-gpu", "wasteful-gpu", "needs improvement", "good"]
-    # CPU% is described (it splits the worst band) but never listed as a voting
-    # metric -- "by best of" names only what actually votes.
+    assert order == ["wasteful", "inefficient", "needs improvement", "good"]
+    # CPU% now votes, and the ceiling that keeps it from voting `good` is named.
     header = text.splitlines()[0]
-    assert "by best of GPU%" in header
-    assert "CPU% splits the worst band" in header
-    assert "by best of GPU%, CPU%" not in header and "by best of CPU%" not in header
-
-
-def test_the_split_worst_tiers_state_the_cpu_side_of_the_split():
-    """The whole distinction between the two split tiers is CPU%'s own state, so
-    the heading says it explicitly rather than leaving a reader to infer it."""
-    jobs = {"1": {"GPU%": 0.5, "CPU%": 1.0},         # wasteful-cpu-gpu
-            "2": {"GPU%": 0.5, "CPU%": 90.0}}        # wasteful-gpu
-    text = _classify(jobs, columns=("GPU%", "CPU%"))
-    assert "wasteful-cpu-gpu (GPU% <2%, CPU% <2%)" in text
-    assert "wasteful-gpu (GPU% <2%, CPU% >=2%)" in text
-
-
+    assert "by best of GPU%, CPU%" in header
+    assert "CPU% can vote no higher than inefficient" in header
 def test_a_combined_series_ranks_by_gpu_percent_not_cpu():
     """Within one category, jobs sort by the GPU metric, ascending -- not by CPU%
     and not by jobid (a job with a "later" id but lower GPU% still lists first).

@@ -79,6 +79,33 @@ BUCKET_TIER = {"red": "inefficient", "yellow": "needs improvement", "green": "go
 # about and lets the rest fall here.
 DEFAULT_BANDS = {"wasteful": 2.0, "inefficient": 10.0, "improvement": 20.0,
                  "average": 40.0}
+
+# The best tier a metric is allowed to *vote* for, where that differs from the tier
+# its value bands into.
+#
+# CPU% is the case, and the distinction matters. Its **banding** is the ordinary
+# utilization ladder: a job at CPU% 50 is using half its cores and the summary table
+# should paint that green, because it is. Its **vote** is capped at `inefficient`,
+# because a busy host is not evidence that a GPU allocation was justified -- a job
+# saturating its cores while holding four idle cards is still wasting the cards.
+#
+# Two different questions about one number, so two different answers. Conflating them
+# by giving CPU% upper edges of 100 would turn every ordinary CPU reading red in the
+# tables and the charts.
+#
+# Built in rather than left to config: omitting it silently restores the bug this
+# replaces. Measured on 94 real GPU jobs, 4 read `good` on a busy host while using
+# 0% of their GPUs.
+DEFAULT_VOTE_CEILING = {"CPU%": "inefficient"}
+
+# Per-metric edge defaults, where the catalog-wide ladder is calibrated for the wrong
+# quantity. Only the edges that genuinely differ -- these *do* affect banding and
+# colour, unlike the vote ceiling above.
+#
+# CPU%'s wasteful edge is 5 rather than 2: a GPU job legitimately holds cores it never
+# uses, so the bar for calling its host idle is higher than for a GPU metric. Its
+# upper edges stay on the ladder, because half a job's cores in use is half in use.
+DEFAULT_BY_METRIC = {"CPU%": {"wasteful": 5.0}}
 # POWER_W is watts, not percent, so it is not tiered at all -- it is a floor, and a
 # GPU below it is idle. That is the one signal a duty cycle cannot fake: a job
 # spinning on a trivial kernel reads busy on GPU% and draws idle watts. 100 sits in
@@ -249,6 +276,30 @@ class Thresholds:
         # inside edge(). object.__setattr__ because the dataclass is frozen.
         if set(self.defaults) != set(DEFAULT_BANDS):
             object.__setattr__(self, "defaults", {**DEFAULT_BANDS, **self.defaults})
+        object.__setattr__(self, "by_metric", self._with_calibrations())
+
+    def _with_calibrations(self) -> Mapping[str, Mapping[str, float]]:
+        """``by_metric`` plus jobscope's own per-metric edges, where they still apply.
+
+        Applied here rather than in the loader so a directly-constructed Thresholds --
+        a test, a library caller -- gets them too; leaving them to ``load_config``
+        meant CPU%'s cutoff quietly reverted to the generic ladder for everyone who
+        did not read a config file.
+
+        Skipped for any edge the caller **retuned**: a site writing ``default = 3``
+        means "3 for everything I did not name", and our opinion silently overriding
+        an explicit instruction is the kind of thing nobody can debug. Detected by
+        comparing against DEFAULT_BANDS, which is the only signal available here.
+        """
+        merged = {header: dict(edges) for header, edges in self.by_metric.items()}
+        for header, edges in DEFAULT_BY_METRIC.items():
+            for key, value in edges.items():
+                if self.defaults.get(key) != DEFAULT_BANDS.get(key):
+                    continue          # the site moved this edge; respect it
+                if key in merged.get(header, {}):
+                    continue          # the site named this metric's edge
+                merged.setdefault(header, {})[key] = value
+        return merged
 
     def floor_of(self, header: str, model: Optional[str] = None) -> Optional[float]:
         """``header``'s floor for ``model``, or None if it has no floor at all.
@@ -302,8 +353,22 @@ class Thresholds:
         return replace(self, floors=resolved) if changed else self
 
     def edge(self, key: str, header: str = "") -> float:
-        """``header``'s value for edge ``key``: its own if set, else the default."""
+        """``header``'s value for edge ``key``: its own if set, else the default.
+
+        ``by_metric`` already carries jobscope's per-metric calibrations where a
+        site left room for them -- see the merge in :func:`_band_table`, which is
+        where "did the site say something that covers this" is known.
+        """
         return self.by_metric.get(header, {}).get(key, self.defaults[key])
+
+    def vote_ceiling(self, header: str) -> Optional[str]:
+        """The best tier ``header`` may vote for, or None for no limit.
+
+        Separate from :meth:`edge` because it answers a different question -- see
+        :data:`DEFAULT_VOTE_CEILING`. CPU% bands and colours on the ordinary ladder
+        while being unable to vote a job healthy.
+        """
+        return DEFAULT_VOTE_CEILING.get(header)
 
     def edges(self, header: str = "") -> Tuple[float, ...]:
         """``header``'s four edges in tier order -- what validation checks."""

@@ -138,3 +138,16 @@ def votable(headers: Sequence[str]) -> List[str]:
     test rather than by a role, since POWER_W's job is to cap rather than to vote.
     """
     return [h for h in headers if h.endswith("%") and not has_role(h, MEMORY)]
+
+
+def in_catalog_order(headers) -> List[str]:
+    """``headers`` sorted the way columns print, unknown names last, order kept.
+
+    Ballots are built from whatever a series carried, so their iteration order is
+    incidental. Anything user-facing -- the "best of ..." line, a heading's criteria
+    -- should read in the same order as the table beside it.
+    """
+    position = {spec.header: i for i, spec in enumerate(CATALOG)}
+    known = [h for h in headers if h in position]
+    unknown = [h for h in headers if h not in position]
+    return sorted(known, key=position.__getitem__) + unknown

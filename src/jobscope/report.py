@@ -18,6 +18,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 from . import metrics
 from .blob import GIB, blob_capacity, blob_detail, blob_metrics
 from .config import (
+    DEFAULT_VOTE_CEILING as _DEFAULT_CEILING,
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
     EDGE_KEYS,
@@ -863,7 +864,7 @@ class SummaryRenderer:
         self._started = False
         # The most recently added job's plain {header: float} values and model --
         # for a single-job selection this is that job's own, used by finish() to
-        # print a Classification line the same classify()/classify_combined()
+        # print a Classification line the same classify()
         # already compute for --ts --classify.
         self._last_values: Dict[str, float] = {}
         self._last_model: str = ""
@@ -1263,7 +1264,7 @@ class SummaryRenderer:
                 self._print_classification()
 
     def _print_classification(self) -> None:
-        """A single job's classify()/classify_combined() verdict, unnumbered.
+        """A single job's classify() verdict, unnumbered.
 
         Reuses the exact same functions --ts --classify already computes from:
         combined when both GPU and CPU% are present (the default/all view), plain
@@ -1273,37 +1274,27 @@ class SummaryRenderer:
         """
         options = self.options
         thresholds = _bands(options)
-        # The GPU side of the ballot: graded percentages that are not memory, less
-        # CPU% (which is the host, and votes separately so the worst band can be
-        # split). POWER_W drops out on the `%` test -- it is watts, and leaving it
-        # in would let a raw wattage win classify()'s comparison outright whatever
-        # the GPU was doing; it caps the verdict instead.
-        gpu_values = {h: v for h, v in self._last_values.items()
-                     if h in metrics.votable(self._last_values) and h != "CPU%"}
-        cpu_value = self._last_values.get("CPU%")
-        power = self._last_values.get("POWER_W")
-        floor = (options.thresholds.floor_for(self._last_model)
-                if options.thresholds is not None else None)
-        combined = bool(gpu_values) and cpu_value is not None
-        if gpu_values:
-            verdict = (classify_combined(gpu_values, cpu_value, thresholds, power, floor)
-                      if cpu_value is not None else
-                      classify(gpu_values, thresholds, power, floor))
-            categories = COMBINED_CATEGORIES if cpu_value is not None else CATEGORIES
-            judged = list(gpu_values)
-        elif cpu_value is not None:
-            verdict = classify({"CPU%": cpu_value}, thresholds)
-            categories = CATEGORIES
-            judged = ["CPU%"]
-        else:
+        # One ballot: every graded percentage that is not memory, CPU% included.
+        # POWER_W drops out on the `%` test -- it is watts, and a raw wattage in the
+        # ballot would win the comparison outright whatever the GPU was doing. It
+        # lowers the verdict instead, as a floor.
+        ballot = {h: v for h, v in self._last_values.items()
+                  if h in metrics.votable(self._last_values)}
+        if not ballot:
             return
+        thresholds = thresholds.for_model(self._last_model)
+        floor_readings = {h: self._last_values.get(h) for h in thresholds.floors}
+        verdict = classify(ballot, thresholds, floor_readings,
+                           columns=metrics.votable(self._last_values))
+        categories = CATEGORIES
+        judged = metrics.in_catalog_order(ballot)
         role = next((r for n, r in categories if n == verdict), "")
         # The range is quoted over the metrics that actually voted, so it cannot
         # name a cutoff this verdict was not reached by -- with per-metric edges a
         # bare range would be some other column's.
         label = _tier_range(verdict, thresholds, judged)
-        has_power = power is not None and floor is not None
-        desc = _classify_description(list(gpu_values), has_power, combined)
+        floors_applied = [h for h, v in floor_readings.items() if v is not None]
+        desc = _classify_description(judged, floors_applied)
         text = ("Classification: %s (%s)" % (verdict, label) if label
                else "Classification: %s" % verdict)
         print(file=self.out)
@@ -2008,20 +1999,29 @@ _VERDICT_ORDER = {name: i for i, (name, _role) in enumerate(CATEGORIES)}
 
 
 def classify(values: Dict[str, float], thresholds: "Thresholds",
-            power: Optional[float] = None,
-            floor: Optional[float] = None) -> Optional[str]:
-    """The category for one unit's mean values: the band of its *best* metric,
-    capped by sustained idle power. ``None`` when there is nothing to judge.
+             floor_readings: Optional[Dict[str, Optional[float]]] = None,
+             columns=None) -> Optional[str]:
+    """The category for one unit: the band of its *best* voting metric, then lowered
+    by any floor metric reading below its floor. ``None`` when nothing was judged.
 
-    The percentage vote is charitable on purpose -- one busy measure is enough to call
-    a unit not-idle. But a duty-cycle-style metric can read busy while the card draws
-    idle watts (a kernel that touches the GPU without loading it), so when the unit's
-    own mean POWER_W sits below its floor -- graded per GPU model, since idle draw runs
-    from 27 W on a V100 to 165 W on an RTX PRO 6000 -- the verdict is capped at
-    "inefficient" no matter how high the percentage metrics claim to be. The cap only
-    ever pushes a verdict down: a unit already "wasteful" stays "wasteful". ``power``/
-    ``floor`` default to ``None``, which skips the cap entirely -- the original,
-    power-blind verdict.
+    Two roles, and the asymmetry between them is the whole design:
+
+    * ``values`` are the **votes** -- ``{header: mean}``. Best-of-N, so a vote can
+      only ever *raise* a verdict. A metric may also carry a ceiling limiting how
+      high it may vote (CPU%'s, see :func:`_capped_vote`).
+    * ``floor_readings`` are the **floors** -- ``{header: mean}`` for metrics that
+      can only *lower* one. POWER_W is the built-in case.
+
+    A floor cannot be expressed as a vote, which is why the two exist. Under
+    best-of-N a low reading is simply outvoted: a job at GPU% 48 drawing 80 W would
+    read `good` on the duty cycle alone, and watts are the one signal a duty cycle
+    cannot fake. Measured on 94 real GPU jobs, 8 depended on this.
+
+    The vote is charitable on purpose -- one busy measure is enough to call a unit
+    not-idle. The floors are what keep that from being naive. They are graded per GPU
+    model, since idle draw runs from 27 W on a V100 to 165 W on an RTX PRO 6000, and
+    a floor only ever pushes a verdict down: a unit already "wasteful" stays
+    "wasteful". ``floor_readings`` of ``None`` skips them entirely.
 
     "Best" is the best *tier*, not the largest number: the edges are per metric, so
     a GPU% of 4 (above its 2% wasteful edge) and a CPU% of 4 (below its 5% one) are
@@ -2038,67 +2038,101 @@ def classify(values: Dict[str, float], thresholds: "Thresholds",
     # knows which case it is holding, and NO_DATA is what an unknown one becomes.
     if not values:
         return None
-    verdict = max((thresholds.tier(header, value) for header, value in values.items()),
+    # A ceiling only applies while something else can carry the verdict. CPU%'s
+    # exists because a busy host does not justify a *GPU* allocation -- but a
+    # CPU-only job has no GPU allocation to justify, and there CPU% 50 is simply
+    # good. If every voter is ceilinged, the ceilings are what would make a healthy
+    # verdict unreachable, so they lift.
+    ceilinged = _ceiling_applies(thresholds, values if columns is None else columns)
+    verdict = max((_capped_vote(thresholds, header, value, ceilinged)
+                   for header, value in values.items()),
                   key=_VERDICT_ORDER.__getitem__)
-    if power is not None and floor is not None and power < floor:
-        return CATEGORIES[min(_VERDICT_ORDER[verdict], _VERDICT_ORDER["inefficient"])][0]
+    if _below_a_floor(thresholds, floor_readings):
+        return _lowered_to(verdict, "inefficient")
     return verdict
 
 
-# The combined-metrics categories: CATEGORIES with the worst band split in two, so
-# a job idle on both CPU and GPU can be told apart from one whose GPU is idle while
-# its CPU is doing something else. Spliced rather than restated so the tiers above
-# the split cannot drift from CATEGORIES. Ranking still comes from the GPU metric
-# alone -- see classify_combined().
-# The two split names borrow `wasteful`'s colour: they are both flavours of it,
-# and [colors] has one entry for the tier rather than one per flavour.
-COMBINED_CATEGORIES = ((("wasteful-cpu-gpu", "wasteful"), ("wasteful-gpu", "wasteful"))
-                       + CATEGORIES[1:])
+def unceilinged(thresholds: "Thresholds", headers) -> List[str]:
+    """The metrics among ``headers`` that may vote a unit healthy.
 
-
-def classify_combined(gpu_values: Dict[str, float], cpu_value: Optional[float],
-                      thresholds: "Thresholds", power: Optional[float] = None,
-                      floor: Optional[float] = None) -> Optional[str]:
-    """The GPU verdict (:func:`classify`), with its worst band split by whether
-    host CPU is also idle.
-
-    CPU only distinguishes *which* worst a GPU-idle job is -- "wasteful-cpu-gpu"
-    (idle on both) versus "wasteful-gpu" (GPU idle, CPU busy with something else)
-    -- and the two are mutually exclusive. It never touches the healthy/middle
-    bands, and it plays no part in ranking (see timeseries_classify(), which sorts
-    by the GPU metric alone). The CPU cutoff is CPU%'s *own* wasteful edge, which a
-    site will usually have set higher than the GPU metrics' -- a GPU job holds cores
-    it does not use, so the bar for calling its host idle is a different number.
-    Missing CPU data (``cpu_value`` is ``None``) defaults to the less alarming
-    "wasteful-gpu" label rather than claiming double-idle on data never measured.
+    The distinction a caller needs twice. Ceilings must be judged against the
+    *columns a series carries*, not against one unit's readings: those are the same
+    "not applicable" versus "not measured" split the Measure states draw. A ``--cpu``
+    series carries no GPU column at all, so CPU% is all there is and votes freely. A
+    combined series that carries GPU% but has no value for *this* unit has a gap, and
+    a busy host must not fill it -- that unit is no-data.
     """
-    verdict = classify(gpu_values, thresholds, power, floor)
-    if verdict != "wasteful":
-        # Includes None, i.e. nothing to judge: the split says which *flavour* of
-        # worst a job is, and there is no flavour of a verdict that was not reached.
+    return [h for h in headers if thresholds.vote_ceiling(h) is None]
+
+
+def _ceiling_applies(thresholds: "Thresholds", headers) -> bool:
+    """Whether vote ceilings bind, given the columns available."""
+    return bool(unceilinged(thresholds, headers))
+
+
+def _capped_vote(thresholds: "Thresholds", header: str, value: float,
+                 ceilinged: bool = True) -> str:
+    """The tier ``header`` votes for, no better than its ceiling.
+
+    A metric may band higher than it is allowed to *vote* -- CPU% at 50 is genuinely
+    half-used and paints green, but on a GPU job a busy host is not evidence the
+    cards were needed, so it votes no higher than `inefficient`. See
+    config.DEFAULT_VOTE_CEILING.
+    """
+    voted = thresholds.tier(header, value)
+    ceiling = thresholds.vote_ceiling(header) if ceilinged else None
+    return _lowered_to(voted, ceiling) if ceiling else voted
+
+
+def _lowered_to(verdict: str, limit: str) -> str:
+    """``verdict``, or ``limit`` if that is worse. Never raises a verdict."""
+    if verdict not in _VERDICT_ORDER or limit not in _VERDICT_ORDER:
         return verdict
-    cpu_idle = cpu_value is not None and cpu_value < thresholds.edge("wasteful", "CPU%")
-    return "wasteful-cpu-gpu" if cpu_idle else "wasteful-gpu"
+    return CATEGORIES[min(_VERDICT_ORDER[verdict], _VERDICT_ORDER[limit])][0]
 
 
-def _classify_description(metrics: List[str], has_power: bool, combined: bool) -> str:
-    """What a classify verdict was judged from -- which metrics voted (best-of),
-    and how POWER_W/CPU% modify it without voting themselves. Shared by
-    ``timeseries_classify()`` and the single-job summary's Classification line, so
-    the two describe the same rule in the same words.
+def _below_a_floor(thresholds: "Thresholds", readings) -> bool:
+    """Whether any floor metric read below its floor.
+
+    ``readings`` is ``{header: measured value}``; the floors come from ``thresholds``,
+    already resolved for this unit's hardware by ``for_model``. Any one of them being
+    low is enough -- a floor asserts "below this, the resource is idle", and two such
+    assertions do not cancel out.
     """
-    text = "by best of %s" % ", ".join(metrics) if metrics else "by CPU% alone"
+    for header, value in (readings or {}).items():
+        if value is None:
+            continue
+        floor = thresholds.floor_of(header)
+        if floor is not None and value < floor:
+            return True
+    return False
+
+
+def _classify_description(voted: List[str], floors: List[str]) -> str:
+    """What a verdict was judged from: which metrics voted, and which could lower it.
+
+    Shared by ``timeseries_classify()`` and the single-job summary's Classification
+    line, so the two describe the same rule in the same words. The ceiling is named
+    where it applies, because "CPU% voted" and "CPU% voted but could not call this
+    healthy" are different claims and the second is the one that is true.
+    """
+    if not voted:
+        return "on nothing -- no metric was measured"
+    # Only name a ceiling that actually binds; see classify()'s _ceiling_applies.
+    unlimited = [h for h in voted if not _DEFAULT_CEILING.get(h)]
+    limited = [h for h in voted if _DEFAULT_CEILING.get(h)] if unlimited else []
+    text = "by best of %s" % ", ".join(voted)
     extra = []
-    if has_power:
-        extra.append("POWER_W caps the verdict when idle")
-    if combined:
-        extra.append("CPU% splits the worst band")
+    for header in limited:
+        extra.append("%s can vote no higher than %s" % (header, _DEFAULT_CEILING[header]))
+    if floors:
+        extra.append("%s lowers it below the floor" % ", ".join(sorted(floors)))
     if extra:
         text += " (%s)" % "; ".join(extra)
     return text
 
 
-_WORST_TIERS = ("wasteful", "wasteful-gpu", "wasteful-cpu-gpu")
+_WORST_TIERS = ("wasteful",)
 
 
 def _metric_range(name: str, thresholds: "Thresholds", header: str) -> str:
@@ -2204,16 +2238,14 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
                         out=None, level: str = "job", show_all: bool = False) -> None:
     """Group the units into efficiency categories, worst first.
 
-    The verdict for each is :func:`classify` (or :func:`classify_combined` when the
-    series carries both CPU% and real GPU metrics -- a combined ``--ts`` series);
-    what this adds is the reading order. A partition sweep exists to be acted on
+    The verdict for each is :func:`classify`; what this adds is the reading order. A partition sweep exists to be acted on
     from the top, and on a healthy one most jobs are fine -- so ``good`` collapses
     to a count unless ``show_all``, which is the difference between a page and a
     hundred of them.
 
-    For a combined series, ranking and the vote itself come from the GPU metrics
-    alone -- CPU% only distinguishes which flavor of "worst" a GPU-idle unit is
-    (see :func:`classify_combined`); it never inflates or outranks the GPU verdict.
+    CPU% votes but never ranks: a unit's position among its peers comes from its
+    best GPU reading, because a busy host is not what someone scanning this list is
+    looking for.
     """
     out = out or sys.stdout
     voting = classify_metrics(columns)
@@ -2222,12 +2254,12 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     unit = {"gpu": "GPUs", "node": "nodes"}.get(level, "jobs")
     thresholds = _bands(options)
 
-    # CPU% only drives the combined path when real GPU metrics are also present --
-    # a plain --cpu --ts --classify series has CPU% as its only metric, and stays
-    # on the ordinary classify()/CATEGORIES path unchanged.
-    is_combined = "CPU%" in voting and len(voting) > 1
-    gpu_metrics = [m for m in voting if m != "CPU%"] if is_combined else voting
-    categories = COMBINED_CATEGORIES if is_combined else CATEGORIES
+    # One ballot whatever the series carries. CPU% votes like any other metric --
+    # its ceiling is what stops a busy host calling a GPU-idle unit healthy -- so a
+    # plain `--cpu --ts` series and a combined one take the same path. That replaces
+    # `is_combined`, which was `"CPU%" in voting and len(voting) > 1` and would have
+    # mislabelled a cpu-only series the moment the cgroup detail columns landed.
+    categories = CATEGORIES
     # A unit whose voting columns carried no samples lands here rather than in a
     # band. Last, because it is an absence rather than a severity: putting it at
     # the top would push the findings someone opened the report for off the page.
@@ -2237,30 +2269,36 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     groups = pool_samples(rows, reported, level)
     verdicts = []
     for key, found in groups.items():
-        # Every metric is averaged, but only the judged (GPU) ones vote. Keeping
-        # the two apart is what lets the CSV report GMEM%/CPU%/POWER_W without
-        # letting them decide the label -- POWER_W still caps it via classify()'s
-        # floor check, and CPU% still splits the worst band via classify_combined().
+        # Every metric is averaged; the voting ones decide the label. Keeping the
+        # two apart is what lets the CSV report GMEM% and POWER_W without letting
+        # them pick the verdict -- POWER_W lowers it as a floor instead.
         means = {m: sum(v) / len(v) for m, v in found["values"].items()}
-        judged = {m: v for m, v in means.items() if m in gpu_metrics}
-        power = means.get("POWER_W")
-        cpu_mean = means.get("CPU%") if is_combined else None
+        judged = {m: means[m] for m in metrics.in_catalog_order(voting) if m in means}
         model = job_model({k: {MODEL_KEY: m} for k, m in found["models"].items()})
-        floor = options.thresholds.floor_for(model) if options.thresholds is not None else None
-        verdict = (classify_combined(judged, cpu_mean, thresholds, power, floor) if is_combined
-                  else classify(judged, thresholds, power, floor))
+        bands = thresholds.for_model(model)
+        floor_readings = {h: means.get(h) for h in bands.floors}
+        carriers = unceilinged(bands, voting)
+        if carriers and not any(m in judged for m in carriers):
+            # The series carries columns that could have voted this unit healthy and
+            # none of them has a value for it. A busy host must not fill that gap.
+            judged = {}
+        verdict = classify(judged, bands, floor_readings, columns=voting)
         # None means nothing voted: the series carries these columns but this unit
         # had no samples in any of them -- a dead exporter, a node that restarted,
         # a window past retention. Saying `wasteful` there would report a
         # collection gap as waste, and it is the reading someone acts on.
         if verdict is None:
             verdict = NO_DATA
-        best_gpu = max(judged.values()) if judged else 0.0
-        verdicts.append((verdict, key, found, means, power, best_gpu, cpu_mean))
+        gpu_only = [v for m, v in judged.items() if m != "CPU%"]
+        best_gpu = max(gpu_only) if gpu_only else 0.0
+        verdicts.append((verdict, key, found, means, best_gpu))
 
     # Ranking: the GPU metric for a combined series (per the design -- CPU never
     # ranks), the group key otherwise, exactly as before this feature existed.
-    rank_key = (lambda v: v[5]) if is_combined else (lambda v: v[1])
+    # Rank by the best GPU reading where there is one, else by the group key, as
+    # before -- CPU% never ranks, only votes.
+    rank_key = ((lambda v: v[4]) if any(m != "CPU%" for m in voting)
+                else (lambda v: v[1]))
 
     if options.csv:
         # jobid, user, every metric the series carried, then the label. Wider than
@@ -2270,7 +2308,7 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         if options.header:
             writer.writerow(["JOBID", "USER"] + reported + ["LABEL"])
         order = {name: i for i, (name, _c) in enumerate(categories)}
-        for name, key, found, means, _power, _best_gpu, _cpu_mean in sorted(
+        for name, key, found, means, _best_gpu in sorted(
                 verdicts, key=lambda v: (order[v[0]], rank_key(v))):
             writer.writerow([key[0], found["user"]]
                             + ["%.1f" % means[m] if m in means else "" for m in reported]
@@ -2279,7 +2317,8 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         return
 
     if options.header:
-        desc = _classify_description(gpu_metrics, "POWER_W" in columns, is_combined)
+        desc = _classify_description(
+            voting, [h for h in thresholds.floors if h in columns])
         print("  %d %s, %s" % (len(verdicts), unit, desc), file=out)
         print(file=out)
 
@@ -2288,18 +2327,15 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     # username and a reading ran together. The identity block also has to say which
     # unit was judged -- at node level every row read as the same job id before.
     multi_job = len({r.get("JOBID", "?") for r in rows}) > 1
-    extra_headers = ("POWER_W", "CPU%") if is_combined else ("POWER_W",)
-    headers = unit_headers(level, multi_job) + ("USER",) + tuple(gpu_metrics) + extra_headers
+    extra_headers = tuple(h for h in ("POWER_W",) if h not in voting)
+    headers = unit_headers(level, multi_job) + ("USER",) + tuple(voting) + extra_headers
 
-    def cells_for(key, found, means, power, cpu_mean) -> Tuple[str, ...]:
-        extra = ("-" if power is None else "%.0f" % power,)
-        if is_combined:
-            extra += ("-" if cpu_mean is None else "%.1f" % cpu_mean,)
+    def cells_for(key, found, means) -> Tuple[str, ...]:
         return (unit_values(level, multi_job, key, found) + (found["user"],)
-                + tuple("%.1f" % means[m] if m in means else "-" for m in gpu_metrics)
-                + extra)
+                + tuple("%.1f" % means[m] if m in means else "-" for m in voting)
+                + tuple("%.0f" % means[h] if h in means else "-" for h in extra_headers))
 
-    table = {id(v): cells_for(v[1], v[2], v[3], v[4], v[6]) for v in verdicts}
+    table = {id(v): cells_for(v[1], v[2], v[3]) for v in verdicts}
     # Measured across every category, so the columns line up between them and two
     # jobs in different bands stay comparable at a glance.
     widths = [max(len(headers[i]), max((len(c[i]) for c in table.values()), default=0))
@@ -2317,7 +2353,7 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         found = by_name.get(name, [])
         if not found:
             continue
-        heading = "%s (%s)  %d %s" % (name, _tier_criteria(name, gpu_metrics, thresholds),
+        heading = "%s (%s)  %d %s" % (name, _tier_criteria(name, voting, thresholds),
                                       len(found), unit)
         print("  " + (tint(heading, role) if options.color else heading), file=out)
         if name == "good" and not show_all:
