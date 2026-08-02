@@ -522,13 +522,17 @@ unique across families.
   [thresholds.summary.wasteful]        # per-metric band edges, per view
   default = 2                          # every metric not named below
   sm_act  = 3                          # this one alone
-  cpu     = 5
   [thresholds.timeslice.wasteful]      # --ts's own edges; inherits nothing
   default = 2
 
-Write `sm_act`, not `dcgm-sm_act`: the prefixed form is rejected with a note.
-Run `jobscope config` to see how every value actually resolved, which is the
-quickest way to confirm an edit landed.
+  [classify]                           # which metrics decide a verdict
+  vote = ["gpu", "sm_act", "cpu"]      # best-of-N; omit to use every percentage
+  [classify.floor.power]               # can only *lower* a verdict
+  default = 100                        # watts; below this, cap at inefficient
+
+Either spelling works -- `sm_act` or `dcgm-sm_act` -- since the names are unique
+across families. Run `jobscope config` to see how every value actually resolved,
+which is the quickest way to confirm an edit landed.
 
 A row marked "%s" is a series your server exports that jobscope has no name for.
 Give it one with a [metrics.<family>.<name>] table -- the family says which label
