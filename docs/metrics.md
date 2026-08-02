@@ -14,7 +14,8 @@ without querying anything further -- `--stats-per-node` and `--stats-per-job`
 pool the same samples over a host's GPUs and over the whole job. `--classify`
 turns those means into a verdict per job -- wasteful / inefficient / needs
 improvement / average / good, from each job's *best* %-metric, with `GMEM%`
-excluded and a `POWER_W` reading below the floor forcing wasteful.
+excluded and a `POWER_W` reading below the floor capping the verdict at
+inefficient however busy the percentages look.
 
 ---
 
@@ -335,17 +336,26 @@ contradict the percentage beside it. `ALLOC` and `USED` were dropped: `IDLE` alr
 carries the same information in the form anyone acts on, and the band cells were
 reduced to job counts for the same reason. Both survive in the CSV.
 
-One cutoff, `[thresholds] red`, covers every percentage metric: red below it,
-yellow below twice it, green above. `POWER_W` is the exception twice over: it is
-graded in watts, and against a *floor*, so it has only two bands -- below is idle,
-at or above is not. Doubling a floor would be meaningless, and on a card whose floor
-is 330 W it would put green beyond the hardware's maximum. Uniform on purpose -- the
-per-metric values it
-replaced were never calibrated against each other, and carrying a different
-threshold for each row is what made the old cutoff column confusing. `POWER_W` has
-its own knob because watts are not a percentage. A three-line legend above the table
-states the cutoffs, what `IDLE` counts, and why a green band is not the same as an
-efficient one.
+Every percentage metric is banded into five tiers by four edges -- `wasteful`,
+`inefficient`, `improvement`, `average` -- which the table then collapses to three
+colours: red at or below `inefficient`, yellow at or below `improvement`, green
+above. `POWER_W` is the exception twice over: it is graded in watts, and against a
+*floor*, so it has only two bands -- below is idle, at or above is not. Doubling a
+floor would be meaningless, and on a card whose floor is 330 W it would put green
+beyond the hardware's maximum.
+
+The edges are **per metric**, and configured per view: `[thresholds.summary.<edge>]`
+for this table, `[thresholds.timeslice.<edge>]` for `--ts`. Per metric because the
+metrics do not mean the same thing -- a GPU job legitimately holds cores it never
+uses, so `CPU%` at 4% is ordinary where `GPU%` at 4% is idle, and `SM_ACT%` sits
+structurally below `GPU%` on the same work. A single number had to be wrong for some
+row. `default` catches every metric a site does not name, so the extended catalog
+stays graded without being enumerated.
+
+A three-line legend above the table states the cutoffs, what `IDLE` counts, and why
+a green band is not the same as an efficient one. It quotes one pair of numbers
+while every metric in the table agrees on them, and lists them metric by metric once
+they do not -- there is no single true sentence in that case.
 
 ### Three sections
 
@@ -378,8 +388,9 @@ table. Suppressed under `--csv`, and its title follows `--noheader`.
 
 ### What green does not mean
 
-Green is `>= 2x` the red cutoff, which is a low bar: with `cpu = 10` a job at 21%
-is green while leaving four fifths of its cores unused. A selection can therefore
+Green is anything above the `improvement` edge, which is a low bar: at the default
+20 a job at 21% is green while leaving four fifths of its cores unused. A selection
+can therefore
 be half idle with almost every job green, which reads as a contradiction until the
 two columns are separated:
 
@@ -401,15 +412,17 @@ idle anyway.
 
 Measured on one partition, `GPU%` showed the first (4% of jobs, 53% of the
 GPU-hours, red) and `CPU%` the second. The bands are deliberately calibrated to
-catch pathological jobs rather than to score efficiency, since the thresholds that
-would score efficiency differ per workload -- inference, data prep and sparse HPC
-all run legitimately low.
+catch pathological jobs rather than to score efficiency: the thresholds that would
+score efficiency differ per workload -- inference, data prep and sparse HPC all run
+legitimately low -- and no default can be right for all of them. Where a site's mix
+is known, the per-metric edges are how to say so, one metric at a time, rather than
+by moving a single number that every row shares.
 
 The three band cells give each band's share of the **jobs** and of the
 **resource-time**: `13 (4%)/54%` is 13 jobs, 4% of those measured, holding 54% of
 the GPU-hours. The gap between the two is the finding -- 4% of the jobs held 54%
 of the GPU-hours below 25% -- and either share alone conceals it. The bands come
-from `config.grade_band` and the site's `[thresholds]`, the same cutoffs that tint
+from `Thresholds.tier` and the site's `[thresholds]`, the same cutoffs that tint
 the cells and colour `jobscope plot`, so the block is a tally of what is already
 on screen rather than a second opinion.
 
@@ -559,7 +572,7 @@ jobstats. `running --avg` applies the reductions above and does match.
 Slurm writes the blob at job end, so a running job has none and its utilization
 columns would be empty. `jobscope/live_blob.py` rebuilds one from Prometheus, in
 the blob's own shape, so `blob_metrics` / `blob_detail` and therefore the summary
-and detail views, `--csv`, `plot` and `--diagnose` all work unchanged.
+and detail views, `--csv` and `plot` all work unchanged.
 
 | blob field | query | reducer |
 |---|---|---|

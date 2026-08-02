@@ -84,7 +84,7 @@ def _args(**kw):
                 starttime=None, endtime=None, min_elapsed=None, partition=None,
                 user="alice", all_users=False, account=None, state=None,
                 per_gpu=False, ts=False, view=None, dcgm=False, avg=False,
-                diagnose=False, diag_short=None, header=True, csv=False, step=None,
+                header=True, csv=False, step=None,
                 timeout=None, workers=None, config_path=None, explicit_mode=False)
     base.update(kw)
     return argparse.Namespace(**base)
@@ -202,8 +202,8 @@ def test_cpu_and_gpu_are_mutually_exclusive():
 
 @pytest.mark.parametrize("mode", [RUNNING, FINISHED])
 @pytest.mark.parametrize("argv", [
-    [], ["--per-gpu"], ["--ts"], ["--cpu"], ["--gpu"], ["--dcgm"], ["--diagnose"],
-    ["--per-gpu", "--dcgm"], ["--ts", "--dcgm"], ["--gpu", "--dcgm", "--diagnose"],
+    [], ["--per-gpu"], ["--ts"], ["--cpu"], ["--gpu"], ["--dcgm"],
+    ["--per-gpu", "--dcgm"], ["--ts", "--dcgm"], ["--gpu", "--dcgm"],
     ["-p", "kempner"], ["-a"], ["--csv"], ["-n"],
 ])
 def test_every_option_parses_in_every_mode(mode, argv):
@@ -229,15 +229,6 @@ def test_jobid_flag_merges_with_positional():
         args = subparsers.choices[FINISHED].parse_intermixed_args(argv)
         args.mode, args.user = FINISHED, "alice"
         assert set(build_request(args).jobids) == {"111", "222"}
-
-
-def test_diag_short_replaces_the_old_min_runtime():
-    _, subparsers = build_parser()
-    args = subparsers.choices[FINISHED].parse_intermixed_args(["--diag-short", "300"])
-    assert args.diag_short == 300
-    # --min-runtime now means the runtime floor, not the DIAG threshold.
-    args = subparsers.choices[RUNNING].parse_intermixed_args(["--min-runtime", "5m"])
-    assert args.min_elapsed == "5m"
 
 
 # --- dispatch ---------------------------------------------------------------
@@ -447,12 +438,6 @@ def test_running_no_matching_jobs(monkeypatch, capsys):
     monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, timeout: {})
     main(["running", "-a"])
     assert "No running jobs match" in capsys.readouterr().err
-
-
-def test_diagnose_ignored_for_the_cpu_view(monkeypatch, capsys, cpu_record):
-    _patch_sacct(monkeypatch, {"200": cpu_record})
-    main(["finished", "--cpu", "--diagnose", "-D", "1", "-u", "bob"])
-    assert "ignoring it for --cpu" in capsys.readouterr().err
 
 
 def test_running_blob_is_reconstructed(monkeypatch, capsys, gpu_record):
@@ -798,14 +783,14 @@ def test_finished_hides_the_running_only_flags(capsys):
 def test_ts_hides_what_the_series_drops(capsys):
     """emit_timeseries notes these as dropped; the help should not offer them."""
     body, hidden = _help_for(["--ts"], capsys)
-    assert {"--cpu", "--gpu", "--diagnose", "--per-gpu", "--no-plot"} <= set(hidden)
+    assert {"--cpu", "--gpu", "--per-gpu", "--no-plot"} <= set(hidden)
     assert "--step" in body      # --ts is the only thing that reads it
     assert "--nodename" in body  # the series carries a NODE column, so it filters
 
 
 def test_cpu_hides_the_gpu_only_columns(capsys):
     _, hidden = _help_for(["--cpu"], capsys)
-    assert {"--dcgm", "--diagnose", "--diag-short"} <= set(hidden)
+    assert "--dcgm" in set(hidden)
 
 
 def test_csv_hides_what_a_csv_cannot_carry(capsys):
@@ -930,8 +915,9 @@ def test_plot_ts_needs_no_nodename_for_a_single_node_job(monkeypatch, capsys):
     assert "┤" in capsys.readouterr().out
 
 
-def test_plot_ts_charts_every_metric_only_with_dcgm(monkeypatch, capsys):
-    """--dcgm/--ext widens the CSV; the chart should follow, not stay on the default set."""
+def test_plot_ts_charts_every_metric_by_default(monkeypatch, capsys):
+    """Bare --plot_ts now resolves to the combined/extended view, same as --dcgm
+    did before -- so the chart should show the extended catalog either way."""
     header = "JOBID,USER,EPOCH,TIME,NODE,GPU,GPU%,GMEM%,ENGINE%\n"
     body = "".join(
         "100,alice,%d,2020-01-01T00:%02d:00,node01,%s,%d,%d,%d\n"
@@ -943,7 +929,7 @@ def test_plot_ts_charts_every_metric_only_with_dcgm(monkeypatch, capsys):
     monkeypatch.setattr(cli, "emit_timeseries", emit)
 
     main(["-j", "1", "--plot_ts"])
-    assert "ENGINE%" not in capsys.readouterr().out
+    assert "ENGINE%" in capsys.readouterr().out
 
     main(["-j", "1", "--dcgm", "--plot_ts"])
     assert "ENGINE%" in capsys.readouterr().out
@@ -956,21 +942,89 @@ def test_cpu_ts_no_longer_says_it_does_not_apply(monkeypatch, capsys):
     assert "does not apply" not in capsys.readouterr().err
 
 
-def test_gpu_and_diagnose_still_do_not_apply_to_ts(monkeypatch, capsys):
-    _fake_ts(monkeypatch, "")
-    main(["-j", "1", "--gpu", "--ts"])
-    err = capsys.readouterr().err
-    assert "--gpu" in err and "does not apply" in err
-    main(["-j", "1", "--diagnose", "--ts"])
-    err = capsys.readouterr().err
-    assert "--diagnose" in err and "does not apply" in err
-
-
-def test_dcgm_does_not_apply_to_cpu_ts(monkeypatch, capsys):
+def test_cpu_and_dcgm_together_no_longer_conflict(monkeypatch, capsys):
+    """--cpu --dcgm together now means the combined view, not a dropped flag."""
     _fake_ts(monkeypatch, "")
     main(["-j", "1", "--cpu", "--dcgm", "--ts"])
-    err = capsys.readouterr().err
-    assert "--dcgm/--ext does not apply to --cpu --ts" in err
+    assert "does not apply" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flags,expect_combined,expect_specs_name", [
+    ([], True, "key"),                    # bare --ts: combined + curated key metrics
+    (["--cpu"], False, "default"),        # --cpu alone: cpu-only (specs unused, but this
+                                          # is what the outer `specs` var resolves to)
+    (["--dcgm"], False, "all"),           # --dcgm alone: gpu-only/extended, unchanged
+    (["--cpu", "--dcgm"], True, "all"),   # both: combined + extended
+])
+def test_ts_view_resolution_truth_table(monkeypatch, flags, expect_combined, expect_specs_name):
+    """The one genuinely new piece of branching logic in this feature: which of
+    cpu-only/gpu-only/combined --ts resolves to, and whether the GPU catalog is
+    KEY_SPECS (curated default) or ALL_SPECS (--dcgm/--ext), for every
+    (--cpu, --dcgm) combination."""
+    from jobscope.dcgm import ALL_SPECS, DEFAULT_SPECS, KEY_SPECS
+    captured = {}
+
+    def emit(request, cfg, timeout, workers, specs, step, options, out=None):
+        captured["specs"] = specs
+        captured["combined"] = options.combined
+
+    monkeypatch.setattr(cli, "emit_timeseries", emit)
+    main(["-j", "1", "--ts"] + flags)
+    assert captured["combined"] == expect_combined
+    expected = {"key": KEY_SPECS, "all": ALL_SPECS, "default": DEFAULT_SPECS}[expect_specs_name]
+    assert captured["specs"] == expected
+
+
+# --- which of the two band tables each view is graded by ---------------------
+
+def _two_table_config():
+    """A config whose two views disagree, so which one is in force is visible."""
+    from jobscope import config as config_module
+    return dataclasses.replace(
+        config_module.get_config(),
+        thresholds=config_module.Thresholds(by_metric={"CPU%": {"wasteful": 5.0}}),
+        timeslice_thresholds=config_module.Thresholds(by_metric={"CPU%": {"wasteful": 8.0}}))
+
+
+@pytest.mark.parametrize("argv,expected", [
+    (["-j", "1"], 5.0),                       # the plain summary: whole elapsed time
+    (["-j", "1", "--ts"], 8.0),               # a time slice
+    (["-j", "1", "--ts", "30m"], 8.0),        # ... with a window
+    (["-j", "1", "--plot_ts"], 8.0),          # --plot_ts *is* --ts
+    (["-j", "1", "--ts", "--classify"], 8.0),
+    (["-j", "1", "--ts", "--stats"], 8.0),
+])
+def test_each_view_is_graded_by_its_own_table(monkeypatch, argv, expected):
+    """The crux of the two-table feature: the summary reads [thresholds.summary]
+    and every --ts path reads [thresholds.timeslice]. Nothing else distinguishes
+    them, so getting this wrong grades a job by the other view's numbers."""
+    from jobscope import config as config_module
+    config_module.set_config(_two_table_config())
+    captured = {}
+
+    def emit(request, cfg, timeout, workers, specs, step, options, out=None):
+        captured["options"] = options
+
+    class FakeRenderer:
+        def __init__(self, context, options, **kw):
+            captured["options"] = options
+
+        def add(self, *a, **kw):
+            pass
+
+        def finish(self):
+            pass
+
+    monkeypatch.setattr(cli, "emit_timeseries", emit)
+    monkeypatch.setattr(cli, "SummaryRenderer", FakeRenderer)
+    monkeypatch.setattr(cli, "resolve",
+                        lambda *a, **kw: select_mod.Resolved(context=[], chunks=[]))
+    # The options are captured in emit(); what runs after it consumes a CSV the
+    # fake never wrote, so those stages are stubbed out rather than fed one.
+    for stage in ("_plot_timeseries", "_classify_timeseries", "_stats_timeseries"):
+        monkeypatch.setattr(cli, stage, lambda *a, **kw: None)
+    main(argv)
+    assert captured["options"].thresholds.edge("wasteful", "CPU%") == expected
 
 
 def test_plot_ts_refuses_several_jobs(monkeypatch, capsys):
@@ -1193,3 +1247,67 @@ def test_classify_with_plot_ts_says_it_is_ignored(monkeypatch, capsys):
     _fake_ts(monkeypatch, _ts_rows(gpus=("0",)))
     main(["-j", "1", "--plot_ts", "--classify"])
     assert "ignoring --classify" in capsys.readouterr().err
+
+
+# --- [defaults] days / state reach the Request -------------------------------
+
+def test_the_default_window_and_state_come_from_config(monkeypatch):
+    """Both already had flags but no config key -- and the state default hides
+    failures, which is worth setting once per site rather than typing every run."""
+    from jobscope import config as config_module
+    config_module.set_config(dataclasses.replace(
+        config_module.get_config(),
+        defaults=config_module.Defaults(workers=8, timeout=60.0,
+                                        days=7, state="all")))
+    request = _request_for(["finished"], monkeypatch)
+    assert request.days == 7 and request.state == "all"
+
+
+def test_an_explicit_flag_still_beats_the_config(monkeypatch):
+    from jobscope import config as config_module
+    config_module.set_config(dataclasses.replace(
+        config_module.get_config(),
+        defaults=config_module.Defaults(workers=8, timeout=60.0,
+                                        days=7, state="all")))
+    request = _request_for(["finished", "-D", "2", "-t", "failed"], monkeypatch)
+    assert request.days == 2 and request.state == "failed"
+
+
+# --- [metrics] reach each view's spec list -----------------------------------
+
+def test_each_view_gets_its_configured_metric_list(monkeypatch):
+    """The summary, the time series and --dcgm each read their own [metrics] key."""
+    from jobscope import config as config_module
+    from jobscope.dcgm import specs_named
+    config_module.set_config(dataclasses.replace(
+        config_module.get_config(),
+        metrics=config_module.Metrics(
+            summary=tuple(specs_named(["gpu", "sm_act", "mem", "memtot"])),
+            timeseries=tuple(specs_named(["gpu", "occ"])),
+            extended=tuple(specs_named(["gpu", "temp", "mem", "memtot"])))))
+    captured = {}
+
+    def emit(request, cfg, timeout, workers, specs, step, options, out=None):
+        captured["ts"] = [s.header for s in specs]
+
+    class FakeRenderer:
+        def __init__(self, context, options, **kw):
+            captured["summary"] = [s.header for s in kw.get("specs") or []]
+
+        def add(self, *a, **kw):
+            pass
+
+        def finish(self):
+            pass
+
+    monkeypatch.setattr(cli, "emit_timeseries", emit)
+    monkeypatch.setattr(cli, "SummaryRenderer", FakeRenderer)
+    monkeypatch.setattr(cli, "resolve",
+                        lambda *a, **kw: select_mod.Resolved(context=[], chunks=[]))
+
+    main(["-j", "1", "--ts"])
+    assert captured["ts"] == ["GPU%", "OCC%"]
+    main(["-j", "1"])
+    assert "SM_ACT%" in captured["summary"] and "TENSOR%" not in captured["summary"]
+    main(["-j", "1", "--dcgm"])
+    assert "TEMP_C" in captured["summary"] and "SM_ACT%" not in captured["summary"]

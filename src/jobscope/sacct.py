@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Dict, Iterator, List, Optional, Tuple
 
+from . import config
 from .blob import decode_admin_comment, gpus_from_tres
 from .errors import JobscopeError
 
@@ -39,7 +40,7 @@ FINISHED_STATES = tuple(state for group in STATE_GROUPS.values() for state in gr
 # Not selectable: they are not finished. Named so the error can say where to look.
 LIVE_STATES = ("running", "pending", "suspended", "requeued")
 
-DEFAULT_STATE = "completed"
+DEFAULT_STATE = config.DEFAULT_STATE
 
 # How far back a request that names no window reaches. Resolved to real timestamps by
 # select.sacct_selection, so the header can print dates rather than "now-30days".

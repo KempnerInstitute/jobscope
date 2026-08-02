@@ -10,7 +10,7 @@ from jobscope.config import Thresholds
 from jobscope.errors import JobscopeError
 from jobscope.report import _ESC_RE
 
-THRESHOLDS = Thresholds(red=10, power_w=100)
+THRESHOLDS = Thresholds()
 
 SUMMARY_CSV = """\
 User,alice
@@ -101,6 +101,37 @@ def _run_plot(tmp_path, name, csv_text, capsys, extra=None):
 def test_render_bars_smoke(tmp_path, capsys):
     out = _run_plot(tmp_path, "s.csv", SUMMARY_CSV, capsys)
     assert "CPU%" in out and "GPU%" in out
+
+
+@pytest.mark.parametrize("csv_text,name,expected", [
+    (LINE_CSV, "l.csv", 8.0),        # a time series -> the time-slice table
+    (SUMMARY_CSV, "s.csv", 5.0),     # a summary CSV -> the summary table
+])
+def test_the_band_table_follows_the_csv_not_the_kind_flag(tmp_path, monkeypatch,
+                                                          csv_text, name, expected):
+    """`--kind` is overridable and skips detect_kind entirely, so keying the table
+    on it would grade an explicitly charted time series against the summary's
+    edges. The columns say what the CSV is; the flag only says how to draw it.
+
+    Both cases pass --kind bars, so the renderer is the same and the only thing
+    that can differ is which of the two tables was resolved.
+    """
+    import dataclasses
+    from jobscope import config as config_module
+    config_module.set_config(dataclasses.replace(
+        config_module.get_config(),
+        thresholds=Thresholds(by_metric={"CPU%": {"wasteful": 5.0}}),
+        timeslice_thresholds=Thresholds(by_metric={"CPU%": {"wasteful": 8.0}})))
+    seen = {}
+    monkeypatch.setattr(plot, "render_bars",
+                        lambda cols, rows, args, C, T, thr, pal=None:
+                        seen.setdefault("t", thr))
+    path = tmp_path / name
+    path.write_text(csv_text)
+    args = build_parser()[0].parse_args(
+        ["plot", "-f", str(path), "--no-color", "--kind", "bars"])
+    args.func(args)
+    assert seen["t"].edge("wasteful", "CPU%") == expected
 
 
 def test_render_heat_smoke(tmp_path, capsys):
@@ -304,3 +335,39 @@ def test_columns_grids_without_naming_the_gpus(tmp_path, capsys):
                            "--width", "200"])
     titles = [ln for ln in out.splitlines() if "gpu0" in ln]
     assert titles and all(("gpu%d" % g) in titles[0] for g in range(4))
+
+
+def test_the_chart_grades_with_the_configured_palette(tmp_path, monkeypatch):
+    """One [colors] value drives both the report's escapes and the chart's styles,
+    so a job is the same colour in a table and in a chart."""
+    import dataclasses
+    from jobscope import config as config_module
+    config_module.set_config(dataclasses.replace(
+        config_module.get_config(),
+        palette=config_module.Palette(colors={"inefficient": "magenta",
+                                              "good": "color(33)"})))
+    seen = {}
+    monkeypatch.setattr(plot, "render_bars",
+                        lambda cols, rows, args, C, T, thr, pal=None:
+                        seen.setdefault("pal", pal))
+    path = tmp_path / "s.csv"
+    path.write_text(SUMMARY_CSV)
+    args = build_parser()[0].parse_args(
+        ["plot", "-f", str(path), "--no-color", "--kind", "bars"])
+    args.func(args)
+    palette = seen["pal"]
+    # 5% is inefficient -> the red bucket, which takes inefficient's colour.
+    assert plot.grade("GPU%", 5.0, THRESHOLDS, palette) == "magenta"
+    # 90% is good -> the green bucket, which takes good's.
+    assert plot.grade("GPU%", 90.0, THRESHOLDS, palette) == "color(33)"
+    # An ungraded column still gets an explicit style, which rich requires.
+    assert plot.grade("RUNTIME", 5, THRESHOLDS, palette) == "white"
+
+
+def test_a_configured_colour_is_valid_as_a_rich_background():
+    """render_heat builds "black on %s", so the name has to work in that position --
+    which is why the accepted set is the one rich shares with ANSI."""
+    from jobscope.config import Palette, valid_colour
+    for colour in Palette().colors.values():
+        assert valid_colour(colour)
+    assert valid_colour("color(200)") and not valid_colour("puce")

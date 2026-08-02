@@ -15,7 +15,7 @@ changed and hands off:
 
 | old | new | why |
 |---|---|---|
-| `--min-runtime 5m` | `--min-elapsed 5m` | the package's `--min-runtime` is the `DIAG=short` threshold, in seconds (the old name still works as an alias) |
+| `--min-runtime 5m` | `--min-elapsed 5m` | same meaning, clearer name (the old spelling still works as an alias) |
 | no `-u` meant every user | `-a`/`--all-users` | `jobscope live` defaults to your own jobs, like every other view (the wrapper passes `-a` for you) |
 
 Prefer `jobscope live` directly. Unlike the original script it needs an installed

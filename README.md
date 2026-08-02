@@ -32,7 +32,7 @@ JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_
                                             ... 12 more rows ...
 ------------------------------------------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              12     9            80     3       64.9     14.7    0.3      9.5     455
-  red below 10%, yellow below 20%, green above; POWER_W red below 100 W, green above, no yellow. Counts are jobs.
+  red at or below 10%, yellow at or below 20%, green above; POWER_W red below 100 W, green above, no yellow. Counts are jobs.
   IDLE is resource-time that went unused -- for POWER_W, the time spent under that floor.
   bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
 METRIC   IDLE            RED  YELLOW  GREEN
@@ -120,9 +120,18 @@ jobscope config --example > ~/.config/jobscope/config.toml   # then edit it
 jobscope config                                              # show the path in use
 ```
 
-The config file also sets the DCGM sampling period, plot color thresholds, and
-default timeout / worker counts; see `jobscope config --example` for the full,
-commented template.
+The config file is also where the reporting *policy* lives, so adjusting jobscope
+to a site's conventions is a TOML edit rather than a patch:
+
+| section | what it sets |
+|---|---|
+| `[thresholds]` | the band edges, per metric and per view — see [Thresholds](#thresholds) |
+| `[metrics]` | which GPU/DCGM metrics each view collects and shows |
+| `[colors]` | the colour of each classified tier, in tables and in charts alike |
+| `[defaults]` | the default window and state filter, timeouts, worker counts, and the Problem-jobs row size |
+
+`jobscope config` prints all of it as it actually resolves; `jobscope config
+--example` is the full commented template.
 
 The Prometheus URL commonly embeds a credential: jobscope never prints it, and a
 `config.toml` in a repo checkout is git-ignored. On sites already running
@@ -146,7 +155,7 @@ jobscope 30012345 --ts | jobscope plot --compact    # time-series chart
 One axis per level, so every option composes with every selection:
 
 ```
-jobscope [MODE] [scope] [filters] [granularity] [columns] [--diagnose] [output]
+jobscope [MODE] [scope] [filters] [granularity] [columns] [output]
 ```
 
 **Level 1 — which jobs.** The first word, defaulting to `running`:
@@ -224,8 +233,6 @@ job that is running right now.
 | `--dcgm` | the full DCGM metric catalog |
 | `--avg` | `running` only: fold over the runtime instead of a snapshot |
 
-**Level 4** — `--diagnose`, which adds the advisory `DIAG` column at the end.
-
 **Output** — `--csv`, `-n`, `--step` (with `--ts`), `--timeout`, `--workers`, `-c`.
 `--help-all` prints every option; plain `-h` narrows to the ones the current flags
 leave usable (see below).
@@ -283,7 +290,7 @@ After the job listing come three numbered sections:
 1. Summary by metric
 ------------------------------------------------------------------------------------------------
 Used/GPU-hr:                              10     6            75   49     66.0  20.6  18.1  14.5
-  red below 10%, yellow below 20%, green above; POWER_W red below 100 W, green above, no yellow. Counts are jobs.
+  red at or below 10%, yellow at or below 20%, green above; POWER_W red below 100 W, green above, no yellow. Counts are jobs.
   IDLE is resource-time that went unused -- for POWER_W, the time spent under that floor.
   bands catch pathological jobs, IDLE measures efficiency: no red with a high IDLE means every job wastes a little
 METRIC   IDLE           RED  YELLOW  GREEN
@@ -341,16 +348,18 @@ So the denominators differ by row on purpose, and reading down the `IDLE` column
 is the fastest way to see which resource a selection actually wasted: above, the
 GPUs were 56% idle while the *cores* were 95% idle and the *tensor cores* 90%.
 
-One cutoff covers every metric -- **red below 10%, yellow below 20%, green above**
--- so there is no per-row threshold to carry and no cutoff column. `POWER_W` is red
-below 100 W. The table prints a two-line legend saying so.
+By default one set of cutoffs covers every metric -- **red at or below 10%, yellow
+at or below 20%, green above** -- and `POWER_W` is red below 100 W. The cutoffs are
+per metric, though, so a site can give `CPU%` a different bar from `GPU%`; the
+legend above the table states whichever ones are in force. See
+[Thresholds](#thresholds).
 
 The band cells are plain job counts. Their resource shares stay in the `--csv`
 output for anyone scripting them.
 
-**`green` means "not pathological", not "efficient".** With a red cutoff of 10 a
-job at 21% is green while wasting four fifths of its cores, so a selection can be
-half idle with nearly every job green:
+**`green` means "not pathological", not "efficient".** With an `inefficient` edge of
+10 a job at 21% is green while wasting four fifths of its cores, so a selection can
+be half idle with nearly every job green:
 
 ```
 METRIC   IDLE            RED  YELLOW  GREEN
@@ -515,16 +524,16 @@ every job count is 1.
   at all; a running job's `CPU%` comes from `cgroup_*`, so it does.
 - `--gpu` narrows to the GPU columns and the profiling block.
 - `--dcgm` widens the profiling block to the full catalog.
-- `--diagnose` appends the advisory `DIAG` column.
 
 ### Highlighting
 
-On a terminal, every `%` cell is tinted by how efficient it is -- **red** below the
-threshold, **yellow** below twice it, **green** above -- so an idle job is a red row
-and a healthy one is green. The pooled footer row is tinted too, and the same
-cutoffs define the band tallies, so a wasteful selection is obvious at a glance
-and quantified one line below. `--per-gpu`'s rows are graded by the same
-helper, so one GPU cannot read green in one table and red in the other.
+On a terminal, every `%` cell is tinted by how efficient it is -- **red** at or below
+that metric's `inefficient` edge, **yellow** at or below its `improvement` edge,
+**green** above -- so an idle job is a red row and a healthy one is green. The pooled
+footer row is tinted too, and the same cutoffs define the band tallies, so a wasteful
+selection is obvious at a glance and quantified one line below. `--per-gpu`'s rows are
+graded by the same helper, so one GPU cannot read green in one table and red in the
+other.
 
 ### `--per-gpu`: per-node charts and `--nodename`
 
@@ -583,29 +592,108 @@ empty report.
 The charts follow the view, so `--cpu` narrows them to `CPU%` and `--dcgm` widens
 them, and `--no-plot` omits them.
 
-One cutoff covers every `%` metric, site-tunable in `[thresholds]`, and it is the
-same one `jobscope plot` grades with, so a job red in a chart is red in the table:
+<a id="thresholds"></a>
+The cutoffs are site-tunable in `[thresholds]`, and they are the same ones
+`jobscope plot` grades with, so a job red in a chart is red in the table.
 
+Every `%` metric is banded into five tiers by four edges, and both the edges and
+the tiers are what `--ts --classify` reports:
+
+| tier | default range | colour |
+|---|---|---|
+| `wasteful` | `< 2%` | red |
+| `inefficient` | `2-10%` | red |
+| `needs improvement` | `10-20%` | yellow |
+| `average` | `20-40%` | green |
+| `good` | `> 40%` | green |
+
+**The edges are per metric**, because the metrics do not mean the same thing: a GPU
+job legitimately holds cores it never uses, so `CPU%` at 4% is ordinary where `GPU%`
+at 4% is idle, and `SM_ACT%` sits structurally below `GPU%` on the same work.
+`default` covers every metric you do not name, which is what keeps the ~18 extra
+columns under `--dcgm` graded without listing them.
+
+**There are two tables, one per view, and nothing is inherited between them:**
+`[thresholds.summary]` grades the plain report (one average over each job's whole
+elapsed runtime) and `[thresholds.timeslice]` grades `--ts` / `--plot_ts` /
+`--classify` (samples pooled inside a window). A two-hour slice that catches a
+checkpoint pause is not a two-hour idle job, so the two can want different bars. A
+table you leave out keeps the built-in edges; it does not copy the other one, and
+jobscope prints one note when you have set only one of them.
+
+```toml
+[thresholds.summary.wasteful]
+default = 2
+cpu     = 5      # a GPU job idling its cores is normal; 2% would flag them all
+sm_act  = 3
+[thresholds.timeslice.wasteful]
+default = 2
+cpu     = 8      # a short window dips further than a whole-job average
+
+[thresholds]
+power_w = 100    # POWER_W, in WATTS -- below this a GPU counts as idle
 ```
-red = 10       every %-metric: red below 10, yellow below 20, green above
-power_w = 100  POWER_W, in WATTS -- below this a GPU counts as idle
+
+Metric names are the column header, lowercase and without the `%` -- `gpu`, `cpu`,
+`sm_act`, `dram`. Edges must not decrease within a metric once resolved against the
+defaults it falls back to, and jobscope rejects a config where they do rather than
+grade by a band nothing can reach.
+
+`POWER_W` has no bands at all, just a floor, because watts are not a percentage --
+and it is the one idle signal a duty cycle cannot fake, since a job spinning on a
+trivial kernel reads busy on `GPU%` while drawing idle watts. It is shared by both
+views: idle draw is a property of the hardware.
+
+Run `jobscope config` to print both tables as they actually resolve.
+
+### Which metrics, and what colour
+
+Two more sections cover what the report *shows* rather than how it grades.
+
+`[metrics]` picks the GPU/DCGM metrics per view — `summary` for the per-job table's
+profiling block, `timeseries` for `--ts`/`--plot_ts`/`--classify`, and `extended`
+for what `--dcgm`/`--ext` widens to. Name them by their short name, the same ones
+`[thresholds]` takes:
+
+```toml
+[metrics]
+summary    = ["sm_act", "tensor", "dram", "power"]
+timeseries = ["gpu", "sm_act", "tensor", "dram", "power"]
+extended   = "all"
 ```
 
-One cutoff rather than one per metric: a reader should not have to carry a different
-threshold for each row of the summary table, and the old per-metric values were
-never calibrated against each other. `POWER_W` is the exception because watts are
-not a percentage -- and it is the one idle signal a duty cycle cannot fake, since a
-job spinning on a trivial kernel reads busy on `GPU%` while drawing idle watts.
+Order does not matter — columns always print in catalog order.
+`jobscope describe --dcgm --ext` lists the catalog with descriptions.
 
-`[thresholds] gpu`, `gmem`, `cpu`, `mem` and `default` no longer do anything. A
-config that still sets them prints one note saying so rather than silently changing
-your cutoffs.
+Two things it deliberately does not reach. **`--per-gpu` keeps a fixed four**
+(`SM_ACT%`, `TENSOR%`, `DRAM%`, `POWER_W`): its rows are addressed by position, so
+its width is not free. And **the CPU side is fixed** at `CPU%`/`MEM%`, because there
+are exactly two cgroup queries and no catalog to choose from. Naming a blob-backed
+metric (`gpu`, `mem`) in `summary` is harmless — `GPU%` and `GMEM%` have their own
+columns already — and leaving one out is corrected rather than obeyed, since in the
+running view those columns come from Prometheus and would otherwise read `-`.
 
-Colour is dropped automatically when the output is not a terminal, with `--csv`,
-under `$NO_COLOR`, or with `--no-color` -- escape codes in a redirected file are
-corruption, not decoration. For *why* a job is inefficient rather than just that it
-is, add `--diagnose`, which tags each job `idle` / `underfed` / `low-occ` /
-`mem-bound` / `no-tensor` / `ok`.
+`[colors]` gives each classified tier a colour, read by both the tables and
+`jobscope plot`, so a job is the same colour in either:
+
+```toml
+[colors]
+wasteful     = "bright_red"
+inefficient  = "red"
+improvement  = "yellow"    # the "needs improvement" tier
+average      = "cyan"
+good          = "blue"
+long_running = "magenta"   # an entry that ran past [defaults] long_running
+```
+
+Takes the eight ANSI names and their `bright_` variants, or `color(N)` for the
+256-colour cube. Two tiers sharing a colour is the default, not a requirement — give
+all five distinct values for a colourblind-safe palette.
+
+The summary table's `RED`/`YELLOW`/`GREEN` columns keep those names whatever you
+set, and so do the `red=`/`yellow=`/`green=` fields of the `--csv` output: those are
+the three band *counts*, so a script reading them does not break when you recolour
+the display.
 
 ## Utilities
 
@@ -656,7 +744,6 @@ The old positional subcommands are deprecated and print a note, but still work:
 | `jobscope dcgm --ts JOBID` | `jobscope JOBID --ts` |
 | `jobscope live -a` | `jobscope -a` |
 | `--cgpu` | the default (removed) |
-| `--min-runtime 180` (DIAG cutoff) | `--diag-short 180` |
 
 Note that bare `jobscope` now shows **running** jobs rather than the last day of
 finished ones, and that `--min-runtime` now means the runtime floor
@@ -825,19 +912,21 @@ adds nothing there and says so.
 `--classify` sorts them instead:
 
 ```console
-$ jobscope -p kempner_h100 -a --ts 10m --classify
-  142 jobs, by best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM%
-  (POWER_W below 100 W forces wasteful)
+$ jobscope -p kempner_h100 -a --ts 10m --classify --dcgm
+  142 jobs, by best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM% (POWER_W caps the verdict when idle)
 
-  wasteful (<2%)  15 jobs
+  wasteful (GPU% <2%, SM_ACT% <2%, OCC% <2%, TENSOR% <2%, DRAM% <2%)  15 jobs
     JOBID       NODES  GPUS  USER   GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W
     36229482    1      2     bob     0.0      0.0   0.0      0.0    0.0       70
     36438938_1  1      1     carol   0.0      0.0   0.0      0.0    0.0      118
-  inefficient (2-10%)  4 jobs
+  inefficient (best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM%: 2-10%)  4 jobs
     ...
-  good (>40%)  98 jobs
+  good (best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM%: >40%)  98 jobs
     (--all-categories to list them)
 ```
+
+Each heading states the rule it applied, so the criteria never has to be looked up
+in the config. The default edges:
 
 | category | best metric |
 |---|---|
@@ -846,6 +935,11 @@ $ jobscope -p kempner_h100 -a --ts 10m --classify
 | needs improvement | `10-20%` |
 | average | `20-40%` |
 | good | `> 40%` |
+
+These come from `[thresholds.timeslice]` and are per metric, so a heading can show
+`GPU% <2%, CPU% <5%` where a site has set them apart -- and the ranges collapse back
+to one, exactly as above, wherever the metrics agree. See
+[Thresholds](#thresholds).
 
 The edges are not uniform, so they are worth stating: "below 2%" *excludes* 2, while
 every band above it *includes* its top. 10.0 is inefficient; 10.1 needs improvement.

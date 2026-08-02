@@ -39,6 +39,7 @@ from .dcgm import (
     columns_for,
     window_query,
 )
+from . import config
 from .errors import JobscopeError
 from .live_blob import host_stats_many, stats_dict
 from .prometheus import PrometheusClient
@@ -151,14 +152,10 @@ def specs_for(view: Optional[str]) -> List[MetricSpec]:
     return EXTENDED_LIVE_SPECS if view == "all" else DEFAULT_LIVE_SPECS
 
 
-def parse_duration(text: str) -> int:
-    """Seconds from a compact duration such as ``30s``, ``5m``, ``2h``, ``7d``."""
-    match = re.match(r"^(\d+)([smhd])$", str(text).strip())
-    if not match:
-        raise JobscopeError(
-            "invalid duration %r: use a count and a unit, e.g. '30s', '5m', '2h', '7d'" % text)
-    value, unit = int(match.group(1)), match.group(2)
-    return value * {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+# Moved to config, which needs it for the duration-valued [defaults] keys and
+# cannot import this module. Re-exported because this is where callers look for it,
+# next to format_duration.
+parse_duration = config.parse_duration
 
 
 def format_duration(seconds: int) -> str:

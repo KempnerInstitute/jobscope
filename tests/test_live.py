@@ -28,7 +28,12 @@ from jobscope.live import (
     timeseries_step,
 )
 from jobscope.live_blob import host_stats_many, synthesize_stats
-from jobscope.report import RenderOptions, live_cpu_timeseries, live_timeseries
+from jobscope.report import (
+    RenderOptions,
+    live_combined_timeseries,
+    live_cpu_timeseries,
+    live_timeseries,
+)
 from jobscope.sacct import JobRecord
 
 # squeue -o "%A|%i|%u|%N|%g|%j|%b|%C|%S": raw id, display id, user, nodelist,
@@ -209,7 +214,7 @@ def test_a_window_lands_on_the_runs_own_sample_grid():
 
 def test_live_catalog_column_order_and_membership():
     assert [h for _k, h, _d in build_columns(DEFAULT_LIVE_SPECS)] == [
-        "GPU%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
+        "GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
 
 
 def test_gpu_utilization_is_always_present_in_the_live_view():
@@ -497,6 +502,43 @@ def test_live_cpu_timeseries_warns_and_skips_a_job_with_no_divisor():
         _sys.stderr = old_stderr
     assert out.getvalue() == ""
     assert "no CPU/memory records" in err.getvalue()
+
+
+def test_live_combined_timeseries_uses_the_schema_plot_reads():
+    """live_timeseries's GPU rows, plus each one's node's CPU%/MEM% appended --
+    the default running-job --ts view."""
+    class Client:
+        sampling_period = 60
+
+        def query(self, query, at, timeout=None):
+            if "cgroup_cpus" in query:
+                return [{"metric": {"jobid": "1", "host": "node01:9100"}, "value": [at, "4"]}]
+            if "cgroup_memory_total_bytes" in query:
+                return [{"metric": {"jobid": "1", "host": "node01:9100"},
+                         "value": [at, str(8 * GIB)]}]
+            return []
+
+        def query_range(self, query, start, end, step, timeout=None):
+            if "cgroup_cpu_total_seconds" in query:
+                return [{"metric": {"host": "node01:9100"}, "values": [[1000, "2"]]}]
+            if "cgroup_memory_rss_bytes" in query:
+                return [{"metric": {"host": "node01:9100"}, "values": [[1000, str(4 * GIB)]]}]
+            return []
+
+    jobs = {1: {"jobid": "100_6", "user": "alice", "node": "node01", "name": "train",
+               "start_epoch": 940, "elapsed_seconds": 60}}
+    gpus = {"GPU-a": Gpu("GPU-a", 1, "node01", 3, "GPU 3")}
+    samples = {"GPU-a": {1000: {"duty": 90.0, "mem": 10.0, "memtot": 80.0}}}
+    out = io.StringIO()
+    live_combined_timeseries(jobs, samples, gpus, DEFAULT_LIVE_SPECS, Client(), None,
+                             RenderOptions(), workers=1, out=out)
+    lines = out.getvalue().splitlines()
+    assert lines[0].startswith("JOBID,USER,EPOCH,TIME,NODE,GPU,")
+    assert lines[0].endswith("CPU%,MEM%")
+    assert lines[1].startswith("100_6,alice,1000,")
+    # GPU side ends ...,12.5 (GMEM% = 10/80); CPU side appends CPU%=100*2/4=50,
+    # MEM%=100*(4 GiB)/(8 GiB)=50.
+    assert lines[1].split(",")[-2:] == ["50", "50"]
 
 
 def test_live_timeseries_keeps_mig_slices_distinct():

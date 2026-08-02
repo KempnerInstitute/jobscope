@@ -2,6 +2,8 @@
 
 import dataclasses
 
+import pytest
+
 from jobscope.blob import blob_metrics
 from jobscope.dcgm import (
     ALL_SPECS,
@@ -9,6 +11,7 @@ from jobscope.dcgm import (
     DCGM_HEADERS,
     DEFAULT_SPECS,
     GPU_SUMMARY_SPECS,
+    KEY_SPECS,
     METRICS,
     MODEL_KEY,
     SPEC_BY_HEADER,
@@ -52,15 +55,24 @@ class FakeClient:
 
 def test_catalog_shape():
     assert len(ALL_SPECS) == 30
-    assert len(DEFAULT_SPECS) == 8          # 6 profiling + the GPU memory pair
-    assert len(GPU_SUMMARY_SPECS) == 5
+    assert len(DEFAULT_SPECS) == 7          # 5 profiling + the GPU memory pair
+    assert len(GPU_SUMMARY_SPECS) == 4
     # The summary/detail DCGM columns exclude what the blob already supplies, so
-    # neither GPU% nor the GMEM columns appear twice in those views.
-    assert DCGM_HEADERS == ["SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W"]
+    # neither GPU% nor the GMEM columns appear twice in those views. OCC% moved to
+    # the "all" group -- --dcgm/--ext only -- so it is not part of the default set.
+    assert DCGM_HEADERS == ["SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
     headers = [spec.header for spec in METRICS]
     assert len(headers) == len(set(headers))
     assert set(SPEC_BY_HEADER) == set(headers)
     assert any(spec.key == "duty" for spec in DEFAULT_SPECS)
+
+
+def test_key_specs_is_the_curated_ts_default():
+    """--ts/--plot_ts/--classify's default (no --dcgm/--ext): a small subset of
+    DEFAULT_SPECS, not the full 8 -- notably no OCC% or the GPU memory pair."""
+    assert [spec.header for spec in KEY_SPECS] == \
+        ["GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
+    assert set(KEY_SPECS) <= set(DEFAULT_SPECS)
     assert all(spec.key not in BLOB_BACKED_KEYS for spec in GPU_SUMMARY_SPECS)
 
 
@@ -69,7 +81,7 @@ def test_dcgm_and_live_columns_are_identical():
     from jobscope.live import DEFAULT_LIVE_SPECS, build_columns
     assert columns_for(DEFAULT_SPECS) == build_columns(DEFAULT_LIVE_SPECS)
     assert [h for _k, h, _d in columns_for(DEFAULT_SPECS)] == [
-        "GPU%", "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
+        "GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
 
 
 def test_hidden_total_memory_is_queried_but_not_a_column():
@@ -230,3 +242,64 @@ def test_dcgm_for_job_metric_error_on_a_running_job_yields_nothing(gpu_record):
     # The model rides with the row even when no metric survived: it identifies the
     # card, and POWER_W's floor depends on which one it was.
     assert per_gpu == {("node01", "0"): {MODEL_KEY: ""}}
+
+
+# --- naming metrics from config ----------------------------------------------
+
+@pytest.mark.parametrize("name,header", [
+    ("gpu", "GPU%"), ("GPU", "GPU%"), ("GPU%", "GPU%"), ("duty", "GPU%"),
+    ("sm_act", "SM_ACT%"), ("smact", "SM_ACT%"),
+    ("power", "POWER_W"), ("power_w", "POWER_W"),
+    ("energy", "ENERGY_kWh"), ("temp", "TEMP_C"),
+])
+def test_a_metric_answers_to_its_key_and_its_header(name, header):
+    """Three forms per metric, derived from the catalog rather than listed, so a
+    metric added to METRICS is nameable at once."""
+    from jobscope.dcgm import spec_named
+    assert spec_named(name).header == header
+
+
+def test_an_unknown_name_resolves_to_nothing():
+    from jobscope.dcgm import spec_named
+    assert spec_named("gpuu") is None and spec_named("") is None
+
+
+def test_every_offered_name_actually_resolves():
+    """METRIC_NAMES is what an error message tells a user to choose from, so each
+    one had better work."""
+    from jobscope.dcgm import METRIC_NAMES, spec_named
+    assert all(spec_named(n) is not None for n in METRIC_NAMES)
+    assert len(METRIC_NAMES) == len(METRICS)
+
+
+def test_specs_named_sorts_by_catalog_position():
+    from jobscope.dcgm import specs_named
+    assert [s.header for s in specs_named(["power", "gpu", "dram"])] == \
+        ["GPU%", "DRAM%", "POWER_W"]
+
+
+def test_specs_named_drops_duplicate_spellings_of_one_metric():
+    from jobscope.dcgm import specs_named
+    assert [s.header for s in specs_named(["gpu", "GPU%", "duty"])] == ["GPU%"]
+
+
+def test_specs_named_skips_unknown_names():
+    """Validation belongs to the caller, which can say which config key was wrong."""
+    from jobscope.dcgm import specs_named
+    assert [s.header for s in specs_named(["gpu", "nonsense"])] == ["GPU%"]
+
+
+def test_the_live_view_drops_counter_deltas():
+    """ENERGY_kWh is a difference over a finished window; the running view builds a
+    blob from a window that has not finished, so the number would mean nothing."""
+    from jobscope.dcgm import specs_named
+    assert [s.header for s in specs_named(["gpu", "energy"])] == ["GPU%", "ENERGY_kWh"]
+    assert [s.header for s in specs_named(["gpu", "energy"], live=True)] == ["GPU%"]
+
+
+def test_the_built_in_lists_are_reproducible_by_name():
+    """Which is what lets [metrics] express them, and what the shipped example
+    config relies on."""
+    from jobscope.dcgm import KEY_SPECS, specs_named
+    assert [s.header for s in specs_named(["gpu", "sm_act", "tensor", "dram", "power"])] \
+        == [s.header for s in KEY_SPECS]

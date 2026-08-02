@@ -15,7 +15,7 @@ import sys
 
 from . import config
 from .errors import JobscopeError
-from .report import cell_value, in_columns, terminal_width
+from .report import BAR_WIDTH, cell_value, in_columns, terminal_width
 
 ID_COLS = {"JOBID", "USER", "STATE", "NAME", "NODES", "GPUS", "NODE", "GPU",
            "#GPU", "DUR_S", "RUNTIME", "EPOCH", "TIME", "MODEL"}
@@ -27,7 +27,7 @@ FOOTER_ROWS = {"Mean", "MeanPerGPU", "MeanPerGPUHour", "Jobs",
                "UsedPerGPU", "UsedPerGPUHour", "UsedPerCPU", "UsedPerCPUHour",
                "GPUhours", "GPUs", "Corehours", "Cores",
                "Worst", "WorstGPU", "WorstCPU", "WorstSM", "WorstPOWER",
-               "WorstBoth", "WorstAll"}
+               "WorstBoth", "WorstGpu-cpu", "WorstAll"}
 
 HEAT_MAX_ROWS = 40
 PANEL_CAP = 12
@@ -167,15 +167,21 @@ def is_pct(header):
     return header.endswith("%")
 
 
-def grade(header, value, thresholds):
-    """Color name for a graded value (rich/plotext share these names).
+def grade(header, value, thresholds, palette=None):
+    """The rich style name for a graded value.
 
-    Delegates to Thresholds.grade, the same call the report tables make, so a job is
-    graded identically whether it is charted or printed -- plot keeps no copy of the
-    band rule. "white" rather than "" for an ungraded column, because rich and
-    plotext both want an explicit style.
+    Two steps, deliberately separate: ``Thresholds.grade`` says which *bucket* the
+    value counts in -- the same call the report tables make, so a job is graded
+    identically whether it is charted or printed -- and the palette says what that
+    bucket looks like. plot keeps no copy of either rule.
+
+    "white" rather than "" for an ungraded column, because rich wants an explicit
+    style where report.tint() is happy to leave text alone.
     """
-    return thresholds.grade(header, value) or "white"
+    bucket = thresholds.grade(header, value)
+    if not bucket:
+        return "white"
+    return (palette or config.Palette()).for_bucket(bucket) or "white"
 
 
 def detect_kind(columns):
@@ -186,14 +192,14 @@ def detect_kind(columns):
     return "summary"
 
 
-def render_bars(columns, rows, args, Console, Text, thresholds):
+def render_bars(columns, rows, args, Console, Text, thresholds, palette=None):
     """Horizontal utilization gauges: one bar per %-metric (mean over rows if >1)."""
     console = Console(no_color=args.no_color)
     mcols = metric_cols(columns)
     title = args.title or ("utilization" + (" (mean of %d jobs)" % len(rows) if len(rows) > 1 else
                            ("  %s" % rows[0].get("JOBID", "")) if rows else ""))
     console.print("[bold]%s[/bold]" % title) if not args.no_color else print(title)
-    width = 34
+    width = BAR_WIDTH
     for col in mcols:
         values = [to_float(r.get(col)) for r in rows]
         values = [v for v in values if v is not None]
@@ -204,7 +210,7 @@ def render_bars(columns, rows, args, Console, Text, thresholds):
             filled = max(0, min(width, int(round(value / 100.0 * width))))
             text = Text()
             text.append("%9s " % col)
-            text.append("█" * filled, style=grade(col, value, thresholds))
+            text.append("█" * filled, style=grade(col, value, thresholds, palette))
             text.append("░" * (width - filled), style="grey37")
             text.append(" %5.1f%%" % value)
             console.print(text)
@@ -238,7 +244,7 @@ def render_hist(columns, rows, args, plt):
     plt.show()
 
 
-def render_heat(columns, rows, args, Console, Table, Text, thresholds):
+def render_heat(columns, rows, args, Console, Table, Text, thresholds, palette=None):
     """Jobs (or GPUs) x metrics, cell background colored by value."""
     console = Console(no_color=args.no_color)
     mcols = metric_cols(columns)
@@ -260,7 +266,8 @@ def render_heat(columns, rows, args, Console, Table, Text, thresholds):
             raw = row.get(col, "-")
             value = to_float(raw)
             if value is not None and is_pct(col) and not args.no_color:
-                cells.append(Text(raw, style="black on %s" % grade(col, value, thresholds)))
+                cells.append(Text(raw, style="black on %s"
+                                  % grade(col, value, thresholds, palette)))
             else:
                 cells.append(raw)
         table.add_row(*cells)
@@ -275,7 +282,11 @@ def render_line(columns, rows, args, plt, Console):
     console = Console(no_color=args.no_color)
     mcols = [c for c in metric_cols(columns) if is_pct(c) or c in ("POWER_W",)]
     if args.all:
-        metrics = mcols
+        # CPU%/MEM% lead so a combined series keeps them even when the panel cap
+        # trims a wide extended-GPU-catalog selection -- they are the whole point
+        # of a combined --ts and must not be the ones silently dropped.
+        cpu_first = [c for c in ("CPU%", "MEM%") if c in mcols]
+        metrics = cpu_first + [c for c in mcols if c not in cpu_first]
     elif args.metric:
         metrics = [m for m in args.metric.split(",") if m in columns]
         if not metrics:
@@ -537,11 +548,17 @@ def run(args, fobj=None) -> None:
             raise JobscopeError("no input: pipe 'jobscope <view> --csv' in, or pass a CSV file.")
         fobj = sys.stdin
 
-    thresholds = config.get_config().thresholds
-
     columns, rows = parse_csv(fobj)
     if not rows:
         raise JobscopeError("no data rows in the CSV (empty selection?).")
+
+    # Which of the two band tables this CSV should be graded by, decided from the
+    # columns rather than from `kind` below: --kind is overridable, so keying on it
+    # would grade an explicitly-charted time series against the summary's edges.
+    cfg = config.get_config()
+    thresholds = (cfg.timeslice_thresholds if detect_kind(columns) == "line"
+                  else cfg.thresholds)
+    palette = cfg.palette
 
     if args.node is not None:
         if "NODE" not in columns:
@@ -579,10 +596,10 @@ def run(args, fobj=None) -> None:
 
     plt, Console, Table, Text = load_libs()
     if kind == "bars":
-        render_bars(columns, rows, args, Console, Text, thresholds)
+        render_bars(columns, rows, args, Console, Text, thresholds, palette)
     elif kind == "hist":
         render_hist(columns, rows, args, plt)
     elif kind == "heat":
-        render_heat(columns, rows, args, Console, Table, Text, thresholds)
+        render_heat(columns, rows, args, Console, Table, Text, thresholds, palette)
     elif kind == "line":
         render_line(columns, rows, args, plt, Console)

@@ -37,9 +37,11 @@ from .live_blob import fill_running, note_offline_gap
 from .prometheus import PrometheusClient, client_from_config
 from .report import (
     RenderOptions,
+    combined_timeseries,
     context_pairs,
     cpu_timeseries,
     dcgm_timeseries,
+    live_combined_timeseries,
     live_cpu_timeseries,
     live_timeseries,
     no_such_node,
@@ -84,8 +86,10 @@ class Request:
     all_users: bool = False
     account: Optional[str] = None
     partition: Optional[str] = None
-    # running only
-    min_elapsed: int = 3600
+    # running only. The same floor config.DEFAULT_MIN_ELAPSED names, in seconds:
+    # this default is only reachable by a library caller (the CLI always passes
+    # cli._min_elapsed()), and it used to disagree with it by an hour.
+    min_elapsed: int = config.parse_duration(config.DEFAULT_MIN_ELAPSED)
     average: bool = False
 
     @property
@@ -313,7 +317,7 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
             _report_no_running(selection)
             return
         client = client_from_config(cfg, timeout)
-        if options.view == "cpu":
+        if not options.combined and options.view == "cpu":
             live_cpu_timeseries(jobs, client, timeout, options, workers, step, out=out)
             return
         gpus = discover_gpus(client, jobs, timeout)
@@ -326,6 +330,10 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
             gpus = kept
         samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, step,
                                      window=options.window)
+        if options.combined:
+            live_combined_timeseries(jobs, samples, gpus, specs, client, timeout, options,
+                                     workers, step, out=out)
+            return
         live_timeseries(jobs, samples, gpus, specs, options, out=out)
         return
 
@@ -336,7 +344,10 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
         return
     records = fetch(jobids, timeout)
     client = client_from_config(cfg, timeout)
-    if options.view == "cpu":
+    if not options.combined and options.view == "cpu":
         cpu_timeseries(jobids, records, client, timeout, options, step=step, out=out)
+        return
+    if options.combined:
+        combined_timeseries(jobids, records, specs, client, timeout, options, step=step, out=out)
         return
     dcgm_timeseries(jobids, records, specs, client, timeout, options, step=step, out=out)

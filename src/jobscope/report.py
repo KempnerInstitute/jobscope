@@ -16,7 +16,20 @@ from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from .blob import GIB, blob_capacity, blob_detail, blob_metrics
-from .config import DEFAULT_THRESHOLDS, Thresholds
+from .config import (
+    DEFAULT_LONG_RUNNING,
+    DEFAULT_WORST_JOBS,
+    EDGE_KEYS,
+    TIERS,
+    Palette,
+    Thresholds,
+    parse_duration,
+)
+
+# A job running longer than this, and still on a Wasteful row, is the expensive
+# kind of waste: a short bad job costs little, whereas hours of idle hardware do
+# not come back. Its entry is highlighted. [defaults] long_running overrides it.
+LONG_RUNNING = parse_duration(DEFAULT_LONG_RUNNING)
 from .cpu import host_series
 from .dcgm import (
     ALL_SPECS,
@@ -34,7 +47,6 @@ from .dcgm import (
     gpu_minor_key,
     values_by_key,
 )
-from .diagnose import LEGEND, diagnose_dcgm
 from .errors import JobscopeError
 from .live import Gpu, LiveJob, build_columns, job_sort_key, range_window
 from .live_blob import host_stats, host_stats_many
@@ -55,12 +67,14 @@ class Column:
 # One row per job, and the same set for every per-job view -- summary, dcgm and
 # live -- so a job reads identically whether it has finished or is still running:
 #
-#   JOBID USER STATE NODE CPU% MEM% #GPU GPU% GMEM% SM_ACT% OCC% TENSOR% DRAM% POWER_W RUNTIME
+#   JOBID USER STATE NODE CPU% MEM% #GPU GPU% GMEM% SM_ACT% TENSOR% DRAM% POWER_W RUNTIME
 #
 # NODE is the node count (a name would truncate on a multi-node job and the row is
 # already per-job, not per-node); #GPU is the allocated GPU count. The blob group
 # is shown by every view, since CPU% next to SM_ACT% is the comparison that tells
 # you whether a GPU job is actually CPU-bound -- previously no single view had both.
+# OCC% moved to the "all" group (dcgm.py's METRICS) -- --dcgm/--ext only, not the
+# default -- so it is absent here; this list mirrors DEFAULT_SPECS/GPU_SUMMARY_SPECS.
 SUMMARY_COLUMNS: List[Column] = [
     Column("JOBID", "{:<12}", "id"),
     Column("USER", "{:<12}", "id"),
@@ -72,12 +86,10 @@ SUMMARY_COLUMNS: List[Column] = [
     Column("GPU%", "{:<6}", "gpu"),
     Column("GMEM%", "{:<7}", "gpu"),
     Column("SM_ACT%", "{:<8}", "dcgm"),
-    Column("OCC%", "{:<7}", "dcgm"),
     Column("TENSOR%", "{:<8}", "dcgm"),
     Column("DRAM%", "{:<7}", "dcgm"),
     Column("POWER_W", "{:<8}", "dcgm"),
     Column("RUNTIME", "{:<12}", "id"),
-    Column("DIAG", "{:<22}", "diag"),
 ]
 
 
@@ -113,20 +125,20 @@ DETAIL_COLUMNS: List[Column] = [
     Column("GPU-MEM", "{:<16}", "gpu", 5),
     Column("GMEM%", "{:<7}", "gpu", 6),
     Column("SM_ACT%", "{:<8}", "dcgm", 7),
-    Column("OCC%", "{:<7}", "dcgm", 8),
-    Column("TENSOR%", "{:<8}", "dcgm", 9),
-    Column("DRAM%", "{:<7}", "dcgm", 10),
-    Column("POWER_W", "{:<8}", "dcgm", 11),
-    Column("DIAG", "{:<22}", "diag", 12),
+    Column("TENSOR%", "{:<8}", "dcgm", 8),
+    Column("DRAM%", "{:<7}", "dcgm", 9),
+    Column("POWER_W", "{:<8}", "dcgm", 10),
 ]
 
 # Positions in a detail row, named rather than repeated as literals.
 _NODE_INDEX = 0
 _GPU_INDEX = 1
 
+# OCC% moved to dcgm.py's "all" group -- --dcgm/--ext only -- so DCGM_HEADERS (which
+# this mirrors) no longer carries it either.
 DETAIL_HEADER: Tuple[str, ...] = (
     "NODE", "GPU", "CPU%", "CPU-MEM", "GPU%", "GPU-MEM", "GMEM%",
-    "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "DIAG")
+    "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W")
 
 SUMMARY_DESCRIPTIONS: List[Tuple[str, str, str]] = [
     ("CPU%", "blob (cgroup CPU-seconds)",
@@ -159,8 +171,19 @@ SUMMARY_DESCRIPTIONS: List[Tuple[str, str, str]] = [
 # SGR codes for the utilization grades. Raw escapes rather than rich, because the
 # report path is the common one and should not import a rendering library to print
 # a table; plot pays for rich because it needs it.
-_SGR = {"red": "\033[31m", "yellow": "\033[33m", "green": "\033[32m"}
+_SGR = dict(Palette().sgr())
 _RESET = "\033[0m"
+
+
+def set_palette(palette: "Palette") -> None:
+    """Install the colours :func:`tint` paints with.
+
+    Module state because tint() is called from a dozen places that hold no config
+    between them, and the palette is one per process -- cli._apply_config calls this
+    once, before anything renders. A caller that never does keeps the defaults.
+    """
+    _SGR.clear()
+    _SGR.update(palette.sgr())
 # Strips the above, so a rule can be measured against the characters a reader sees
 # rather than the escape bytes carrying the colour.
 _ESC_RE = re.compile(r"\033\[[0-9;]*m")
@@ -172,10 +195,8 @@ class RenderOptions:
 
     view: str = "all"
     show_dcgm: bool = False
-    diagnose: bool = False
     csv: bool = False
     header: bool = True
-    min_runtime: int = 180
     # Weight the mean by allocated resource-time (GPU-hours, core-hours) instead
     # of by GPU count. Valid only where each job's value already covers its whole
     # runtime -- a finished job's blob, or running --avg. On an instantaneous
@@ -195,6 +216,16 @@ class RenderOptions:
     # established that the destination is a terminal that wants colour.
     color: bool = False
     thresholds: Optional["Thresholds"] = None
+    # How many jobs each Problem-jobs "Wasteful" row lists ([defaults]
+    # worst_jobs), and the elapsed time at which an entry is highlighted
+    # ([defaults] long_running, in seconds here).
+    worst_jobs: int = DEFAULT_WORST_JOBS
+    long_running: int = LONG_RUNNING
+    # --ts only: emit CPU%/MEM% alongside the GPU/DCGM columns in one series --
+    # the default --ts view. cli.py resolves this from --cpu/--dcgm; view=="cpu"
+    # takes precedence over this when combined is False (cpu-only), and combined
+    # takes precedence over view=="cpu" when both are set (see select.emit_timeseries).
+    combined: bool = False
 
 
 def no_such_node(nodename: str, seen) -> JobscopeError:
@@ -239,6 +270,23 @@ def job_model(per_gpu: dict) -> str:
     models = {v.get(MODEL_KEY, "") for v in per_gpu.values() if isinstance(v, dict)}
     models.discard("")
     return models.pop() if len(models) == 1 else ""
+
+
+# The built-in edges, for the callers that need *some* table to read numbers out of
+# when the options carry none. Distinct from options.thresholds being None, which
+# several call sites use to mean "do not grade at all" and "there is no POWER_W
+# floor" -- see cell_band below and classify()'s power cap.
+_DEFAULT_BANDS = Thresholds()
+
+# Stand-in header for grading a bare share -- a percentage belonging to no column
+# of its own, so it takes the default edges rather than any metric's. POWER_W's
+# IDLE cell needs one: the share is a percent even though the metric is watts.
+_SHARE_HEADER = "%"
+
+
+def _bands(options: "RenderOptions") -> Thresholds:
+    """This run's band table, or the built-in one when the caller supplied none."""
+    return options.thresholds or _DEFAULT_BANDS
 
 
 def cell_band(options: "RenderOptions", header: str, cell, model: str = "") -> str:
@@ -342,13 +390,22 @@ def in_columns(blocks: List[List[str]], columns: Optional[int] = None,
     return out
 
 
-def tint(text: str, band: str) -> str:
-    """``text`` wrapped in ``band``'s colour, or unchanged when there is none.
+def tint(text: str, role: str) -> str:
+    """``text`` wrapped in ``role``'s colour, or unchanged when it has none.
+
+    ``role`` is whatever the call site holds -- a bucket identifier
+    (``red``/``yellow``/``green``) for a graded cell, a tier name for a --classify
+    heading, ``long_running`` for a Wasteful-row entry. :meth:`Palette.sgr` resolves
+    all three, so no caller has to translate.
 
     Callers pass the *padded* cell: inserting the escapes first would make str.format
     count them toward the column width and shift every later column.
+
+    An unknown role leaves the text alone rather than raising -- a palette is
+    decoration, and losing a colour is not worth losing the report over.
     """
-    return _SGR[band] + text + _RESET if band else text
+    escape = _SGR.get(role, "") if role else ""
+    return escape + text + _RESET if escape else text
 
 
 def fmt_context(label: str, value: str) -> str:
@@ -356,14 +413,12 @@ def fmt_context(label: str, value: str) -> str:
     return "  %-11s%s" % (label + ":", value)
 
 
-def cols_for(columns: List[Column], view: str, dcgm: bool = False,
-             diagnose: bool = False) -> List[Column]:
+def cols_for(columns: List[Column], view: str, dcgm: bool = False) -> List[Column]:
     """The columns to show for the chosen view.
 
     ``all`` (the default) shows everything; ``--cpu`` and ``--gpu`` narrow it to one
     resource. ``id``/``blob`` columns identify the row and appear in every view. The
-    DCGM block needs Prometheus, so it belongs to the views that carry GPU columns,
-    and DIAG rides along with it under --diagnose.
+    DCGM block needs Prometheus, so it belongs to the views that carry GPU columns.
     """
     gpu_views = ("all", "gpu")
     out = []
@@ -372,8 +427,7 @@ def cols_for(columns: List[Column], view: str, dcgm: bool = False,
         if (group in ("id", "blob")
                 or (group == "cpu" and view in ("all", "cpu"))
                 or (group == "gpu" and view in gpu_views)
-                or (group == "dcgm" and dcgm and view in gpu_views)
-                or (group == "diag" and diagnose and dcgm and view in gpu_views)):
+                or (group == "dcgm" and dcgm and view in gpu_views)):
             out.append(col)
     return out
 
@@ -406,13 +460,10 @@ def context_pairs(selection: Selection, desc: str,
     return pairs
 
 
-def extend_detail_row(row, per_gpu, duration=None, min_runtime=None, diagnose_on=False):
-    """Append the DCGM cells and (optionally) the DIAG cell to a blob_detail row."""
+def extend_detail_row(row, per_gpu):
+    """Append the DCGM cells to a blob_detail row."""
     values = per_gpu.get((row[0], str(row[1])), {})
-    out = tuple(row) + tuple(format_by_header(h, values.get(h)) for h in DCGM_HEADERS)
-    if diagnose_on:
-        out = out + (diagnose_dcgm(values, duration, min_runtime),)
-    return out
+    return tuple(row) + tuple(format_by_header(h, values.get(h)) for h in DCGM_HEADERS)
 
 
 # What each graded column is a percentage *of*, as
@@ -439,16 +490,9 @@ COMBINED_4 = WORST_METRICS
 _SHARE_TAG = {"GPU%": "gpu", "SM_ACT%": "sm", "POWER_W": "pw", "CPU%": "cpu"}
 
 
-# Row-label form of each metric name. Explicit rather than derived, because the
-# label plus "Worst " and ":" has to fit the 12-character label column: "Worst
-# SM_ACT:" is 13 and shifts the whole row one place right.
+# Row-label form of each metric name, short enough that "Wasteful SM_ACT:" does
+# not swamp the heading it shares with the row's own criteria.
 _WORST_SLUG = {"GPU%": "GPU", "SM_ACT%": "SM", "POWER_W": "POWER", "CPU%": "CPU"}
-
-
-# A job running longer than this, and still on a Worst row, is the expensive kind of
-# waste: a short bad job costs little, whereas hours of idle hardware do not come
-# back. Its entry is printed red.
-LONG_RUNNING = 3 * 3600
 
 
 def _worst_groups(entries):
@@ -469,16 +513,18 @@ def _worst_groups(entries):
 def _combined_cell(jid: str, values, tallies) -> str:
     """One job on a combined row: its value in each of the row's metrics.
 
-    The values, not the waste shares that decide the order. A share written "12%gpu"
-    reads exactly like a utilization of 12%, which is the opposite of what puts a job
-    on the row -- every value here is *under* its cutoff. Showing the values says why
-    the job qualified; the order still says how much it wasted.
+    The values, not the waste shares that decide the order -- every value here is
+    *under* its cutoff. Showing the values says why the job qualified; the order
+    still says how much it wasted. Each is unit-suffixed (``gpu0%``, ``pw73W``) so
+    a bare number never reads as a band index or rank -- putting the ``%`` before
+    the tag instead ("12%gpu") would read exactly like a utilization of 12%, which
+    is the opposite of what puts a job on this row, so it trails the number instead.
     """
     parts = []
     for header, value in values:
         if value is None:
             continue
-        unit = "W" if tallies[header].value_unit == "W" else ""
+        unit = "W" if tallies[header].value_unit == "W" else "%"
         parts.append("%s%d%s" % (_SHARE_TAG[header], round(value), unit))
     return "%s %s" % (jid, " ".join(parts))
 
@@ -546,12 +592,16 @@ class EfficiencyTally:
     on every insert, so nothing here grows with the selection.
     """
 
-    WORST = 3
+    WORST = DEFAULT_WORST_JOBS
 
     def __init__(self, header: str, thresholds: "Thresholds", label: str,
                  unit: str, scale: float = 1.0, row: str = "Used/GPU:",
                  csv_row: str = "UsedPerGPU", weight_key: str = "gpu",
-                 absolute: bool = False, value_unit: str = "%") -> None:
+                 absolute: bool = False, value_unit: str = "%",
+                 worst: Optional[int] = None) -> None:
+        # How many of the worst jobs this tally keeps. Per instance rather than
+        # per class so one run's setting cannot leak into another's.
+        self.WORST = self.WORST if worst is None else worst
         self.header = header            # the column being banded, "GPU%", "SM_ACT%", ...
         self.thresholds = thresholds
         self.label = label              # "GPU-hours", "GPUs", "Core-hours", ...
@@ -596,13 +646,31 @@ class EfficiencyTally:
         self.used += weight - wasted
         self.total += weight
         self.waste_total += wasted
-        if band == "red":
+        if self.is_wasteful(value, model):
             # Ranked by resource-time *wasted*, not held: a 100-hour job at 24% is
             # a bigger finding than a 10-hour job at 0%.
             self.worst.append(WorstJob(wasted, jobid, user, weight, value,
                                        runtime, duration))
             self.worst.sort(key=lambda item: -item[0])
             del self.worst[self.WORST:]
+
+    def is_wasteful(self, value: Optional[float], model: str = "") -> bool:
+        """Whether ``value`` clears the strict Wasteful-row cutoff.
+
+        Stricter than the red/yellow/green band: red spans both the wasteful and
+        inefficient tiers (matching --ts --classify's own colour grouping), but a
+        row meant to flag the jobs actually worth a look uses the tighter
+        ``wasteful`` edge alone -- the same one --ts --classify's "wasteful" tier
+        means, and this column's own, since the edges are per metric. POWER_W has
+        no such split (its floor is already two-band), so its own cutoff is
+        unchanged. Shared by :meth:`add` (this tally's own Worst row) and
+        :meth:`SummaryRenderer._note_waste` (the combined rows), so the two can
+        never disagree about which jobs qualify.
+        """
+        if value is None:
+            return False
+        return (value < self.cutoff(model) if self.absolute else
+               value < self.thresholds.edge("wasteful", self.header))
 
     def waste_of(self, value: float, weight: float, model: str = "") -> float:
         """Resource-time this job wasted, in the units the weight is in.
@@ -619,8 +687,8 @@ class EfficiencyTally:
         return (1 - value / 100.0) * weight
 
     def cutoff(self, model: str = "") -> Optional[float]:
-        """The red threshold for this column, for ``model``'s hardware."""
-        return self.thresholds.for_model(model).cutoff(self.header)
+        """The watt floor for this column -- POWER_W is the only absolute metric."""
+        return self.thresholds.for_model(model).power_w
 
     def graded(self) -> int:
         """Jobs this metric measured -- the denominator behind its Worst row.
@@ -634,6 +702,19 @@ class EfficiencyTally:
     def band_of(self, value: Optional[float], model: str = "") -> str:
         """This column's band for ``value``, or "" when it is not graded."""
         return self.thresholds.for_model(model).grade(self.header, value)
+
+    def pooled_band(self) -> str:
+        """The band for the IDLE cell -- always a percentage grade.
+
+        Even for POWER_W. :meth:`pooled` is the share of resource-time that was
+        used, which for POWER_W reads "share of GPU-hours at or above the floor" --
+        a percent, whatever the metric's own unit. Grading it through POWER_W's watt
+        floor compared a percentage against watts; it only ever looked right because
+        the default floor is 100, and at the 130 W floor the shipped example
+        recommends for an H100 that cell read red at 100% above-floor.
+        """
+        header = self.header if self.header.endswith("%") else _SHARE_HEADER
+        return self.thresholds.grade(header, self.pooled())
 
     def idle(self) -> float:
         """Allocated resource-time that went unused."""
@@ -688,8 +769,7 @@ class EfficiencyTally:
         idle = self.idle()
         idle_pct = round(100 * idle / self.total) if self.total else 0
         row = [(self.header, ""),
-               ("%s (%d%%)" % (self._amount(idle), idle_pct),
-                self.band_of(self.pooled()))]
+               ("%s (%d%%)" % (self._amount(idle), idle_pct), self.pooled_band())]
         for band in ("red", "yellow", "green"):
             row.append(("%d" % self.bands[band][0], band))
         return row
@@ -721,7 +801,7 @@ class SummaryRenderer:
         self.options = options
         self.context = context
         self.columns = cols_for(summary_columns(specs), options.view,
-                                options.show_dcgm, options.diagnose)
+                                options.show_dcgm)
         self.headers = [c.header for c in self.columns]
         self.dcgm_headers = [c.header for c in self.columns if c.group == "dcgm"]
         self.writer = csv.writer(self.out, lineterminator="\n") if options.csv else None
@@ -762,9 +842,11 @@ class SummaryRenderer:
         # the set follows the view for free: 8 by default, CPU%/MEM% under --cpu,
         # 6 under --gpu, the full catalog under --dcgm. Under time weighting the
         # weights are resource-seconds and render as hours; otherwise bare counts.
-        thresholds = options.thresholds or Thresholds(**DEFAULT_THRESHOLDS)
+        thresholds = _bands(options)
         hours = options.time_weighted
-        self.tallies = {header: EfficiencyTally(header, thresholds, *_resource_of(header, hours))
+        self.tallies = {header: EfficiencyTally(header, thresholds,
+                                               *_resource_of(header, hours),
+                                               worst=options.worst_jobs)
                         for header in self.headers if header.endswith("%")}
         # POWER_W joins them even though it is not a percentage: watts are the one
         # idle signal a duty cycle cannot fake. Weighted by GPU-time like the rest of
@@ -774,8 +856,14 @@ class SummaryRenderer:
         if "POWER_W" in self.headers:
             self.tallies["POWER_W"] = EfficiencyTally(
                 "POWER_W", thresholds, *_resource_of("POWER_W", hours),
-                absolute=True, value_unit="W")
+                absolute=True, value_unit="W", worst=options.worst_jobs)
         self._started = False
+        # The most recently added job's plain {header: float} values and model --
+        # for a single-job selection this is that job's own, used by finish() to
+        # print a Classification line the same classify()/classify_combined()
+        # already compute for --ts --classify.
+        self._last_values: Dict[str, float] = {}
+        self._last_model: str = ""
 
     def _line(self, row: dict, color: bool = True) -> str:
         """One rendered row, tinted by grade when the options ask for it.
@@ -851,12 +939,13 @@ class SummaryRenderer:
     def _note_waste(self, jid: str, user: str, values: Dict[str, float],
                     weights: Dict[str, float], runtime: str = "-",
                     duration: Optional[int] = None, model: str = "") -> None:
-        """Record what a job wasted per metric, if it is red in any of them.
+        """Record what a job wasted per metric, if it is Wasteful in any of them.
 
-        Every metric's waste is kept, not just the ones the job is red in, because
-        the resource it wasted is real either way; the red test only decides whether
-        the job is a candidate at all. That test is what keeps the lists actionable:
-        a 95%-efficient job can idle 50 GPU-hours simply by being enormous.
+        Every metric's waste is kept, not just the ones the job is wasteful in,
+        because the resource it wasted is real either way; the wasteful test only
+        decides whether the job is a candidate at all. That test is what keeps the
+        lists actionable: a 95%-efficient job can idle 50 GPU-hours simply by being
+        enormous.
         """
         wasted, red = {}, set()
         for header, tally in self.tallies.items():
@@ -864,7 +953,7 @@ class SummaryRenderer:
             if value is None or weight <= 0:
                 continue
             wasted[header] = tally.waste_of(value, weight, model)
-            if tally.band_of(value, model) == "red":
+            if tally.is_wasteful(value, model):
                 red.add(header)
         if red:
             self.waste[jid] = (wasted, user, frozenset(red), dict(values),
@@ -905,11 +994,30 @@ class SummaryRenderer:
                            [(h, values.get(h)) for h, _t in tallies],
                            runtime, duration))
         scored.sort(key=lambda item: (-item[0], item[1]))
-        return scored[:EfficiencyTally.WORST]
+        return scored[:self.options.worst_jobs]
 
     def _combined_candidates(self, headers: Tuple[str, ...]) -> int:
         """How many jobs are red in *all* of ``headers``."""
         return sum(1 for entry in self.waste.values() if set(headers) <= entry[2])
+
+    def _criteria(self, headers: Tuple[str, ...]) -> str:
+        """``"GPU < 2%, CPU < 2%"`` -- the rule a Wasteful row's jobs qualify by.
+
+        Reads the run's actual configured edges (each metric's own ``wasteful``, and
+        ``power_w``) rather than restating a fixed number, so the heading stays true
+        after a site tunes ``config.toml`` -- a hardcoded "< 2%" would silently lie
+        the day someone sets ``cpu = 5``. Per header, which is also why the row can
+        legitimately show different cutoffs for its own two metrics.
+        """
+        thresholds = _bands(self.options)
+        parts = []
+        for header in headers:
+            unit = self.tallies[header].value_unit if header in self.tallies else (
+                "W" if header == "POWER_W" else "%")
+            cutoff = (thresholds.power_w if header == "POWER_W"
+                     else thresholds.edge("wasteful", header))
+            parts.append("%s < %g%s" % (_worst_slug(header), cutoff, unit))
+        return ", ".join(parts)
 
     def add(self, jobids: List[str], records: Dict[str, JobRecord],
             dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
@@ -961,9 +1069,6 @@ class SummaryRenderer:
                         if weights["gpu"] and header in self.weightable:
                             self.weighted_dcgm[header][0] += value * weights["gpu"]
                             self.weighted_dcgm[header][1] += weights["gpu"]
-                if options.diagnose:
-                    row["DIAG"] = diagnose_dcgm(overall, record.duration if record else None,
-                                                options.min_runtime)
             # Every graded column at once, now that both the blob and the DCGM
             # values are in hand. Each tally knows which resource weights it.
             # One value map for every graded metric, built once both the blob and
@@ -987,6 +1092,7 @@ class SummaryRenderer:
                         values[header] = value
                 model = job_model(dcgm_data.get(jid, ({}, {}))[1])
                 self.models[jid] = model
+                self._last_values, self._last_model = values, model
                 for header, tally in self.tallies.items():
                     tally.add(jid, row["USER"], values.get(header),
                               weights[tally.weight_key], row["RUNTIME"],
@@ -1060,7 +1166,7 @@ class SummaryRenderer:
         # first answers "which job drained the most hardware", the second "which job
         # looks worst by any measure" -- three of its four terms describe the GPU, so
         # a GPU-idle job outscores an equally wasteful CPU-idle one.
-        combined = [("both", COMBINED_2, self._combined_worst(COMBINED_2)),
+        combined = [("gpu-cpu", COMBINED_2, self._combined_worst(COMBINED_2)),
                     ("all", COMBINED_4, self._combined_worst(COMBINED_4))]
         combined = [(name, hs, rows) for name, hs, rows in combined if rows]
 
@@ -1113,88 +1219,169 @@ class SummaryRenderer:
 
             problems = []
             if not alone:
-                # (label, [(user, entry text, is long-running)]) per row. Labels carry
-                # counts, so widths vary; everything is padded to one width so the job
-                # lists line up under each other across rows.
+                # (heading, [(user, entry text, is long-running)]) per row. The
+                # heading now carries the row's own criteria, so it gets its own
+                # line -- packing the first user onto it the way a bare count
+                # once allowed left the longer combined headings ragged.
                 rows_out = []
                 for one in worst:
                     rows_out.append((
-                        "Worst %s (%d/%d):" % (_worst_slug(one.header),
-                                               one.bands["red"][0], one.graded()),
+                        "Wasteful %s (%d/%d): %s" % (_worst_slug(one.header),
+                                                     one.bands["red"][0], one.graded(),
+                                                     self._criteria((one.header,))),
                         [(job.user,
                           "%s:%d%s:%s(%s)" % (job.jobid, round(job.value),
                                               one.value_unit, one._amount(job.weight),
                                               job.runtime),
-                          (job.duration or 0) > LONG_RUNNING)
+                          (job.duration or 0) > options.long_running)
                          for job in one.worst]))
                 for name, headers, ranked in combined:
                     # No denominator: a row spanning metrics with different coverage
                     # has no single honest total, so only the candidate count is shown.
                     rows_out.append((
-                        "Worst %s (%d):" % (name, self._combined_candidates(headers)),
+                        "Wasteful %s (%d): %s" % (name, self._combined_candidates(headers),
+                                                  self._criteria(headers)),
                         [(user,
                           "%s(%s)" % (_combined_cell(jid, values, self.tallies)
                                       .replace(" ", ":", 1).replace(" ", "/"), runtime),
-                          (duration or 0) > LONG_RUNNING)
+                          (duration or 0) > options.long_running)
                          for _score, jid, user, values, runtime, duration in ranked]))
-                # Both widths are over possibly-empty sequences: a selection with
-                # nothing red has no Worst rows at all, leaving only Jobs:.
-                label_width = max([len(label) for label, _ in rows_out] + [len("Jobs:")])
-                user_width = max([len(user) + 1 for _label, entries in rows_out
+                user_width = max([len(user) + 1 for _heading, entries in rows_out
                                   for user, _t, _l in entries] + [0])
-                for label, entries in rows_out:
-                    problems.extend(self._worst_rows(label, entries, label_width,
-                                                     user_width))
-                problems.append("%-*s %s" % (label_width, "Jobs:", "  ".join(counts)))
+                for heading, entries in rows_out:
+                    problems.extend(self._worst_rows(heading, entries, user_width))
+                problems.append("Jobs: %s" % "  ".join(counts))
 
             self._print_sections([("Summary by metric", summary),
                                   ("Average efficiency  (filled = used, grey = idle)",
                                    self._bar_lines(stats)),
                                   ("Problem jobs", problems)])
+            if alone and self._last_values:
+                self._print_classification()
+
+    def _print_classification(self) -> None:
+        """A single job's classify()/classify_combined() verdict, unnumbered.
+
+        Reuses the exact same functions --ts --classify already computes from:
+        combined when both GPU and CPU% are present (the default/all view), plain
+        GPU-only classify() for a --gpu view, CPU%-only classify() for a --cpu
+        view. Printed after the numbered sections, not as one of them, so a
+        single-job report still has exactly sections [1, 2].
+        """
+        options = self.options
+        thresholds = _bands(options)
+        # POWER_W and the two memory columns never vote -- only the graded, non-
+        # memory, non-power percentage metrics do. POWER_W is watts, not a percent,
+        # so leaving it in here would let its raw wattage win classify()'s max()
+        # outright regardless of actual GPU utilization.
+        gpu_values = {h: v for h, v in self._last_values.items()
+                     if h not in CLASSIFY_SKIP and h not in ("CPU%", "POWER_W")}
+        cpu_value = self._last_values.get("CPU%")
+        power = self._last_values.get("POWER_W")
+        floor = (options.thresholds.floor_for(self._last_model)
+                if options.thresholds is not None else None)
+        combined = bool(gpu_values) and cpu_value is not None
+        if gpu_values:
+            verdict = (classify_combined(gpu_values, cpu_value, thresholds, power, floor)
+                      if cpu_value is not None else
+                      classify(gpu_values, thresholds, power, floor))
+            categories = COMBINED_CATEGORIES if cpu_value is not None else CATEGORIES
+            judged = list(gpu_values)
+        elif cpu_value is not None:
+            verdict = classify({"CPU%": cpu_value}, thresholds)
+            categories = CATEGORIES
+            judged = ["CPU%"]
+        else:
+            return
+        role = next((r for n, r in categories if n == verdict), "")
+        # The range is quoted over the metrics that actually voted, so it cannot
+        # name a cutoff this verdict was not reached by -- with per-metric edges a
+        # bare range would be some other column's.
+        label = _tier_range(verdict, thresholds, judged)
+        has_power = power is not None and floor is not None
+        desc = _classify_description(list(gpu_values), has_power, combined)
+        text = ("Classification: %s (%s)" % (verdict, label) if label
+               else "Classification: %s" % verdict)
+        print(file=self.out)
+        print("Classified %s." % desc, file=self.out)
+        print(tint(text, role) if options.color and role else text, file=self.out)
 
 
     STAT_HEADERS = ("METRIC", "IDLE", "RED", "YELLOW", "GREEN")
 
-    # Two lines of legend. The first states the cutoffs, which no longer need a
-    # column now that they are uniform. The second is there because "green" means
-    # only "not pathological": at a cutoff of 10 a job at 21% is green while wasting
-    # four fifths of its cores, so a selection can be half idle with almost every
-    # job green. IDLE is the efficiency number; the bands say whether the waste is
-    # concentrated in a few jobs or spread across all of them, which is the
-    # difference between someone to talk to and a habit.
+    # Three lines of legend. The first states the cutoffs -- one sentence while
+    # every metric shares them, and a metric-by-metric list once they do not, since
+    # then no single pair of numbers is true of the table. The last is there because
+    # "green" means only "not pathological": at a cutoff of 10 a job at 21% is green
+    # while wasting four fifths of its cores, so a selection can be half idle with
+    # almost every job green. IDLE is the efficiency number; the bands say whether
+    # the waste is concentrated in a few jobs or spread across all of them, which is
+    # the difference between someone to talk to and a habit.
+    STAT_CUTOFFS = ("red at or below %(red)g%%, yellow at or below %(yellow)g%%,"
+                    " green above;")
+    STAT_PER_METRIC = "red/yellow/green use each metric's own cutoffs -- %s;"
     STAT_LEGEND = (
-        "red below %(red)g%%, yellow below %(yellow)g%%, green above;"
-        " POWER_W red below %(power)g W, green above, no yellow. Counts are jobs.",
+        "%(cutoffs)s POWER_W red below %(power)g W, green above, no yellow."
+        " Counts are jobs.",
         "IDLE is resource-time that went unused -- for POWER_W, the time spent under"
         " that floor.",
         "bands catch pathological jobs, IDLE measures efficiency:"
         " no red with a high IDLE means every job wastes a little",
     )
+    LEGEND_WIDTH = 128
 
-    def _legend(self) -> List[str]:
-        """:data:`STAT_LEGEND` with this run's actual cutoffs filled in."""
-        thresholds = self.options.thresholds or Thresholds(**DEFAULT_THRESHOLDS)
-        values = {"red": thresholds.red, "yellow": 2 * thresholds.red,
+    def _cutoff_phrase(self, thresholds: "Thresholds", headers: List[str]) -> str:
+        """The cutoff clause: one pair of numbers, or one pair per metric.
+
+        Only the metrics actually in the table are listed, and only the three edges
+        the table's own columns turn on -- ``average`` splits green from green, so
+        naming it here would be a number with no column to point at.
+        """
+        graded = [h for h in headers if h.endswith("%")]
+        if not graded or thresholds.uniform(graded):
+            head = graded[0] if graded else ""
+            return self.STAT_CUTOFFS % {"red": thresholds.edge("inefficient", head),
+                                        "yellow": thresholds.edge("improvement", head)}
+        each = ", ".join(
+            "%s %s" % (h, "/".join("%g" % thresholds.edge(k, h)
+                                   for k in ("wasteful", "inefficient", "improvement")))
+            for h in graded)
+        return self.STAT_PER_METRIC % ("%s (wasteful/red/yellow)" % each)
+
+    def _legend(self, headers: Optional[List[str]] = None) -> List[str]:
+        """:data:`STAT_LEGEND` with this run's actual cutoffs filled in, wrapped.
+
+        Wrapped because the per-metric form grows with the table: at ``--dcgm`` it
+        names eighteen columns, which on one line would run four times the width of
+        everything above it.
+        """
+        thresholds = _bands(self.options)
+        values = {"cutoffs": self._cutoff_phrase(thresholds, headers or []),
                   "power": thresholds.power_w}
-        return [line % values for line in self.STAT_LEGEND]
+        lines = []
+        for line in self.STAT_LEGEND:
+            lines.extend(textwrap.wrap(line % values, self.LEGEND_WIDTH,
+                                       subsequent_indent="  ") or [""])
+        return lines
 
     WORST_WIDTH = 132
 
-    def _worst_rows(self, label: str, entries, label_width: int,
-                    user_width: int) -> List[str]:
-        """One line per user: ``label  user| job:val:wasted(elapsed), job:...``.
+    def _worst_rows(self, heading: str, entries, user_width: int) -> List[str]:
+        """``heading`` on its own line, then one line per user: ``  user|
+        job:val:wasted(elapsed), job:...``.
 
-        Grouped because a single user usually owns several of the worst jobs, and
+        The heading now states the row's own criteria as well as its count, so it
+        no longer shares a line with the first user -- grouped by user below it
+        because a single user usually owns several of the worst jobs, and
         repeating their name three times says less than showing they own the row.
         Entries wrap onto continuation lines rather than running past the table.
         """
-        out = []
+        out = [heading]
         for user, jobs in _worst_groups(entries):
-            prefix = "%-*s %-*s" % (label_width, label, user_width, user + "|")
-            label = ""                          # only the first line is labelled
+            prefix = "  %-*s" % (user_width, user + "|")
             line, count = prefix, 0
             for text, long_running in jobs:
-                cell = _SGR["red"] + text + _RESET if (
+                cell = tint(text, "long_running") if (
                     long_running and self.options.color) else text
                 candidate = line + (" " if count == 0 else ", ") + cell
                 if count and len(_ESC_RE.sub("", candidate)) > self.WORST_WIDTH:
@@ -1281,7 +1468,7 @@ class SummaryRenderer:
         out = []
         last = len(widths) - 1
         if self.options.header:
-            for line in self._legend():
+            for line in self._legend([one.header for one in stats]):
                 out.append("  " + line)
             out.append("  ".join(h if i == last else h.ljust(widths[i])
                                  for i, h in enumerate(self.STAT_HEADERS)))
@@ -1310,7 +1497,7 @@ class DetailRenderer:
         self.out = out or sys.stdout
         self.options = options
         self.context = context
-        self.columns = cols_for(DETAIL_COLUMNS, options.view, options.show_dcgm, options.diagnose)
+        self.columns = cols_for(DETAIL_COLUMNS, options.view, options.show_dcgm)
         self.writer = csv.writer(self.out, lineterminator="\n") if options.csv else None
         self.count = 0
         # Every node seen *before* filtering, so an unmatched --nodename can say what
@@ -1346,9 +1533,7 @@ class DetailRenderer:
         rows = blob_detail(record.stats if record else None)
         if self.options.show_dcgm:
             per_gpu = dcgm_data.get(jid, ({}, {}))[1]
-            rows = [extend_detail_row(r, per_gpu, record.duration if record else None,
-                                      self.options.min_runtime, self.options.diagnose)
-                    for r in rows]
+            rows = [extend_detail_row(r, per_gpu) for r in rows]
         self.nodes_seen.update(row[_NODE_INDEX] for row in rows)
         if self.options.nodename:
             rows = [row for row in rows if row[_NODE_INDEX] == self.options.nodename]
@@ -1444,7 +1629,7 @@ class DetailRenderer:
 def summarize(jobids: List[str], records: Dict[str, JobRecord],
               dcgm_data: Dict[str, Tuple[dict, dict]], context: List[Tuple[str, str]],
               options: RenderOptions, out=None) -> None:
-    """One row per job: blob metrics, optional DCGM columns, optional DIAG."""
+    """One row per job: blob metrics and, under --dcgm, the profiling columns."""
     renderer = SummaryRenderer(context, options, out)
     renderer.add(jobids, records, dcgm_data)
     renderer.finish()
@@ -1641,6 +1826,105 @@ def cpu_timeseries(jobids: List[str], records: Dict[str, JobRecord],
         raise no_such_node(options.nodename, nodes_seen)
 
 
+def combined_timeseries(jobids: List[str], records: Dict[str, JobRecord],
+                        specs: List[MetricSpec], client: PrometheusClient,
+                        timeout: Optional[float], options: RenderOptions,
+                        step: Optional[int] = None, out=None) -> None:
+    """``dcgm_timeseries`` plus each row's node's CPU%/MEM% appended -- the default
+    ``--ts`` view: GPU/DCGM columns and CPU%/MEM% together in one series.
+
+    GPU and CPU samples share one window per job (the same ``range_window()`` call
+    feeds both queries), so they land on the same timestamp grid with no separate
+    alignment step needed.
+    """
+    out = out or sys.stdout
+    seen, ts_specs = set(), []
+    for spec in specs:
+        if spec.metric not in seen:
+            seen.add(spec.metric)
+            ts_specs.append(spec)
+    columns = columns_for(specs)
+    derived = applicable_derived(specs)
+    sampling_period = client.sampling_period
+    writer = csv.writer(out, lineterminator="\n")
+    nodes_seen, matched, wrote_header = set(), False, False
+
+    def write(row) -> None:
+        nonlocal wrote_header
+        if options.header and not wrote_header:
+            writer.writerow(TS_ID_COLUMNS + [header for _key, header, _dec in columns]
+                            + list(CPU_TS_HEADERS))
+            wrote_header = True
+        writer.writerow(row)
+
+    for jid in jobids:
+        record = records.get(jid)
+        gpus = discover_gpus(record, client, timeout) if record else []
+        if not gpus:
+            print("warn: job %s has no GPU samples" % jid, file=sys.stderr)
+            continue
+        uuid_to = {g["uuid"]: (g["node"], g["minor"], g.get("model", "")) for g in gpus}
+        if options.nodename:
+            nodes_seen.update(node for node, _minor, _model in uuid_to.values())
+            uuid_to = {u: nm for u, nm in uuid_to.items() if nm[0] == options.nodename}
+            if not uuid_to:
+                continue
+            matched = True
+        regex = "^(" + "|".join(uuid_to) + ")$"
+        start, span = range_window(record.start, record.end, options.window,
+                                   sampling_period, step)
+        series: Dict[str, dict] = {uuid: {} for uuid in uuid_to}
+        for spec in ts_specs:
+            for result in client.query_range(
+                    '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex),
+                    start, record.end, span, timeout):
+                metric = result["metric"]
+                uuid = metric.get(spec.uuid_label) or metric.get("uuid") or metric.get("UUID")
+                if uuid not in series:
+                    continue
+                for stamp, value in result["values"]:
+                    try:
+                        series[uuid].setdefault(int(stamp), {})[spec.header] = float(value) * spec.scale
+                    except (TypeError, ValueError):
+                        pass
+
+        # CPU/MEM: same divisor resolution as cpu_timeseries(), plus a per-job
+        # host_series() call keyed by node, looked up per GPU row below.
+        nodes = (record.stats or {}).get("nodes") if record else None
+        if not nodes and record and record.jobid_raw and record.duration:
+            nodes = host_stats(record.jobid_raw, record.duration, record.end, client, timeout)
+        nodes = nodes or {}
+        cpus_by_host = {h: n.get("cpus") for h, n in nodes.items() if n.get("cpus")}
+        mem_by_host = {h: n.get("total_memory") for h, n in nodes.items()
+                       if n.get("total_memory")}
+        cpu_series = (host_series(record.jobid_raw, cpus_by_host, mem_by_host,
+                                  start, record.end, span, sampling_period, client, timeout)
+                     if cpus_by_host else {})
+
+        rows = []  # (node, minor_sort, ts, csv_row)
+        for uuid, (node, minor, model) in uuid_to.items():
+            node_cpu = cpu_series.get(node, {})
+            for stamp in sorted(series[uuid]):
+                cells = series[uuid][stamp]
+                keyed = values_by_key(specs, cells)
+                for column in derived:
+                    cells[column.header] = column.fn(keyed)
+                cpu_cells = node_cpu.get(stamp, {})
+                rows.append((node, gpu_minor_key(minor), stamp,
+                             [jid, record.user, stamp,
+                              time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
+                              node, minor, model]
+                             + [format_number(cells.get(h), d, missing="")
+                                for _k, h, d in columns]
+                             + [format_number(cpu_cells.get(h), 0, missing="")
+                                for h in CPU_TS_HEADERS]))
+        for _, _, _, row in sorted(rows, key=lambda x: (x[0], x[1], x[2])):
+            write(row)
+
+    if options.nodename and not matched:
+        raise no_such_node(options.nodename, nodes_seen)
+
+
 # How each spec's window reducer reads in the --describe output.
 _REDUCER_NAME = {"avg": "mean", "max": "peak", "delta": "delta"}
 
@@ -1663,33 +1947,13 @@ def _live_rows(jobs: Dict[int, LiveJob], gpus: Dict[str, Gpu]):
             yield job, gpu
 
 
-# --classify bands, worst first: (name, label, colour).
-CATEGORIES = (
-    ("wasteful", "<2%", "red"),
-    ("inefficient", "2-10%", "red"),
-    ("needs improvement", "10-20%", "yellow"),
-    ("average", "20-40%", "green"),
-    ("good", ">40%", "green"),
-)
-
-
-def band_of(best: float) -> str:
-    """The category a best-metric falls in.
-
-    Spelled out rather than derived from a table of edges, because the edges are the
-    whole specification and they are not uniform: "below 2" excludes 2, while every
-    band above it includes its top. So 1.9 is wasteful, 2.0 and 10.0 are inefficient,
-    and 10.1 needs improvement.
-    """
-    if best < 2.0:
-        return "wasteful"
-    if best <= 10.0:
-        return "inefficient"
-    if best <= 20.0:
-        return "needs improvement"
-    if best <= 40.0:
-        return "average"
-    return "good"
+# --classify bands, worst first: (name, the tier whose colour paints it). Derived
+# from config.TIERS rather than restated, because the order is load-bearing in three
+# places that have to agree -- which bucket a cell counts in, which verdict
+# classify() calls "best", and the order the categories are listed in. The colours
+# come from [colors] via tint(); the numeric edges from Thresholds, per metric (see
+# _tier_criteria()/_tier_range()).
+CATEGORIES = tuple((name, name) for name, _key in TIERS)
 
 # Occupancy of memory is not use of a resource -- a job can reserve 80GB (GPU or
 # host) and compute nothing -- so neither memory column votes on the verdict. Both
@@ -1702,11 +1966,11 @@ def classify_metrics(columns) -> List[str]:
     return [c for c in columns if c.endswith("%") and c not in CLASSIFY_SKIP]
 
 
-_VERDICT_ORDER = {name: i for i, (name, _label, _colour) in enumerate(CATEGORIES)}
+_VERDICT_ORDER = {name: i for i, (name, _role) in enumerate(CATEGORIES)}
 
 
-def classify(values: Dict[str, float], power: Optional[float] = None,
-            floor: Optional[float] = None) -> str:
+def classify(values: Dict[str, float], thresholds: "Thresholds",
+            power: Optional[float] = None, floor: Optional[float] = None) -> str:
     """The category for one unit's mean values: the band of its *best* metric,
     capped by sustained idle power.
 
@@ -1719,11 +1983,141 @@ def classify(values: Dict[str, float], power: Optional[float] = None,
     ever pushes a verdict down: a unit already "wasteful" stays "wasteful". ``power``/
     ``floor`` default to ``None``, which skips the cap entirely -- the original,
     power-blind verdict.
+
+    "Best" is the best *tier*, not the largest number: the edges are per metric, so
+    a GPU% of 4 (above its 2% wasteful edge) and a CPU% of 4 (below its 5% one) are
+    the same reading in different bands and magnitude no longer orders them. Where
+    every metric shares its edges this is the same answer as taking the max, since
+    tier() is then monotonic in the value.
     """
-    verdict = band_of(max(values.values()) if values else 0.0)
+    # No measured metric at all -- a CPU-only job in a combined sweep -- is no
+    # evidence of work, which is what banding a 0.0 used to say.
+    verdict = max((thresholds.tier(header, value) for header, value in values.items()),
+                  key=_VERDICT_ORDER.__getitem__, default="wasteful")
     if power is not None and floor is not None and power < floor:
         return CATEGORIES[min(_VERDICT_ORDER[verdict], _VERDICT_ORDER["inefficient"])][0]
     return verdict
+
+
+# The combined-metrics categories: CATEGORIES with the worst band split in two, so
+# a job idle on both CPU and GPU can be told apart from one whose GPU is idle while
+# its CPU is doing something else. Spliced rather than restated so the tiers above
+# the split cannot drift from CATEGORIES. Ranking still comes from the GPU metric
+# alone -- see classify_combined().
+# The two split names borrow `wasteful`'s colour: they are both flavours of it,
+# and [colors] has one entry for the tier rather than one per flavour.
+COMBINED_CATEGORIES = ((("wasteful-cpu-gpu", "wasteful"), ("wasteful-gpu", "wasteful"))
+                       + CATEGORIES[1:])
+
+
+def classify_combined(gpu_values: Dict[str, float], cpu_value: Optional[float],
+                      thresholds: "Thresholds", power: Optional[float] = None,
+                      floor: Optional[float] = None) -> str:
+    """The GPU verdict (:func:`classify`), with its worst band split by whether
+    host CPU is also idle.
+
+    CPU only distinguishes *which* worst a GPU-idle job is -- "wasteful-cpu-gpu"
+    (idle on both) versus "wasteful-gpu" (GPU idle, CPU busy with something else)
+    -- and the two are mutually exclusive. It never touches the healthy/middle
+    bands, and it plays no part in ranking (see timeseries_classify(), which sorts
+    by the GPU metric alone). The CPU cutoff is CPU%'s *own* wasteful edge, which a
+    site will usually have set higher than the GPU metrics' -- a GPU job holds cores
+    it does not use, so the bar for calling its host idle is a different number.
+    Missing CPU data (``cpu_value`` is ``None``) defaults to the less alarming
+    "wasteful-gpu" label rather than claiming double-idle on data never measured.
+    """
+    verdict = classify(gpu_values, thresholds, power, floor)
+    if verdict != "wasteful":
+        return verdict
+    cpu_idle = cpu_value is not None and cpu_value < thresholds.edge("wasteful", "CPU%")
+    return "wasteful-cpu-gpu" if cpu_idle else "wasteful-gpu"
+
+
+def _classify_description(metrics: List[str], has_power: bool, combined: bool) -> str:
+    """What a classify verdict was judged from -- which metrics voted (best-of),
+    and how POWER_W/CPU% modify it without voting themselves. Shared by
+    ``timeseries_classify()`` and the single-job summary's Classification line, so
+    the two describe the same rule in the same words.
+    """
+    text = "by best of %s" % ", ".join(metrics) if metrics else "by CPU% alone"
+    extra = []
+    if has_power:
+        extra.append("POWER_W caps the verdict when idle")
+    if combined:
+        extra.append("CPU% splits the worst band")
+    if extra:
+        text += " (%s)" % "; ".join(extra)
+    return text
+
+
+_WORST_TIERS = ("wasteful", "wasteful-gpu", "wasteful-cpu-gpu")
+
+
+def _metric_range(name: str, thresholds: "Thresholds", header: str) -> str:
+    """One metric's own span in tier ``name``, e.g. ``"20-40%"`` or ``">40%"``."""
+    if name in _WORST_TIERS:
+        return "<%g%%" % thresholds.edge("wasteful", header)
+    below = dict(TIERS)[name]
+    above = EDGE_KEYS[EDGE_KEYS.index(below) - 1] if below else None
+    lo = thresholds.edge(above, header) if above else None
+    return ("%g-%g%%" % (lo, thresholds.edge(below, header)) if below
+            else ">%g%%" % thresholds.edge(EDGE_KEYS[-1], header))
+
+
+def _tier_range(name: str, thresholds: "Thresholds", metrics: List[str]) -> str:
+    """The numeric range for tier ``name`` over ``metrics``.
+
+    ``"20-40%"`` while they agree on *this* tier -- which for a site that has tuned
+    nothing is always, and for one that tuned only the wasteful edge is still every
+    tier above it -- and ``"GPU% 20-40%, CPU% 40-60%"` once they do not, because
+    then there is no one range and quoting a single pair would be a lie. Judged per
+    tier rather than on the whole edge vector so a metric that differs lower down
+    does not make every heading above it longer for nothing.
+    """
+    metrics = list(metrics) or [""]
+    spans = [_metric_range(name, thresholds, m) for m in metrics]
+    if len(set(spans)) == 1:
+        return spans[0]
+    return ", ".join("%s %s" % (m, span) for m, span in zip(metrics, spans))
+
+
+def _tier_agrees(name: str, thresholds: "Thresholds", metrics: List[str]) -> bool:
+    """Whether every one of ``metrics`` has the same span in tier ``name``."""
+    return len({_metric_range(name, thresholds, m) for m in metrics or [""]}) == 1
+
+
+def _tier_criteria(name: str, metrics: List[str], thresholds: "Thresholds") -> str:
+    """The rule that put a unit in category ``name``, spelled out with its own
+    metrics -- e.g. ``"best of GPU%, SM_ACT%: 2-10%"`` -- so a --classify heading
+    is self-explanatory without a separate legend lookup. Numbers come from
+    ``thresholds``, the same table the run graded against, so the heading can never
+    quote a cutoff the verdict did not use.
+
+    The worst tier(s) are the one band where *every* metric, not just the best
+    one, must clear the cutoff (the max is under it only if all of them are), so
+    they are listed one by one with their own cutoff instead of a shared range;
+    the two split worst bands additionally state CPU%'s own side of the split,
+    since that is the entire distinction between them. CPU%'s edge is looked up
+    separately because it is not among ``metrics`` -- the GPU metrics vote, CPU%
+    only splits.
+    """
+    if name in _WORST_TIERS:
+        parts = ["%s <%g%%" % (m, thresholds.edge("wasteful", m)) for m in metrics]
+        cpu = thresholds.edge("wasteful", "CPU%")
+        if name == "wasteful-cpu-gpu":
+            parts.append("CPU%% <%g%%" % cpu)
+        elif name == "wasteful-gpu":
+            parts.append("CPU%% >=%g%%" % cpu)
+        return ", ".join(parts)
+    if _tier_agrees(name, thresholds, metrics):
+        # One range for all of them, so name the metrics once and the range once.
+        return "best of %s: %s" % (", ".join(metrics),
+                                   _tier_range(name, thresholds, metrics))
+    # Each carries its own range, which already names it -- saying the metrics
+    # twice would be the only thing longer than saying them once.
+    return "best of %s" % _tier_range(name, thresholds, metrics)
+
+
 TS_STAT_TAIL = ("METRIC", "N", "MIN", "MEAN", "MAX", "LAST")
 
 
@@ -1762,30 +2156,53 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
                         out=None, level: str = "job", show_all: bool = False) -> None:
     """Group the units into efficiency categories, worst first.
 
-    The verdict for each is :func:`classify`; what this adds is the reading order. A
-    partition sweep exists to be acted on from the top, and on a healthy one most jobs
-    are fine -- so ``good`` collapses to a count unless ``show_all``, which is the
-    difference between a page and a hundred of them.
+    The verdict for each is :func:`classify` (or :func:`classify_combined` when the
+    series carries both CPU% and real GPU metrics -- a combined ``--ts`` series);
+    what this adds is the reading order. A partition sweep exists to be acted on
+    from the top, and on a healthy one most jobs are fine -- so ``good`` collapses
+    to a count unless ``show_all``, which is the difference between a page and a
+    hundred of them.
+
+    For a combined series, ranking and the vote itself come from the GPU metrics
+    alone -- CPU% only distinguishes which flavor of "worst" a GPU-idle unit is
+    (see :func:`classify_combined`); it never inflates or outranks the GPU verdict.
     """
     out = out or sys.stdout
     metrics = classify_metrics(columns)
     if not metrics:
         raise JobscopeError("no %-metrics in this series to classify")
     unit = {"gpu": "GPUs", "node": "nodes"}.get(level, "jobs")
+    thresholds = _bands(options)
+
+    # CPU% only drives the combined path when real GPU metrics are also present --
+    # a plain --cpu --ts --classify series has CPU% as its only metric, and stays
+    # on the ordinary classify()/CATEGORIES path unchanged.
+    is_combined = "CPU%" in metrics and len(metrics) > 1
+    gpu_metrics = [m for m in metrics if m != "CPU%"] if is_combined else metrics
+    categories = COMBINED_CATEGORIES if is_combined else CATEGORIES
 
     reported = [c for c in columns if c not in TS_ID_COLUMNS]
     groups = pool_samples(rows, reported, level)
     verdicts = []
     for key, found in groups.items():
-        # Every metric is averaged, but only the judged ones vote. Keeping the two
-        # apart is what lets the CSV report GMEM% and POWER_W without letting them
-        # decide the label -- POWER_W still caps it, via classify()'s floor check.
+        # Every metric is averaged, but only the judged (GPU) ones vote. Keeping
+        # the two apart is what lets the CSV report GMEM%/CPU%/POWER_W without
+        # letting them decide the label -- POWER_W still caps it via classify()'s
+        # floor check, and CPU% still splits the worst band via classify_combined().
         means = {m: sum(v) / len(v) for m, v in found["values"].items()}
-        judged = {m: v for m, v in means.items() if m in metrics}
+        judged = {m: v for m, v in means.items() if m in gpu_metrics}
         power = means.get("POWER_W")
+        cpu_mean = means.get("CPU%") if is_combined else None
         model = job_model({k: {MODEL_KEY: m} for k, m in found["models"].items()})
         floor = options.thresholds.floor_for(model) if options.thresholds is not None else None
-        verdicts.append((classify(judged, power, floor), key, found, means, power))
+        verdict = (classify_combined(judged, cpu_mean, thresholds, power, floor) if is_combined
+                  else classify(judged, thresholds, power, floor))
+        best_gpu = max(judged.values()) if judged else 0.0
+        verdicts.append((verdict, key, found, means, power, best_gpu, cpu_mean))
+
+    # Ranking: the GPU metric for a combined series (per the design -- CPU never
+    # ranks), the group key otherwise, exactly as before this feature existed.
+    rank_key = (lambda v: v[5]) if is_combined else (lambda v: v[1])
 
     if options.csv:
         # jobid, user, every metric the series carried, then the label. Wider than
@@ -1794,9 +2211,9 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         writer = csv.writer(out, lineterminator="\n")
         if options.header:
             writer.writerow(["JOBID", "USER"] + reported + ["LABEL"])
-        order = {name: i for i, (name, _l, _c) in enumerate(CATEGORIES)}
-        for name, key, found, means, _power in sorted(
-                verdicts, key=lambda v: (order[v[0]], v[1])):
+        order = {name: i for i, (name, _c) in enumerate(categories)}
+        for name, key, found, means, _power, _best_gpu, _cpu_mean in sorted(
+                verdicts, key=lambda v: (order[v[0]], rank_key(v))):
             writer.writerow([key[0], found["user"]]
                             + ["%.1f" % means[m] if m in means else "" for m in reported]
                             + [name])
@@ -1804,8 +2221,8 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         return
 
     if options.header:
-        print("  %d %s, by best of %s" % (len(verdicts), unit, ", ".join(metrics)),
-              file=out)
+        desc = _classify_description(gpu_metrics, "POWER_W" in columns, is_combined)
+        print("  %d %s, %s" % (len(verdicts), unit, desc), file=out)
         print(file=out)
 
     # Columns rather than inline "NAME value" pairs: this was the one table in the
@@ -1813,14 +2230,18 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     # username and a reading ran together. The identity block also has to say which
     # unit was judged -- at node level every row read as the same job id before.
     multi_job = len({r.get("JOBID", "?") for r in rows}) > 1
-    headers = unit_headers(level, multi_job) + ("USER",) + tuple(metrics) + ("POWER_W",)
+    extra_headers = ("POWER_W", "CPU%") if is_combined else ("POWER_W",)
+    headers = unit_headers(level, multi_job) + ("USER",) + tuple(gpu_metrics) + extra_headers
 
-    def cells_for(key, found, means, power) -> Tuple[str, ...]:
+    def cells_for(key, found, means, power, cpu_mean) -> Tuple[str, ...]:
+        extra = ("-" if power is None else "%.0f" % power,)
+        if is_combined:
+            extra += ("-" if cpu_mean is None else "%.1f" % cpu_mean,)
         return (unit_values(level, multi_job, key, found) + (found["user"],)
-                + tuple("%.1f" % means[m] if m in means else "-" for m in metrics)
-                + ("-" if power is None else "%.0f" % power,))
+                + tuple("%.1f" % means[m] if m in means else "-" for m in gpu_metrics)
+                + extra)
 
-    table = {id(v): cells_for(v[1], v[2], v[3], v[4]) for v in verdicts}
+    table = {id(v): cells_for(v[1], v[2], v[3], v[4], v[6]) for v in verdicts}
     # Measured across every category, so the columns line up between them and two
     # jobs in different bands stay comparable at a glance.
     widths = [max(len(headers[i]), max((len(c[i]) for c in table.values()), default=0))
@@ -1834,19 +2255,20 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
     by_name: Dict[str, list] = {}
     for verdict in verdicts:
         by_name.setdefault(verdict[0], []).append(verdict)
-    for name, label, colour in CATEGORIES:
+    for name, role in categories:
         found = by_name.get(name, [])
         if not found:
             continue
-        heading = "%s (%s)  %d %s" % (name, label, len(found), unit)
-        print("  " + (tint(heading, colour) if options.color else heading), file=out)
+        heading = "%s (%s)  %d %s" % (name, _tier_criteria(name, gpu_metrics, thresholds),
+                                      len(found), unit)
+        print("  " + (tint(heading, role) if options.color else heading), file=out)
         if name == "good" and not show_all:
             # Most of a healthy partition, and none of what the report is for.
             print("    (--all-categories to list them)", file=out)
             continue
         if options.header:
             print("    " + row_text(headers), file=out)
-        for verdict in sorted(found, key=lambda v: v[1]):
+        for verdict in sorted(found, key=rank_key):
             print("    " + row_text(table[id(verdict)]), file=out)
         print(file=out)
     out.flush()
@@ -1911,20 +2333,25 @@ def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptio
 
     table = []
     for key, found in sorted(groups.items(), key=order):
+        # Carried per group so POWER_W's mean is tinted against the card it was
+        # measured on. The same resolution timeseries_classify does for the same
+        # samples; dropping it here graded a 165 W RTX -- idle -- against the global
+        # 100 W floor and called it green.
+        model = job_model({k: {MODEL_KEY: m} for k, m in found["models"].items()})
         for metric in metrics:
             values = found["values"].get(metric)
             if not values:
                 continue
             mean = sum(values) / len(values)
             table.append((unit_values(level, multi_job, key, found), metric, len(values),
-                          min(values), mean, max(values), values[-1]))
+                          min(values), mean, max(values), values[-1], model))
     if not table:
         print("No samples to summarize.", file=sys.stderr)
         return
 
     cells = [tuple(label) + (metric, str(n), "%.1f" % low, "%.1f" % mean,
                              "%.1f" % high, "%.1f" % last)
-             for label, metric, n, low, mean, high, last in table]
+             for label, metric, n, low, mean, high, last, _model in table]
     if options.csv:
         writer = csv.writer(out, lineterminator="\n")
         if options.header:
@@ -1948,7 +2375,8 @@ def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptio
         # anyone reads first should say whether the number is a problem.
         painted = [cell.ljust(widths[i]) if i < text_cols else cell.rjust(widths[i])
                    for i, cell in enumerate(row)]
-        painted[mean_at] = tint(painted[mean_at], cell_band(options, entry[1], entry[4]))
+        painted[mean_at] = tint(painted[mean_at],
+                                cell_band(options, entry[1], entry[4], entry[7]))
         print("  " + "  ".join(painted).rstrip(), file=out)
     out.flush()
 
@@ -2076,36 +2504,113 @@ def live_cpu_timeseries(jobs: Dict[int, LiveJob], client: PrometheusClient,
         raise no_such_node(options.nodename, nodes_seen)
 
 
-def describe(diagnose_on: bool = False, out=None) -> None:
+def live_combined_timeseries(jobs: Dict[int, LiveJob], samples: Dict[str, Dict[int, dict]],
+                             gpus: Dict[str, Gpu], specs: List[MetricSpec],
+                             client: PrometheusClient, timeout: Optional[float],
+                             options: RenderOptions, workers: int,
+                             step: Optional[int] = None, out=None) -> None:
+    """``live_timeseries`` plus each row's node's CPU%/MEM% appended -- the default
+    running-job ``--ts`` view.
+
+    The GPU side is exactly ``live_timeseries()``'s pre-fetched ``samples``/``gpus``
+    (any ``--nodename`` filtering already happened before this is called, on
+    ``gpus``); the CPU side resolves divisors via one batched
+    ``live_blob.host_stats_many()`` call and thread-pools a ``cpu.host_series()``
+    call per job, the same as :func:`live_cpu_timeseries`.
+    """
+    out = out or sys.stdout
+    columns = build_columns(specs)
+    derived = applicable_derived(specs)
+    writer = csv.writer(out, lineterminator="\n")
+    sampling_period = client.sampling_period
+    at = int(time.time())
+    elapsed_by_job = {raw: job["elapsed_seconds"] for raw, job in jobs.items()
+                      if (job.get("elapsed_seconds") or 0) > 0}
+    divisors = host_stats_many(elapsed_by_job, at, client, timeout)
+
+    tasks = []
+    for raw_jobid, job in jobs.items():
+        start, elapsed = job.get("start_epoch"), job.get("elapsed_seconds")
+        if not start or not elapsed or elapsed <= 0:
+            continue
+        by_host = divisors.get(raw_jobid, {})
+        cpus_by_host = {h: n.get("cpus") for h, n in by_host.items() if n.get("cpus")}
+        mem_by_host = {h: n.get("total_memory") for h, n in by_host.items()
+                       if n.get("total_memory")}
+        if not cpus_by_host:
+            continue
+        end = start + elapsed
+        begin, span = range_window(start, end, options.window, sampling_period, step)
+        tasks.append((raw_jobid, cpus_by_host, mem_by_host, begin, end, span))
+
+    def run(task):
+        raw_jobid, cpus_by_host, mem_by_host, begin, end, span = task
+        return raw_jobid, host_series(str(raw_jobid), cpus_by_host, mem_by_host,
+                                      begin, end, span, sampling_period, client, timeout)
+
+    cpu_results: Dict[int, dict] = {}
+    if tasks:
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(tasks)))) as pool:
+            for raw_jobid, series in pool.map(run, tasks):
+                cpu_results[raw_jobid] = series
+
+    if options.header:
+        writer.writerow(TS_ID_COLUMNS + [header for _k, header, _d in columns]
+                        + list(CPU_TS_HEADERS))
+
+    for job, gpu in _live_rows(jobs, gpus):
+        if gpu is None:
+            continue
+        node_cpu = cpu_results.get(gpu.jobid, {}).get(gpu.host, {})
+        for epoch in sorted(samples.get(gpu.uuid, {})):
+            values = samples[gpu.uuid][epoch]
+            for column in derived:
+                values[column.key] = column.fn(values)
+            cpu_cells = node_cpu.get(epoch, {})
+            writer.writerow(
+                [job["jobid"], job.get("user", "?"), epoch,
+                 time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(epoch)),
+                 gpu.host, gpu.csv_id, gpu.model]
+                + [format_number(values.get(key), dec, missing="")
+                   for key, _h, dec in columns]
+                + [format_number(cpu_cells.get(h), 0, missing="")
+                   for h in CPU_TS_HEADERS])
+
+
+def describe(out=None) -> None:
     """Print a plain-English description of each summary column."""
     out = out or sys.stdout
     print("jobscope columns. CPU/MEM/GPU/GMEM come from the sacct blob (no network);", file=out)
-    print("the DCGM columns (gpu view) and DIAG (gpu view + --diagnose) come from", file=out)
-    print("Prometheus. For the full per-GPU DCGM catalog, run", file=out)
-    print("'jobscope describe --dcgm' (add --ext for all %d metrics).\n" % len(ALL_SPECS),
-          file=out)
+    print("the DCGM columns (gpu view) come from Prometheus. For the full per-GPU", file=out)
+    print("DCGM catalog, run 'jobscope describe --dcgm' (add --ext for all %d metrics).\n"
+          % len(ALL_SPECS), file=out)
     for header, source, text in SUMMARY_DESCRIPTIONS:
         print("  %-9s %s" % (header, source), file=out)
         for wrapped in textwrap.wrap(text, width=74):
             print("      " + wrapped, file=out)
         print(file=out)
-    if diagnose_on:
-        print(LEGEND, file=out)
 
 
-def describe_dcgm(specs: List[MetricSpec], out=None) -> None:
-    """Plain-English reference for the DCGM metric catalog."""
+def describe_dcgm(specs: List[MetricSpec], out=None, extended=None) -> None:
+    """Plain-English reference for the DCGM metric catalog.
+
+    ``extended`` is the widest list this run could show (``[metrics] extended``),
+    used only to label whether ``specs`` is already all of it. Compared as a set,
+    not by length: the two lists are configurable independently, so a site could
+    give them the same size without their being the same metrics.
+    """
     out = out or sys.stdout
     reducer_name = _REDUCER_NAME
-    n_default = len(DEFAULT_SPECS)
+    widest = list(ALL_SPECS if extended is None else extended)
+    is_widest = {s.key for s in specs} >= {s.key for s in widest}
     # Hidden specs exist only to feed a derived column, so describe the column
     # instead -- what a reader sees in the table.
     shown = [s for s in specs if s.show]
     derived = applicable_derived(specs)
     print("DCGM GPU metrics. Each value is time-averaged over the job's [start,end]", file=out)
     print("window. Showing %d of %d metrics (%s). [reduce] = how the window is collapsed.\n"
-          % (len(shown) + len(derived), len(ALL_SPECS),
-             "all" if len(specs) > n_default else "default; --ext for the rest"), file=out)
+          % (len(shown) + len(derived), len(widest),
+             "all" if is_widest else "default; --ext for the rest"), file=out)
     for spec in shown:
         print("  %-12s %-38s [reduce: %s]" % (spec.header, spec.metric,
               reducer_name.get(spec.reducer, spec.reducer)), file=out)

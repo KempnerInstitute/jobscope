@@ -7,6 +7,7 @@ import json
 import pytest
 
 from jobscope import config as config_module
+from jobscope import report
 from jobscope.blob import GIB
 from jobscope.sacct import JobRecord
 
@@ -52,17 +53,24 @@ DEFAULT_CONFIG = config_module.Config(
     sampling_period=60,
     sampling_period_explicit=False,
     site_jobstats_config_path=None,
-    thresholds=config_module.Thresholds(red=10, power_w=100),
-    defaults=config_module.Defaults(workers=8, timeout=60.0, min_runtime=180),
+    thresholds=config_module.Thresholds(),
+    defaults=config_module.Defaults(workers=8, timeout=60.0),
 )
 
 
 @pytest.fixture(autouse=True)
 def hermetic_config():
-    """Pin the process-wide config to known defaults so tests never read ~/.config."""
+    """Pin the process-wide config to known defaults so tests never read ~/.config.
+
+    The palette is reset with it: report._SGR is module state that cli._apply_config
+    installs, so a test that runs a command with a configured [colors] would
+    otherwise leave every later test painting in its colours.
+    """
     config_module.set_config(DEFAULT_CONFIG)
+    report.set_palette(DEFAULT_CONFIG.palette)
     yield
     config_module.reset_config()
+    report.set_palette(config_module.Palette())
 
 
 @pytest.fixture

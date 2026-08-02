@@ -40,33 +40,14 @@ def test_fmt_context():
 
 def test_cols_for_views():
     """`all` is the default; --cpu and --gpu narrow it. There is no cgpu any more."""
-    everything = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=True, diagnose=True)]
+    everything = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=True)]
     assert "CPU%" in everything and "GPU%" in everything and "SM_ACT%" in everything
-    assert "DIAG" in everything
     cpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "cpu")]
     assert "CPU%" in cpu and "GPU%" not in cpu and "SM_ACT%" not in cpu
     gpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "gpu", dcgm=True)]
     assert "GPU%" in gpu and "SM_ACT%" in gpu and "CPU%" not in gpu
     # NODE and the other identity columns appear in every view.
     assert all("NODE" in cols and "JOBID" in cols for cols in (everything, cpu, gpu))
-
-
-def test_diag_is_the_last_column():
-    cols = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=True, diagnose=True)]
-    assert cols[-1] == "DIAG"
-
-
-def test_cols_for_diag_requires_dcgm():
-    without = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=False, diagnose=True)]
-    assert "DIAG" not in without
-    with_dcgm = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=True, diagnose=True)]
-    assert "DIAG" in with_dcgm
-
-
-def test_summarize_diagnose_without_dcgm_does_not_crash(gpu_record):
-    options = RenderOptions(view="all", show_dcgm=False, diagnose=True, csv=True, header=True)
-    text = _render(summarize, ["100"], {"100": gpu_record}, {}, CTX, options)
-    assert "DIAG" not in text
 
 
 def test_context_pairs_explicit_ids(gpu_record):
@@ -113,16 +94,6 @@ def test_explicit_job_ids_have_no_window():
 def test_context_pairs_selection():
     pairs = context_pairs(Selection(user="bob", account="kempner", partition="gpu"), "last 1 day", {})
     assert [p[0] for p in pairs] == ["User", "Account", "Partition", "Select"]
-
-
-def test_extend_detail_row_short_tag():
-    base = ("node01", "0", "75.0%", "8GB/16GB", "90%", "48GB/80GB", "60.0%")
-    per_gpu = {("node01", "0"): {"SM_ACT%": 80.0, "POWER_W": 300.0}}
-    row = extend_detail_row(base, per_gpu, duration=100, min_runtime=180, diagnose_on=True)
-    assert len(row) == 7 + 5 + 1
-    assert row[7] == "80.0"   # SM_ACT%
-    assert row[8] == "-"      # OCC% missing
-    assert row[12] == "short"  # duration < min_runtime
 
 
 def test_summarize_gpu_text(gpu_record):
@@ -182,7 +153,7 @@ def test_dcgm_report_is_one_row_per_job(gpu_record):
                        options)
     columns, rows = plot.parse_csv(io.StringIO(csv_text))
     assert columns == ["JOBID", "USER", "STATE", "NODE", "CPU%", "MEM%", "#GPU", "GPU%", "GMEM%",
-                       "SM_ACT%", "OCC%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME"]
+                       "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME"]
     assert len(rows) == 1                       # one row per job, not per GPU
     assert rows[0]["SM_ACT%"] == "60.0"
     # Blob columns still come from the blob: cpu 75, mem 50, gpu 70, gmem 50.
@@ -312,6 +283,36 @@ def test_cpu_timeseries_warns_and_skips_a_job_with_no_cpu_records():
     assert "no CPU/memory records" in err.getvalue()
 
 
+class _CombinedTimeseriesClient(_TimeseriesClient):
+    """DCGM queries served like _TimeseriesClient; cgroup queries added on top."""
+
+    def query_range(self, query, start, end, step, timeout=None):
+        if "cgroup_cpu_total_seconds" in query:
+            return [{"metric": {"host": "node01:9100"}, "values": [[1000, "1.0"], [1060, "1.5"]]}]
+        if "cgroup_memory_rss_bytes" in query:
+            return [{"metric": {"host": "node01:9100"},
+                     "values": [[1000, str(4 * GIB)], [1060, str(8 * GIB)]]}]
+        return super().query_range(query, start, end, step, timeout)
+
+
+def test_combined_timeseries_csv(gpu_record):
+    """DCGM columns plus each row's node's CPU%/MEM% merged into one series --
+    the default --ts view.
+
+    gpu_record (conftest.py) is on node01, cpus=2, total_memory=16 GiB: 1.0/1.5
+    cores -> 50%/75% CPU, 4/8 GiB RSS out of 16 GiB -> 25%/50% MEM.
+    """
+    options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True, combined=True)
+    text = _render(report.combined_timeseries, ["100"], {"100": gpu_record}, DEFAULT_SPECS,
+                   _CombinedTimeseriesClient(), None, options)
+    columns, rows = plot.parse_csv(io.StringIO(text))
+    assert columns[:6] == ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU"]
+    assert columns[-2:] == ["CPU%", "MEM%"]
+    assert [r["SM_ACT%"] for r in rows] == ["80.0", "60.0"]
+    assert [r["CPU%"] for r in rows] == ["50", "75"]
+    assert [r["MEM%"] for r in rows] == ["25", "50"]
+
+
 def _render_stream(renderer_cls, context, options, chunks):
     out = io.StringIO()
     renderer = renderer_cls(context, options, out)
@@ -336,7 +337,7 @@ def _two_gpu_chunks(gpu_record):
 
 def test_summary_renderer_two_adds_equals_summarize_text(gpu_record):
     jobids, records, dcgm, chunks = _two_gpu_chunks(gpu_record)
-    options = RenderOptions(view="gpu", show_dcgm=True, diagnose=True, csv=False, header=True)
+    options = RenderOptions(view="gpu", show_dcgm=True, csv=False, header=True)
     single = _render(summarize, jobids, records, dcgm, CTX, options)
     streamed = _render_stream(report.SummaryRenderer, CTX, options, chunks)
     assert streamed == single
@@ -357,7 +358,7 @@ def test_a_single_job_gets_the_metric_table_but_not_the_rest(gpu_record, cpu_rec
     """The table is how you see which band one job's numbers fall in.
 
     The rest of the block says nothing for a lone job: the pooled row is that job's
-    own row repeated, a Worst row names it again, and every job count is 1.
+    own row repeated, a Wasteful row names it again, and every job count is 1.
     """
     # The second chunk is filtered out by the gpu view, so only one row renders.
     options = RenderOptions(view="gpu", show_dcgm=False, csv=False, header=True)
@@ -366,8 +367,8 @@ def test_a_single_job_gets_the_metric_table_but_not_the_rest(gpu_record, cpu_rec
                                (["200"], {"200": cpu_record}, {})])
     assert "100" in streamed
     assert "METRIC" in streamed and "GPU%" in streamed        # the table prints
-    assert "red below 10%" in streamed                        # and its legend
-    for label in ("Used/", "Worst", "Jobs:"):
+    assert "red at or below 10%" in streamed                  # and its legend
+    for label in ("Used/", "Wasteful", "Jobs:"):
         assert label not in streamed
 
 
@@ -662,7 +663,7 @@ def _stat_rows(records, **kw):
     start = next(i for i, ln in enumerate(lines) if ln.startswith("METRIC"))
     rows = {}
     for line in lines[start + 1:]:
-        if not line or line.startswith(("Worst", "Jobs")):
+        if not line or line.startswith(("Wasteful", "Jobs")):
             break
         # Columns are separated by two or more spaces; a band cell contains a
         # single one ("1 (20%)/80%"), so splitting on any whitespace would break it.
@@ -724,12 +725,12 @@ def test_the_report_is_three_numbered_sections():
 
 
 def test_the_sections_hold_what_their_titles_say():
-    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 1.0})}
     one, two, three = _sections(records)
     assert any(ln.startswith("METRIC") for ln in one[2])
     assert any(ln.startswith("Used/") for ln in one[2])
     assert all("\u2588" in ln or "\u2591" in ln for ln in two[2])
-    assert any(ln.startswith("Worst GPU") for ln in three[2])
+    assert any(ln.startswith("Wasteful GPU") for ln in three[2])
     assert any(ln.startswith("Jobs:") for ln in three[2])
 
 
@@ -771,7 +772,7 @@ def test_each_rule_spans_its_own_sections_widest_visible_line():
 
 
 def test_noheader_drops_the_section_furniture_but_keeps_the_data():
-    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 1.0})}
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=False), out)
@@ -779,7 +780,7 @@ def test_noheader_drops_the_section_furniture_but_keeps_the_data():
     renderer.finish()
     text = out.getvalue()
     assert "1. Summary by metric" not in text and "---" not in text
-    assert "\u2588" in text and "Worst GPU" in text      # the data survives
+    assert "\u2588" in text and "Wasteful GPU" in text   # the data survives
 
 
 def test_csv_gets_no_section_furniture():
@@ -876,6 +877,87 @@ def test_a_single_job_gets_bars_too():
     assert _eff_bars(records)["GPU%"] == (31, 90)   # 90% of 34 blocks
 
 
+def _finish(records, view="all", **kw):
+    out = io.StringIO()
+    dcgm_data = kw.pop("dcgm_data", None)
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view=view, header=kw.pop("header", True), **kw), out)
+    renderer.add(list(records), records, dcgm_data or {})
+    renderer.finish()
+    return out.getvalue()
+
+
+def test_single_job_classification_is_combined_when_cpu_and_gpu_both_present():
+    """--all (the default) sees both CPU% and GPU% -- classify_combined()'s call."""
+    records = {"1": _gpu_job("1", {"0": 90.0})}   # GPU% 90 (good), CPU%/MEM% 50 (blob)
+    text = _finish(records, view="all")
+    assert "Classification: good (>40%)" in text
+
+
+def test_single_job_classification_falls_back_to_plain_gpu_for_a_gpu_view():
+    """--gpu excludes CPU%/MEM% from the columns, so there is nothing to combine
+    with -- classify() alone decides, unsplit ("wasteful", not "wasteful-*")."""
+    records = {"1": _gpu_job("1", {"0": 0.5})}    # GPU% 0.5 -> wasteful
+    text = _finish(records, view="gpu")
+    assert "Classification: wasteful (<2%)" in text
+
+
+def test_single_job_classification_uses_cpu_alone_for_a_cpu_view():
+    records = {"1": _gpu_job("1", None)}          # no GPU data at all: CPU-only job
+    text = _finish(records, view="cpu")
+    assert "Classification: good (>40%)" in text   # CPU% 50 from the blob
+
+
+def test_single_job_classification_is_not_skewed_by_power_w_wattage():
+    """POWER_W's raw watts (e.g. 219) must never win classify()'s max() outright --
+    it caps the verdict, it does not vote in it (regression: it used to leak into
+    the voting dict and its wattage would dominate any percentage)."""
+    records = {"1": _gpu_job("1", {"0": 31.0})}   # GPU% 31 -> "average" (20-40%)
+    dcgm_data = {"1": ({"SM_ACT%": 20.0, "TENSOR%": 3.0, "DRAM%": 19.0, "POWER_W": 219.0}, {})}
+    text = _finish(records, view="all", show_dcgm=True, dcgm_data=dcgm_data)
+    assert "Classification: average (20-40%)" in text
+
+
+def test_single_job_classification_describes_the_voting_metrics():
+    records = {"1": _gpu_job("1", {"0": 90.0})}
+    dcgm_data = {"1": ({"SM_ACT%": 20.0, "TENSOR%": 3.0, "DRAM%": 19.0, "POWER_W": 219.0}, {})}
+    # Mentioning the POWER_W cap requires a resolvable floor -- thresholds configured.
+    text = _finish(records, view="all", show_dcgm=True, dcgm_data=dcgm_data,
+                  thresholds=_thresholds())
+    assert "Classified by best of GPU%" in text
+    assert "POWER_W caps the verdict when idle" in text
+    assert "CPU% splits the worst band" in text
+
+
+def test_single_job_classification_description_omits_cpu_for_a_gpu_view():
+    records = {"1": _gpu_job("1", {"0": 90.0})}
+    text = _finish(records, view="gpu")
+    assert "Classified by best of GPU%" in text
+    assert "CPU% splits the worst band" not in text
+
+
+def test_single_job_classification_description_for_a_cpu_view():
+    records = {"1": _gpu_job("1", None)}
+    text = _finish(records, view="cpu")
+    assert "Classified by CPU% alone" in text
+
+
+def test_single_job_with_no_blob_gets_no_classification_line():
+    record = JobRecord(jobid="1", state="COMPLETED", name="j", runtime="00:10:00",
+                       nodes="1", gpus=0, stats={}, start=1000, end=1100, duration=100,
+                       jobid_raw="1", cluster="c", user="alice")
+    text = _finish({"1": record})
+    assert "Classification" not in text
+
+
+def test_a_multi_job_selection_gets_no_classification_line():
+    """The line is single-job-only -- a partition sweep keeps its existing Worst
+    rows instead, so there is no ambiguity about which job it would describe."""
+    records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
+    text = _finish(records)
+    assert "Classification" not in text
+
+
 def test_the_bar_title_obeys_noheader():
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
     out = io.StringIO()
@@ -902,14 +984,63 @@ def test_the_stat_table_carries_a_legend():
     renderer.add(list(records), records, {})
     renderer.finish()
     text = out.getvalue()
-    assert "red below 10%, yellow below 20%, green above" in text
+    # "at or below": the boundary is inclusive -- exactly 10.0 bands inefficient,
+    # which is red -- and the old wording said "below 10", which excluded it.
+    assert "red at or below 10%, yellow at or below 20%, green above" in text
     assert "POWER_W red below 100 W" in text and "Counts are jobs" in text
     assert "IDLE measures efficiency" in text
     # Directly above the header it explains, and inside the table width.
     lines = text.splitlines()
     assert lines[lines.index(next(ln for ln in lines if ln.startswith("METRIC"))) - 1] \
         .lstrip().startswith("bands catch")
-    assert all(len(ln) <= 132 for ln in report.SummaryRenderer.STAT_LEGEND)
+    # Measured on what is printed, not on the template: the per-metric form is
+    # built at render time, so a template check would pass while output overflowed.
+    assert all(len(ln) <= 132 for ln in renderer._legend(["GPU%", "CPU%"]))
+
+
+def test_the_legend_names_each_metrics_cutoffs_once_they_differ():
+    """One sentence cannot be true of the table when the rows are graded
+    differently, so it becomes a list -- of the metrics in the table, and of the
+    three edges its own RED/YELLOW columns turn on."""
+    from jobscope.config import Thresholds
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=True,
+                          thresholds=Thresholds(by_metric={"CPU%": {"wasteful": 5.0}})),
+        out)
+    lines = renderer._legend(["CPU%", "GPU%"])
+    text = " ".join(ln.strip() for ln in lines)
+    assert "each metric's own cutoffs" in text
+    assert "CPU% 5/10/20" in text and "GPU% 2/10/20" in text
+    assert "(wasteful/red/yellow)" in text
+    assert "POWER_W red below 100 W" in text          # still stated, still a floor
+    assert all(len(ln) <= 132 for ln in lines)        # and wrapped to the table width
+
+
+def test_the_legend_stays_one_sentence_while_the_metrics_agree():
+    """Which for a site that has tuned nothing is always."""
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
+    text = " ".join(renderer._legend(["CPU%", "GPU%", "SM_ACT%"]))
+    assert "red at or below 10%, yellow at or below 20%, green above" in text
+    assert "each metric's own cutoffs" not in text
+
+
+def test_a_long_per_metric_legend_wraps_rather_than_running_off():
+    """Under --dcgm it names eighteen columns, which on one line would run four
+    times the width of everything above it."""
+    from jobscope.config import Thresholds
+    headers = ["GPU%", "CPU%", "MEM%", "GMEM%", "SM_ACT%", "TENSOR%", "DRAM%",
+               "OCC%", "ENGINE%", "FP16%", "FP32%", "FP64%", "MEMCP%"]
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=True,
+                          thresholds=Thresholds(by_metric={"CPU%": {"wasteful": 5.0}})),
+        out)
+    lines = renderer._legend(headers)
+    assert len(lines) > len(report.SummaryRenderer.STAT_LEGEND)   # it did wrap
+    assert all(len(ln) <= 132 for ln in lines)
+    assert "MEMCP% 2/10/20" in " ".join(ln.strip() for ln in lines)  # nothing dropped
 
 
 def test_the_legend_is_suppressed_with_noheader_and_in_csv():
@@ -996,12 +1127,13 @@ def test_every_graded_column_gets_a_row_in_column_order():
             for j in records}
     rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
     assert list(rows) == ["CPU%", "MEM%", "GPU%", "GMEM%",
-                          "SM_ACT%", "OCC%", "TENSOR%", "DRAM%"]
+                          "SM_ACT%", "TENSOR%", "DRAM%"]
     # --dcgm widens the table, so it widens the block too. ENGINE% is only in the
     # extended catalog, so it can only appear there.
     wide = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=ALL_SPECS)
-    assert list(wide)[:8] == list(rows)
+    assert list(wide)[:7] == list(rows)
     assert "ENGINE%" in wide and "ENGINE%" not in rows
+    assert "OCC%" in wide and "OCC%" not in rows
 
 
 def test_a_job_with_no_stored_blob_votes_in_no_tally():
@@ -1111,30 +1243,51 @@ def test_the_table_is_plain_in_csv_mode_and_when_color_is_off():
 
 def test_worst_ranks_by_wasted_resource_not_by_size():
     """A large job at a mediocre rate wastes more than a small one at zero."""
-    # Both red under the uniform 10% cutoff, so both are candidates.
-    records = {"big": _timed_job("big", 100 * 3600, gpu_util=9.0),     # 91 GPU-h idle
+    # Both wasteful under the <2% cutoff, so both are candidates.
+    records = {"big": _timed_job("big", 100 * 3600, gpu_util=1.0),     # 99 GPU-h idle
                "small": _timed_job("small", 10 * 3600, gpu_util=0.0)}  # 10 GPU-h idle
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, time_weighted=True), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    worst = [ln for ln in out.getvalue().splitlines() if ln.startswith("Worst GPU")][0]
+    lines = out.getvalue().splitlines()
+    i = next(idx for idx, ln in enumerate(lines) if ln.startswith("Wasteful GPU"))
+    worst = lines[i + 1]
     assert worst.index("big") < worst.index("small")
 
 
+def _wasteful_blocks(text):
+    """``{label: text}`` for the Wasteful rows of a text-rendered table.
+
+    Keyed on the label without its "(n/total)" count, so a test can ask for
+    "Wasteful GPU" without knowing the counts. `text` joins the row's job lines
+    (the heading itself is excluded, so its criteria text -- "GPU < 10%" and the
+    like -- cannot be mistaken for a job payload) -- a test can search it with
+    `in`/`.index()` without caring whether an entry landed on the first job line
+    or wrapped onto another.
+    """
+    blocks = {}
+    label = None
+    for ln in text.splitlines():
+        if ln.startswith("Wasteful"):
+            label = ln.split("(")[0].strip()
+            blocks[label] = []
+        elif ln.startswith("Jobs:"):
+            label = None
+        elif label is not None:
+            blocks[label].append(ln)
+    return {label: "\n".join(rows) for label, rows in blocks.items()}
+
+
 def _worst_lines(records, view="all", time_weighted=True):
-    """``{label: line}`` for the Worst rows of a text-rendered table."""
+    """``_wasteful_blocks`` of a plain (non-power) table."""
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view=view, header=True, time_weighted=time_weighted), out)
     renderer.add(list(records), records, {})
     renderer.finish()
-    # Keyed on the label without its "(n/total)" count, so a test can ask for
-    # "Worst GPU" without knowing the counts. Values are the payload only: a job id
-    # like "A" would otherwise match the "A" in "alice".
-    return {ln.split("(")[0].strip(): ln.split(":", 1)[1]
-            for ln in out.getvalue().splitlines() if ln.startswith("Worst")}
+    return _wasteful_blocks(out.getvalue())
 
 
 def test_the_combined_worst_requires_red_in_every_metric():
@@ -1155,8 +1308,8 @@ def test_the_combined_worst_requires_red_in_every_metric():
     }
     lines = _worst_lines(records)
     # The single-metric rows still list whoever is red in that one metric.
-    assert "gpuhog" in lines["Worst GPU"] and "cpuhog" in lines["Worst CPU"]
-    combined = lines["Worst both"]
+    assert "gpuhog" in lines["Wasteful GPU"] and "cpuhog" in lines["Wasteful CPU"]
+    combined = lines["Wasteful gpu-cpu"]
     assert "both" in combined
     assert "gpuhog" not in combined and "cpuhog" not in combined
 
@@ -1172,11 +1325,11 @@ def test_the_combined_worst_orders_by_normalized_waste_and_shows_values():
                                  cpu_seconds=0),
                "small": _timed_job("small", 3600, gpu_util=0.0, gpus=4, cores=4,
                                    cpu_seconds=0)}
-    combined = _worst_lines(records)["Worst both"]
+    combined = _worst_lines(records)["Wasteful gpu-cpu"]
     # big wastes twice the resource, so it leads.
     assert combined.index("big") < combined.index("small")
     # And the cells are the values, not shares: both ran at 0%.
-    assert "big:gpu0/cpu0" in combined and "small:gpu0/cpu0" in combined
+    assert "big:gpu0%/cpu0%" in combined and "small:gpu0%/cpu0%" in combined
     assert "%gpu" not in combined
 
 
@@ -1184,18 +1337,18 @@ def test_a_job_green_in_one_metric_is_absent_from_the_combined_rows():
     """The inverse of the conjunction, stated directly.
 
     Its waste in the other metric is still real -- and still counted in that
-    metric's own total and its own Worst row -- it just does not qualify here.
+    metric's own total and its own Wasteful row -- it just does not qualify here.
     """
     records = {
         "red_gpu": _timed_job("red_gpu", 3600, gpu_util=0.0, gpus=1,
                               cores=10, cpu_seconds=18000),   # CPU% 50, green
-        "red_both": _timed_job("red_both", 3600, gpu_util=5.0, gpus=1,
-                               cores=10, cpu_seconds=0),      # red in both
+        "red_both": _timed_job("red_both", 3600, gpu_util=1.0, gpus=1,
+                               cores=10, cpu_seconds=0),      # wasteful in both
     }
     lines = _worst_lines(records)
-    assert "red_gpu" in lines["Worst GPU"]          # its own row still names it
-    assert "red_gpu" not in lines["Worst both"]     # but not the conjunction
-    assert "red_both" in lines["Worst both"]
+    assert "red_gpu" in lines["Wasteful GPU"]          # its own row still names it
+    assert "red_gpu" not in lines["Wasteful gpu-cpu"]     # but not the conjunction
+    assert "red_both" in lines["Wasteful gpu-cpu"]
 
 
 def test_no_combined_line_when_only_one_resource_wasted_anything():
@@ -1205,15 +1358,86 @@ def test_no_combined_line_when_only_one_resource_wasted_anything():
                "2": _timed_job("2", 3600, gpu_util=10.0, gpus=1, cores=4,
                                cpu_seconds=4 * 3600)}
     lines = _worst_lines(records)
-    assert "Worst GPU" in lines and "Worst both" not in lines
+    assert "Wasteful GPU" in lines and "Wasteful gpu-cpu" not in lines
 
 
 def test_narrow_views_show_only_their_own_worst_row():
     records = {"1": _timed_job("1", 3600, gpu_util=0.0, gpus=2, cores=8, cpu_seconds=0),
                "2": _timed_job("2", 3600, gpu_util=5.0, gpus=1, cores=4, cpu_seconds=0)}
-    assert set(_worst_lines(records, view="gpu")) == {"Worst GPU"}
-    assert set(_worst_lines(records, view="cpu")) == {"Worst CPU"}
-    assert set(_worst_lines(records)) == {"Worst GPU", "Worst CPU", "Worst both"}
+    assert set(_worst_lines(records, view="gpu")) == {"Wasteful GPU"}
+    assert set(_worst_lines(records, view="cpu")) == {"Wasteful CPU"}
+    assert set(_worst_lines(records)) == {"Wasteful GPU", "Wasteful CPU", "Wasteful gpu-cpu"}
+
+
+def test_wasteful_headings_state_their_own_criteria():
+    """Every heading -- single-metric and combined -- names the cutoff it used,
+    not a bare number the reader has to look up, so it stays true after a site
+    tunes config.toml. The cutoff is `wasteful` (default 2%) -- the same edge
+    --ts --classify's own "wasteful" tier is graded against."""
+    records = {
+        "gpuhog": _timed_job("gpuhog", 3600, gpu_util=0.0, gpus=10, cores=2,
+                             cpu_seconds=6480),
+        "cpuhog": _timed_job("cpuhog", 3600, gpu_util=95.0, gpus=1, cores=100,
+                             cpu_seconds=0),
+        "both": _timed_job("both", 3600, gpu_util=0.0, gpus=4, cores=40,
+                           cpu_seconds=0),
+    }
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=True, time_weighted=True), out)
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    text = out.getvalue()
+    assert "Wasteful GPU (" in text and "GPU < 2%" in text
+    assert "Wasteful CPU (" in text and "CPU < 2%" in text
+    assert "Wasteful gpu-cpu (" in text and "GPU < 2%, CPU < 2%" in text
+
+
+def test_a_custom_wasteful_cutoff_changes_membership_and_the_heading():
+    """A site-tuned `wasteful` moves both the Wasteful row's membership and its
+    printed criteria -- the one definition --ts --classify also reads."""
+    from jobscope.config import Thresholds
+    # GPU% 0 (always wasteful); CPU% 6 -- wasteful at a cutoff of 8, not at 2.
+    records = {"1": _timed_job("1", 3600, gpu_util=0.0, gpus=1, cores=10,
+                               cpu_seconds=int(0.06 * 3600 * 10)),
+               "2": _timed_job("2", 3600, gpu_util=90.0, gpus=1, cores=1,
+                               cpu_seconds=int(0.9 * 3600))}
+
+    def worst(thresholds):
+        out = io.StringIO()
+        renderer = report.SummaryRenderer(
+            CTX, RenderOptions(view="all", header=True, time_weighted=True,
+                              thresholds=thresholds), out)
+        renderer.add(list(records), records, {})
+        renderer.finish()
+        return out.getvalue()
+
+    default = worst(Thresholds())
+    assert "Wasteful gpu-cpu" not in default          # CPU% 6 is not wasteful at 2%
+    assert "Wasteful CPU" not in default
+
+    widened = worst(Thresholds(defaults={"wasteful": 8}))
+    assert "Wasteful gpu-cpu" in widened and "GPU < 8%, CPU < 8%" in widened
+    assert "Wasteful CPU" in widened and "CPU < 8%" in widened
+
+    # And tuning CPU% alone moves only CPU%'s side of the row, which is the whole
+    # point of the edges being per metric.
+    cpu_only = worst(Thresholds(by_metric={"CPU%": {"wasteful": 8.0}}))
+    assert "Wasteful CPU" in cpu_only and "CPU < 8%" in cpu_only
+    assert "Wasteful gpu-cpu" in cpu_only and "GPU < 2%, CPU < 8%" in cpu_only
+
+
+def test_the_power_heading_states_watts_not_percent():
+    records = {"a": _power_job("a", 3600, None, gpu_util=90.0, cpu_seconds=0),
+               "b": _power_job("b", 7200, None, gpu_util=90.0, cpu_seconds=0)}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", header=True, show_dcgm=True, time_weighted=True),
+        out, specs=DEFAULT_SPECS)
+    renderer.add(list(records), records,
+                 {j: ({"POWER_W": 50.0, "SM_ACT%": 90.0}, {}) for j in records})
+    renderer.finish()
+    assert "POWER < 100W" in out.getvalue()
 
 
 def _power_job(jid, seconds, watts, gpu_util=50.0, gpus=1, cores=2, cpu_seconds=None):
@@ -1223,7 +1447,7 @@ def _power_job(jid, seconds, watts, gpu_util=50.0, gpus=1, cores=2, cpu_seconds=
 
 
 def _worst_with_power(records, watts, **kw):
-    """Worst rows for `records`, with per-job POWER_W taken from `watts`."""
+    """``_wasteful_blocks`` of a table with per-job POWER_W taken from `watts`."""
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view=kw.get("view", "all"), header=True, show_dcgm=True,
@@ -1233,8 +1457,7 @@ def _worst_with_power(records, watts, **kw):
             for j in records}
     renderer.add(list(records), records, dcgm)
     renderer.finish()
-    return {ln.split("(")[0].strip(): ln.split(":", 1)[1]
-            for ln in out.getvalue().splitlines() if ln.startswith("Worst")}
+    return _wasteful_blocks(out.getvalue())
 
 
 def test_power_waste_is_gpu_hours_below_the_floor():
@@ -1248,7 +1471,7 @@ def test_power_waste_is_gpu_hours_below_the_floor():
                "busy": _power_job("busy", 50 * 3600, None)}
     rows = _worst_with_power(records, {"long_idle": 73.0, "short_idle": 73.0,
                                       "busy": 300.0})
-    power = rows["Worst POWER"]
+    power = rows["Wasteful POWER"]
     assert power.index("long_idle") < power.index("short_idle")
     # The 300 W job is green, so it is absent however large it is.
     assert "busy" not in power
@@ -1270,7 +1493,10 @@ def _worst_block(records, **kw):
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view=kw.get("view", "gpu"), header=True,
                            time_weighted=True, color=kw.get("color", False),
-                           thresholds=kw.get("thresholds")), out)
+                           thresholds=kw.get("thresholds"),
+                           worst_jobs=kw.get("worst_jobs", report.DEFAULT_WORST_JOBS),
+                           long_running=kw.get("long_running",
+                                               report.LONG_RUNNING)), out)
     renderer.add(list(records), records, {})
     renderer.finish()
     lines, keep = [], False
@@ -1287,22 +1513,25 @@ def test_the_worst_rows_group_jobs_under_their_owner():
     """One user usually owns several of the worst jobs; naming them once says more."""
     records = {"a": _owned("a", "avenkat", 4 * 3600, 0.0),
                "b": _owned("b", "avenkat", 3 * 3600, 1.0),
-               "c": _owned("c", "binxu", 3600, 2.0)}
-    gpu = [ln for ln in _worst_block(records) if ln.startswith("Worst GPU")]
-    assert len(gpu) == 1 and "avenkat|" in gpu[0]
-    assert gpu[0].count("avenkat") == 1          # named once, not per job
-    assert "a:" in gpu[0] and "b:" in gpu[0]
+               "c": _owned("c", "binxu", 3600, 1.4)}
+    block = _worst_block(records)
+    i = next(i for i, ln in enumerate(block) if ln.startswith("Wasteful GPU"))
+    first = block[i + 1]
+    assert first.lstrip().startswith("avenkat|")
+    assert first.count("avenkat") == 1           # named once, not per job
+    assert "a:" in first and "b:" in first
     # The second user continues on its own line, under the same column.
-    following = _worst_block(records)[1]
+    following = block[i + 2]
     assert following.lstrip().startswith("binxu|")
-    assert following.index("binxu") == gpu[0].index("avenkat")
+    assert following.index("binxu") == first.index("avenkat")
 
 
 def test_each_entry_carries_value_wasted_and_elapsed():
     records = {"a": _owned("a", "u1", 2 * 3600, 0.0, gpus=3),
                "b": _owned("b", "u2", 3600, 5.0)}
-    gpu = [ln for ln in _worst_block(records) if ln.startswith("Worst GPU")][0]
-    assert "a:0%:6h(2:00:00)" in gpu            # 3 GPUs x 2h all idle
+    block = _worst_block(records)
+    i = next(i for i, ln in enumerate(block) if ln.startswith("Wasteful GPU"))
+    assert "a:0%:6h(2:00:00)" in block[i + 1]     # 3 GPUs x 2h all idle
 
 
 def test_jobs_over_three_hours_are_tinted_red():
@@ -1328,12 +1557,12 @@ def test_a_long_entry_list_wraps_under_the_user_column():
 
 
 def test_a_worst_row_per_named_metric_in_a_fixed_order():
-    # Red in all four, so every row has something to print.
-    records = {"a": _power_job("a", 3600, None, gpu_util=2.0, cpu_seconds=0),
+    # Wasteful in all four, so every row has something to print.
+    records = {"a": _power_job("a", 3600, None, gpu_util=1.0, cpu_seconds=0),
                "b": _power_job("b", 7200, None, gpu_util=1.0, cpu_seconds=0)}
-    rows = _worst_with_power(records, {"a": 73.0, "b": 74.0}, sm={"a": 1.0, "b": 2.0})
-    assert list(rows) == ["Worst GPU", "Worst SM", "Worst POWER", "Worst CPU",
-                          "Worst both", "Worst all"]
+    rows = _worst_with_power(records, {"a": 73.0, "b": 74.0}, sm={"a": 1.0, "b": 1.0})
+    assert list(rows) == ["Wasteful GPU", "Wasteful SM", "Wasteful POWER", "Wasteful CPU",
+                          "Wasteful gpu-cpu", "Wasteful all"]
 
 
 def test_the_four_metric_row_prints_every_component_share():
@@ -1342,11 +1571,12 @@ def test_the_four_metric_row_prints_every_component_share():
                "b": _power_job("b", 7200, None, gpu_util=0.0, cpu_seconds=0)}
     rows = _worst_with_power(records, {"a": 73.0, "b": 73.0}, sm={"a": 0.0, "b": 0.0})
     # Four tagged values, each under its cutoff -- which is why the job qualified.
-    # Power carries its unit, since watts are not a percentage.
-    assert "gpu0/sm0/pw73W/cpu0" in rows["Worst all"]
+    # Power carries its unit (watts); the percentage metrics carry theirs too, so
+    # none of these ever reads as a band index or rank.
+    assert "gpu0%/sm0%/pw73W/cpu0%" in rows["Wasteful all"]
     # The two-metric row names only its two.
-    assert "gpu0/cpu0" in rows["Worst both"]
-    assert "sm" not in rows["Worst both"] and "pw" not in rows["Worst both"]
+    assert "gpu0%/cpu0%" in rows["Wasteful gpu-cpu"]
+    assert "sm" not in rows["Wasteful gpu-cpu"] and "pw" not in rows["Wasteful gpu-cpu"]
 
 
 def _power_stats(watts):
@@ -1364,7 +1594,7 @@ def _power_stats(watts):
     # Stop at the blank line: section 2 repeats the same metric names as bars.
     table = itertools.takewhile(bool, lines[start + 1:])
     return {ln.split()[0]: ln for ln in table
-            if not ln.startswith(("Worst", "Jobs"))}
+            if not ln.startswith(("Wasteful", "Jobs"))}
 
 
 def test_power_gets_a_stats_table_row():
@@ -1401,7 +1631,7 @@ def test_a_metric_with_no_red_job_prints_no_worst_row():
     records = {"a": _power_job("a", 3600, None, gpu_util=90.0),
                "b": _power_job("b", 7200, None, gpu_util=80.0)}
     rows = _worst_with_power(records, {"a": 400.0, "b": 500.0}, sm={"a": 60.0, "b": 70.0})
-    assert "Worst GPU" not in rows and "Worst POWER" not in rows
+    assert "Wasteful GPU" not in rows and "Wasteful POWER" not in rows
     # CPU% is 50 against a cutoff of 10, so that row is absent too, and with no
     # metric wasting anything the combined rows cannot be computed either.
     assert rows == {}
@@ -1414,7 +1644,7 @@ def test_no_worst_line_when_nothing_is_red():
     renderer.add(list(records), records, {})
     renderer.finish()
     # No label at all, not merely the old "Worst:" spelling.
-    assert "Worst" not in out.getvalue()
+    assert "Wasteful" not in out.getvalue()
 
 
 def test_the_block_follows_the_cpu_view_to_cores():
@@ -1565,7 +1795,7 @@ _ESC = re.compile(r"\033\[[0-9;]*m")
 
 def _thresholds():
     from jobscope.config import Thresholds
-    return Thresholds(red=10, power_w=100)
+    return Thresholds()
 
 
 def _render_colored(records, color=True, csv=False, dcgm_data=None, show_dcgm=False):
@@ -2092,7 +2322,25 @@ def test_the_category_edges(best, category):
 
     Not uniform: "below 2%" excludes 2, where every band above it includes its top.
     """
-    assert report.band_of(best) == category
+    assert _thresholds().tier("GPU%", best) == category
+
+
+def test_the_best_metric_is_the_best_band_not_the_biggest_number():
+    """With per-metric edges the same reading means different things: 4% is above
+    GPU%'s 2% wasteful edge and below CPU%'s 5% one, so magnitude cannot order them
+    and classify() has to compare the bands themselves."""
+    from jobscope.config import Thresholds
+    t = Thresholds(by_metric={"CPU%": {"wasteful": 5.0}})
+    # CPU% is the larger number but the worse band; GPU% decides.
+    assert report.classify({"GPU%": 4.0, "CPU%": 4.5}, t) == "inefficient"
+    # And with nothing to beat it, CPU%'s own band is the verdict.
+    assert report.classify({"CPU%": 4.5}, t) == "wasteful"
+
+
+def test_a_unit_with_no_measured_metric_is_wasteful():
+    """Reachable: a CPU-only job in a combined sweep has no GPU metric to judge.
+    No measurement is no evidence of work, which is what banding a 0.0 used to say."""
+    assert report.classify({}, _thresholds()) == "wasteful"
 
 
 def test_the_category_is_the_best_metric_not_the_worst():
@@ -2100,16 +2348,18 @@ def test_the_category_is_the_best_metric_not_the_worst():
 
     The same rule as "every metric is below X", read from the other end.
     """
-    assert report.classify({"GPU%": 0.0, "SM_ACT%": 0.0, "DRAM%": 45.0}) == "good"
-    assert report.classify({"GPU%": 0.0, "SM_ACT%": 0.0, "DRAM%": 0.0}) == "wasteful"
+    t = _thresholds()
+    assert report.classify({"GPU%": 0.0, "SM_ACT%": 0.0, "DRAM%": 45.0}, t) == "good"
+    assert report.classify({"GPU%": 0.0, "SM_ACT%": 0.0, "DRAM%": 0.0}, t) == "wasteful"
 
 
 def test_power_is_ignored_without_a_floor_to_check_it_against():
     """The old, power-blind call shape: no power/floor args means no cap at all."""
-    assert report.classify({"GPU%": 0.0}) == "wasteful"     # whatever the watts
-    assert report.classify({"GPU%": 45.0}) == "good"
-    assert report.classify({"GPU%": 45.0}, power=50.0) == "good"     # floor missing
-    assert report.classify({"GPU%": 45.0}, floor=100.0) == "good"    # power missing
+    t = _thresholds()
+    assert report.classify({"GPU%": 0.0}, t) == "wasteful"     # whatever the watts
+    assert report.classify({"GPU%": 45.0}, t) == "good"
+    assert report.classify({"GPU%": 45.0}, t, power=50.0) == "good"     # floor missing
+    assert report.classify({"GPU%": 45.0}, t, floor=100.0) == "good"    # power missing
 
 
 @pytest.mark.parametrize("verdict,best", [
@@ -2117,18 +2367,48 @@ def test_power_is_ignored_without_a_floor_to_check_it_against():
 ])
 def test_idle_power_caps_a_healthy_verdict_at_inefficient(verdict, best):
     """A duty-cycle-style metric can read busy while the card draws idle watts."""
-    assert report.classify({"GPU%": best}) == verdict          # uncapped, for contrast
-    assert report.classify({"GPU%": best}, power=67.0, floor=100.0) == "inefficient"
+    t = _thresholds()
+    assert report.classify({"GPU%": best}, t) == verdict          # uncapped, for contrast
+    assert report.classify({"GPU%": best}, t, power=67.0, floor=100.0) == "inefficient"
 
 
 def test_idle_power_never_upgrades_an_already_worse_verdict():
     """The cap only pushes a verdict down; it cannot promote wasteful to inefficient."""
-    assert report.classify({"GPU%": 1.0}, power=67.0, floor=100.0) == "wasteful"
+    assert report.classify({"GPU%": 1.0}, _thresholds(),
+                           power=67.0, floor=100.0) == "wasteful"
 
 
 def test_power_at_or_above_the_floor_does_not_cap():
-    assert report.classify({"GPU%": 45.0}, power=100.0, floor=100.0) == "good"
-    assert report.classify({"GPU%": 45.0}, power=219.5, floor=100.0) == "good"
+    t = _thresholds()
+    assert report.classify({"GPU%": 45.0}, t, power=100.0, floor=100.0) == "good"
+    assert report.classify({"GPU%": 45.0}, t, power=219.5, floor=100.0) == "good"
+
+
+def test_classify_combined_splits_only_the_worst_band():
+    """CPU idle (<2%) plus GPU idle (<2%) -> wasteful-cpu-gpu; CPU busy -> wasteful-gpu."""
+    t = _thresholds()
+    assert report.classify_combined({"GPU%": 0.5}, 1.0, t) == "wasteful-cpu-gpu"
+    assert report.classify_combined({"GPU%": 0.5}, 95.0, t) == "wasteful-gpu"
+
+
+def test_classify_combined_missing_cpu_data_is_the_less_alarming_label():
+    assert report.classify_combined({"GPU%": 0.5}, None, _thresholds()) == "wasteful-gpu"
+
+
+def test_classify_combined_leaves_non_worst_verdicts_alone():
+    """CPU never touches a verdict better than wasteful, whatever its own value."""
+    t = _thresholds()
+    for cpu in (0.0, 1.0, 50.0, None):
+        assert report.classify_combined({"GPU%": 45.0}, cpu, t) == "good"
+        assert report.classify_combined({"GPU%": 25.0}, cpu, t) == "average"
+        assert report.classify_combined({"GPU%": 15.0}, cpu, t) == "needs improvement"
+        assert report.classify_combined({"GPU%": 5.0}, cpu, t) == "inefficient"
+
+
+def test_classify_combined_still_caps_on_power():
+    """The POWER_W cap (classify()'s own) still applies before the CPU split."""
+    assert report.classify_combined({"GPU%": 45.0}, 95.0, _thresholds(),
+                                    power=50.0, floor=100.0) == "inefficient"
 
 
 def test_gmem_takes_no_part_in_the_verdict():
@@ -2188,6 +2468,77 @@ def test_the_categories_are_listed_worst_first():
     assert order == ["wasteful", "needs improvement", "good"]
 
 
+def test_every_tier_heading_enumerates_its_own_metrics_and_range():
+    """Not just the worst tier -- "needs improvement"/"good" are as
+    self-explanatory as "wasteful", each stating the metrics judged and range."""
+    jobs = {"1": {"GPU%": 90, "SM_ACT%": 80, "GMEM%": 1, "POWER_W": 400},
+            "2": {"GPU%": 0.5, "SM_ACT%": 0.1, "GMEM%": 1, "POWER_W": 70},
+            "3": {"GPU%": 15, "SM_ACT%": 12, "GMEM%": 1, "POWER_W": 300}}
+    text = _classify(jobs, show_all=True)
+    assert "wasteful (GPU% <2%, SM_ACT% <2%)" in text
+    assert "needs improvement (best of GPU%, SM_ACT%: 10-20%)" in text
+    assert "good (best of GPU%, SM_ACT%: >40%)" in text
+
+
+def test_a_combined_series_uses_the_split_categories_worst_first():
+    """CPU% coexisting with real GPU metrics switches classify onto
+    COMBINED_CATEGORIES -- worst split by whether CPU is also idle."""
+    jobs = {"1": {"GPU%": 90, "CPU%": 80},           # good
+            "2": {"GPU%": 0.5, "CPU%": 1.0},         # wasteful-cpu-gpu (CPU idle too)
+            "3": {"GPU%": 0.5, "CPU%": 90.0},        # wasteful-gpu (CPU busy)
+            "4": {"GPU%": 15, "CPU%": 1.0}}          # needs improvement
+    text = _classify(jobs, columns=("GPU%", "CPU%"))
+    order = [ln.strip().split(" (")[0] for ln in text.splitlines()
+             if ln.startswith("  ") and not ln.startswith("    ") and ln.endswith("jobs")]
+    assert order == ["wasteful-cpu-gpu", "wasteful-gpu", "needs improvement", "good"]
+    # CPU% is described (it splits the worst band) but never listed as a voting
+    # metric -- "by best of" names only what actually votes.
+    header = text.splitlines()[0]
+    assert "by best of GPU%" in header
+    assert "CPU% splits the worst band" in header
+    assert "by best of GPU%, CPU%" not in header and "by best of CPU%" not in header
+
+
+def test_the_split_worst_tiers_state_the_cpu_side_of_the_split():
+    """The whole distinction between the two split tiers is CPU%'s own state, so
+    the heading says it explicitly rather than leaving a reader to infer it."""
+    jobs = {"1": {"GPU%": 0.5, "CPU%": 1.0},         # wasteful-cpu-gpu
+            "2": {"GPU%": 0.5, "CPU%": 90.0}}        # wasteful-gpu
+    text = _classify(jobs, columns=("GPU%", "CPU%"))
+    assert "wasteful-cpu-gpu (GPU% <2%, CPU% <2%)" in text
+    assert "wasteful-gpu (GPU% <2%, CPU% >=2%)" in text
+
+
+def test_a_combined_series_ranks_by_gpu_percent_not_cpu():
+    """Within one category, jobs sort by the GPU metric, ascending -- not by CPU%
+    and not by jobid (a job with a "later" id but lower GPU% still lists first).
+    Both jobs share the same (busy) CPU%, so both land in "wasteful-gpu" -- the
+    same category -- which is what lets this isolate the ranking key from the
+    category split tested above."""
+    jobs = {"9": {"GPU%": 1.5, "CPU%": 90.0}, "1": {"GPU%": 0.2, "CPU%": 90.0}}
+    text = _classify(jobs, columns=("GPU%", "CPU%"), show_all=True)
+    rows = [ln for ln in text.splitlines() if ln.strip().startswith(("9", "1"))]
+    assert [r.split()[0] for r in rows] == ["1", "9"]     # 0.2 before 1.5
+
+
+def test_a_combined_series_shows_cpu_percent_but_it_does_not_vote():
+    jobs = {"1": {"GPU%": 50, "CPU%": 3}}
+    text = _classify(jobs, columns=("GPU%", "CPU%"), show_all=True)
+    assert "good" in text and "CPU%" in text     # displayed
+    assert "by best of GPU%" in text             # but not part of the vote
+
+
+def test_a_cpu_only_series_still_uses_the_plain_categories():
+    """CPU% with no other GPU metric present stays on the ordinary path -- there
+    is nothing for it to be "combined" with."""
+    jobs = {"1": {"CPU%": 0.5}}
+    text = _classify(jobs, columns=("CPU%",))
+    assert "wasteful-cpu-gpu" not in text and "wasteful-gpu" not in text
+    order = [ln.strip().split(" (")[0] for ln in text.splitlines()
+             if ln.startswith("  ") and not ln.startswith("    ") and ln.endswith("jobs")]
+    assert order == ["wasteful"]
+
+
 def test_the_csv_is_jobid_user_metrics_label():
     """The shape asked for: plain values, the label last."""
     jobs = {"1": {"GPU%": 0.4, "SM_ACT%": 0.0, "GMEM%": 90, "POWER_W": 73,
@@ -2221,7 +2572,7 @@ _FLOORS = {"NVIDIA RTX PRO 6000 Blackwell Server Edition": 330,
 
 def _per_model_thresholds():
     from jobscope.config import Thresholds
-    return Thresholds(red=10, power_w=100, power_w_by_model=_FLOORS)
+    return Thresholds(power_w=100, power_w_by_model=_FLOORS)
 
 
 def _per_model_options(**kw):
@@ -2395,3 +2746,116 @@ def test_the_identity_columns_and_their_values_stay_in_step():
         for multi in (False, True):
             assert len(report.unit_headers(level, multi)) == \
                 len(report.unit_values(level, multi, key, found)), (level, multi)
+
+
+# --- the palette: colour is decoration, buckets are data ---------------------
+
+def test_a_configured_palette_changes_the_tint():
+    from jobscope.config import Palette
+    try:
+        report.set_palette(Palette(colors={"inefficient": "magenta"}))
+        assert report.tint("x", "red") == "\033[35mx\033[0m"      # the bucket follows
+        assert report.tint("x", "inefficient") == "\033[35mx\033[0m"   # so does the tier
+    finally:
+        report.set_palette(Palette())
+
+
+def test_the_band_keys_and_the_csv_schema_do_not_follow_the_palette():
+    """The three bucket names are identifiers, not colours: they key
+    EfficiencyTally.bands and name columns in the --csv output, so a script reading
+    that output must not break because someone recoloured the display."""
+    from jobscope.config import Palette
+    records = {"1": _gpu_job("1", {"0": 5.0}), "2": _gpu_job("2", {"0": 90.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", csv=True, header=True,
+                          thresholds=_thresholds()), out)
+    try:
+        report.set_palette(Palette(colors={"wasteful": "cyan", "inefficient": "cyan",
+                                          "average": "magenta", "good": "magenta"}))
+        renderer.add(list(records), records, {})
+        renderer.finish()
+    finally:
+        report.set_palette(Palette())
+    text = out.getvalue()
+    assert "red=" in text and "yellow=" in text and "green=" in text
+    assert "cyan=" not in text and "magenta=" not in text
+    assert report.SummaryRenderer.STAT_HEADERS[2:] == ("RED", "YELLOW", "GREEN")
+
+
+def test_an_unknown_role_leaves_the_text_alone():
+    """A palette is decoration; losing a colour is not worth losing a report over."""
+    assert report.tint("x", "nonsense") == "x"
+    assert report.tint("x", "") == "x"
+
+
+def test_the_long_running_highlight_is_its_own_role():
+    """It is not a tier -- it marks an entry whose job ran past long_running -- so a
+    site can colour it apart from the bands."""
+    from jobscope.config import Palette
+    records = {"long": _owned("long", "u1", 4 * 3600, 0.0),
+               "brief": _owned("brief", "u1", 60, 0.0)}
+    try:
+        report.set_palette(Palette(colors={"long_running": "magenta"}))
+        block = "".join(_worst_block(records, color=True, thresholds=_thresholds()))
+    finally:
+        report.set_palette(Palette())
+    assert "\033[35mlong:" in block
+    assert "\033[35mbrief:" not in block
+
+
+# --- [defaults] worst_jobs / long_running ------------------------------------
+
+def test_worst_jobs_caps_how_many_each_row_lists():
+    records = {n: _owned(n, "u1", i * 3600, 0.0)
+               for i, n in enumerate(["a", "b", "c", "d"], start=1)}
+    for cap, expected in ((2, 2), (4, 4)):
+        block = _worst_block(records, worst_jobs=cap)
+        entries = sum(ln.count(":0%:") for ln in block)
+        assert entries == expected, (cap, block)
+
+
+def test_long_running_decides_which_entries_are_highlighted():
+    # Two jobs: a single-job selection has no Problem-jobs section to look at.
+    records = {"long": _owned("long", "u1", 3600, 0.0),
+               "other": _owned("other", "u2", 3600, 1.0)}
+    plain = "".join(_worst_block(records, color=True, thresholds=_thresholds(),
+                                 long_running=2 * 3600))
+    lit = "".join(_worst_block(records, color=True, thresholds=_thresholds(),
+                              long_running=600))
+    assert report._SGR["long_running"] + "long:" not in plain   # an hour is not long
+    assert report._SGR["long_running"] + "long:" in lit         # ten minutes is
+
+
+# --- [metrics] reaches the summary table ------------------------------------
+
+def test_the_summary_profiling_block_follows_the_configured_metrics():
+    from jobscope.dcgm import specs_named
+    records = {"1": _gpu_job("1", {"0": 50.0})}
+    dcgm = {"1": ({"SM_ACT%": 40.0, "TENSOR%": 5.0, "DRAM%": 9.0, "POWER_W": 200.0}, {})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", show_dcgm=True, header=True), out,
+        specs=specs_named(["gpu", "sm_act", "power", "mem", "memtot"]))
+    renderer.add(list(records), records, dcgm)
+    renderer.finish()
+    header = next(ln for ln in out.getvalue().splitlines() if ln.startswith("JOBID"))
+    assert "SM_ACT%" in header and "POWER_W" in header
+    assert "TENSOR%" not in header and "DRAM%" not in header
+    # GPU% and GMEM% keep their own fixed columns, from the blob.
+    assert "GPU%" in header and "GMEM%" in header
+
+
+def test_the_detail_view_keeps_its_fixed_columns_whatever_metrics_say():
+    """--per-gpu's rows are addressed by position, so its width is not free. This
+    pins the asymmetry the docs promise."""
+    records = {"1": _gpu_job("1", {"0": 50.0})}
+    out = io.StringIO()
+    renderer = report.DetailRenderer(
+        CTX, RenderOptions(view="all", show_dcgm=True, header=True))
+    renderer.out = out
+    renderer.add(list(records), records, {})
+    renderer.finish()
+    text = out.getvalue()
+    for header in ("SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"):
+        assert header in text, header

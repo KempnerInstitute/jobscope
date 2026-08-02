@@ -8,8 +8,8 @@ assembles a dict in exactly the shape :mod:`jobscope.blob` decodes.
 
 Producing the blob's own shape -- rather than a parallel set of numbers -- is the
 point: :func:`jobscope.blob.blob_metrics` and :func:`jobscope.blob.blob_detail`
-then work unchanged, and so do the summary and detail views, ``--csv``, ``plot``
-and ``--diagnose``.
+then work unchanged, and so do the summary and detail views, ``--csv`` and
+``plot``.
 
 Two details are easy to get wrong:
 

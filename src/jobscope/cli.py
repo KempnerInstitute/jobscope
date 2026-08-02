@@ -3,7 +3,7 @@
 The argument tree has one axis per level, so that every option composes with every
 selection::
 
-    jobscope [MODE] [scope] [filters] [granularity] [columns] [--diagnose] [output]
+    jobscope [MODE] [scope] [filters] [granularity] [columns] [output]
 
 ``MODE`` is the first positional and answers *which jobs*: ``running`` (the
 default), ``finished``, or one or more explicit ``JOBID``s. The granularity and
@@ -24,9 +24,10 @@ import sys
 from typing import List, Optional, Tuple
 
 from . import __version__, config, plot
-from .dcgm import ALL_SPECS, DEFAULT_SPECS
+from .dcgm import DCGM_HEADERS
 from .errors import JobscopeError
 from .live import format_duration, parse_duration
+from . import report
 from .report import (
     DetailRenderer,
     RenderOptions,
@@ -172,9 +173,11 @@ def build_parser():
                        const="job", dest="stats",
                        help="the same, pooled across every node and GPU the job held")
     shape.add_argument("--classify", action="store_true",
-                       help="--ts: group the jobs into efficiency categories -- wasteful "
-                            "<2%%, inefficient 2-10%%, needs improvement 10-20%%, average "
-                            "20-40%%, good >40%%, by each one's best metric")
+                       help="--ts: group the jobs into efficiency categories -- "
+                            "wasteful, inefficient, needs improvement, average, good "
+                            "-- by each one's best metric. The cutoffs are per metric "
+                            "and come from [thresholds.timeslice] in your config; each "
+                            "heading states the ones it used")
     shape.add_argument("--all-categories", "--all_categories", dest="all_categories",
                        action="store_true",
                        help="--classify: list the 'good' jobs too, instead of counting them")
@@ -197,11 +200,6 @@ def build_parser():
     # still runs, with one note, as the deprecated subcommand aliases do.
     shape.add_argument("--plot-avgeff", "--plot_avgeff", dest="plot_avgeff",
                        action="store_true", help=argparse.SUPPRESS)
-    shape.add_argument("--diagnose", action="store_true",
-                       help="add an advisory DIAG column")
-    shape.add_argument("--diag-short", dest="diag_short", type=int, default=None,
-                       metavar="SECONDS",
-                       help="jobs shorter than this get DIAG=short (default from config)")
 
     out = report.add_argument_group("output")
     out.add_argument("-n", "--noheader", dest="header", action="store_false",
@@ -245,8 +243,6 @@ def build_parser():
                             help="describe the DCGM metric catalog instead of the columns")
     p_describe.add_argument("--ext", "--extended", dest="ext", action="store_true",
                             help="with --dcgm, describe the full metric catalog")
-    p_describe.add_argument("--diagnose", action="store_true",
-                            help="also print the DIAG legend")
     p_describe.set_defaults(func=handle_describe)
 
     p_config = subparsers.add_parser(
@@ -322,7 +318,7 @@ def _inert_dests(args) -> set:
         # emit_timeseries drops these with a note; the series has no host, advisory or
         # aggregate columns to put them in, and nothing is plotted. --nodename is not
         # among them: the series carries a NODE column, so the filter applies.
-        hide.update({"view", "diagnose", "diag_short", "per_gpu", "no_plot"})
+        hide.update({"view", "per_gpu", "no_plot"})
         if args.plot_ts:
             # raises / exclusive / both noted as ignored below
             hide.update({"csv", "ts", "stats", "classify"})
@@ -338,9 +334,7 @@ def _inert_dests(args) -> set:
         # All three summarize a series, so all three raise without one.
         hide.update({"stats", "classify", "all_categories"})
     if args.view == "cpu":
-        # show_dcgm goes false, so the spec list is never built and DIAG has no GPU
-        # metric to advise on.
-        hide.update({"dcgm", "diagnose", "diag_short"})
+        hide.add("dcgm")            # show_dcgm goes false, so no spec list is built
     if args.csv:
         hide.update({"no_color", "no_plot"})  # both already inert for a CSV
     return hide
@@ -424,7 +418,12 @@ def _apply_config(args) -> config.Config:
     path = getattr(args, "config_path", None)
     if path:
         config.set_config(config.load_config(path=path))
-    return config.get_config()
+    cfg = config.get_config()
+    # Every command that renders goes through here first, and tint() is called from
+    # too many places to hand a palette to each -- so the colours are installed once,
+    # here, rather than threaded.
+    report.set_palette(cfg.palette)
+    return cfg
 
 
 def _timeout(args, cfg: config.Config):
@@ -511,12 +510,12 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
     days = args.days
     if mode == FINISHED and days is None and args.lastn is None \
             and not args.starttime and not args.endtime:
-        days = 1        # the default window for finished jobs
+        days = cfg.defaults.days    # the default window for finished jobs
 
     return Request(
         mode=mode, jobids=jobids,
         days=days, lastn=args.lastn, starttime=args.starttime, endtime=args.endtime,
-        state=args.state or DEFAULT_STATE, user=user, all_users=args.all_users,
+        state=args.state or cfg.defaults.state, user=user, all_users=args.all_users,
         account=args.account, partition=args.partition,
         min_elapsed=_min_elapsed(args, cfg), average=args.avg,
     )
@@ -630,11 +629,11 @@ def _plot_timeseries(text: str, args) -> None:
     window = _ts_window(args)
     print("job %s  %s%s" % (jobids[0], nodes[0] if nodes else "?",
                             "  last %s" % format_duration(window) if window else ""))
-    # --dcgm/--ext widened the emitted CSV to the extended catalog; chart all of
-    # it rather than the fixed default subset, or the extra columns bought by
-    # --ext would never appear on the chart.
+    # The CSV is already curated to exactly the metrics --ts resolved to show
+    # (KEY_SPECS, ALL_SPECS, or CPU%/MEM%), so charting everything present in it
+    # is always correct -- there is no narrower in-CSV subset left to fall back to.
     plot.run(plot.default_args(kind="line", by="metric", columns=True,
-                               no_color=args.no_color, all=args.dcgm),
+                               no_color=args.no_color, all=True),
              fobj=io.StringIO(text))
 
 
@@ -677,43 +676,54 @@ def handle_report(args) -> None:
         raise JobscopeError("--nodename needs --per-gpu or --ts, the views whose rows "
                             "carry a node name")
     view = args.view or "all"
-    diagnose = args.diagnose
-    if view == "cpu" and diagnose and not args.ts:
-        # --ts reports its own dropped flags below; do not say it twice.
-        print("note: --diagnose describes GPU use; ignoring it for --cpu", file=sys.stderr)
-        diagnose = False
     show_dcgm = view in ("all", "gpu")
-    specs = ALL_SPECS if args.dcgm else DEFAULT_SPECS
+    # Which metrics each view collects, from [metrics] -- the built-in lists when a
+    # site has not said otherwise. --per-gpu is the exception and keeps its fixed
+    # four profiling columns: DETAIL_COLUMNS carries row indices that have to agree
+    # with the blob tuple and with DCGM_HEADERS' order, so its width is not free.
+    specs = list(cfg.metrics.extended if args.dcgm else cfg.metrics.summary)
+    # --ts's own view resolution: combined (GPU + CPU%/MEM% together) is the
+    # default -- bare --ts behaves as --cpu --dcgm --ts would. --cpu alone (no
+    # --dcgm) narrows to CPU-only; --dcgm alone (no --cpu) narrows to GPU-only,
+    # unchanged from before this feature. --gpu has no say in this -- it stays the
+    # inert flag it already was under --ts (see the notes below). Whenever the
+    # mode is not cpu-only, the GPU catalog is [metrics] timeseries (a small curated
+    # set by default), widening to [metrics] extended only when --dcgm/--ext was
+    # actually passed -- printing/plotting everything is opt-in, not the default.
+    ts_cpu_only = (view == "cpu" and not args.dcgm)
+    ts_combined = not ts_cpu_only and not (view != "cpu" and args.dcgm)
+    ts_specs = specs if ts_cpu_only else list(
+        cfg.metrics.extended if args.dcgm else cfg.metrics.timeseries)
     # Weight the mean by resource-time wherever the values already span whole
     # runtimes: a finished job's blob does, an explicit job ID's reconstruction
     # does, and running --avg does. The bare running view is a snapshot of one
     # moment, which no amount of elapsed time makes representative.
     time_weighted = request.mode != RUNNING or request.average
     options = RenderOptions(
-        view=view, show_dcgm=show_dcgm, diagnose=diagnose, csv=args.csv,
-        header=args.header,
-        min_runtime=(args.diag_short if args.diag_short is not None
-                     else cfg.defaults.min_runtime),
+        view=view, show_dcgm=show_dcgm, csv=args.csv, header=args.header,
         time_weighted=time_weighted, plot_avgeff=not args.no_plot,
         nodename=args.nodename, window=_ts_window(args),
-        color=_want_color(args), thresholds=cfg.thresholds)
+        color=_want_color(args), combined=ts_combined,
+        worst_jobs=cfg.defaults.worst_jobs,
+        long_running=parse_duration(cfg.defaults.long_running),
+        # The two views have their own band tables and inherit nothing from each
+        # other, because a two-hour window that catches a checkpoint pause should
+        # not answer to a nineteen-hour job's bar. --plot_ts set args.ts above, so
+        # this one test covers every time-series path.
+        thresholds=(cfg.timeslice_thresholds if args.ts else cfg.thresholds))
 
     if args.ts:
-        # --cpu switches --ts to the CPU/MEM cgroup series instead of GPU/DCGM, so
-        # it is no longer a dropped flag; --gpu and --diagnose still are, and the
-        # extended DCGM catalog has nothing to widen on a CPU series.
-        for flag, on in (("--gpu", view == "gpu"), ("--diagnose", args.diagnose)):
-            if on:
-                print("note: %s does not apply to --ts (a per-scrape metric series)" % flag,
-                      file=sys.stderr)
-        if view == "cpu" and args.dcgm:
-            print("note: --dcgm/--ext does not apply to --cpu --ts (no DCGM catalog to widen)",
+        # --gpu still does not apply to --ts; --cpu/--dcgm are resolved above into
+        # ts_cpu_only/ts_combined, so neither is a dropped flag any more (--cpu
+        # --dcgm together, or neither, now both mean combined).
+        if view == "gpu":
+            print("note: --gpu does not apply to --ts (a per-scrape metric series)",
                   file=sys.stderr)
         if not (args.plot_ts or args.stats or args.classify):
-            emit_timeseries(request, cfg, timeout, workers, specs, args.step, options)
+            emit_timeseries(request, cfg, timeout, workers, ts_specs, args.step, options)
             return
         buffer = io.StringIO()
-        emit_timeseries(request, cfg, timeout, workers, specs, args.step, options,
+        emit_timeseries(request, cfg, timeout, workers, ts_specs, args.step, options,
                         out=buffer)
         if args.plot_ts:
             _plot_timeseries(buffer.getvalue(), args)
@@ -744,10 +754,12 @@ def handle_plot(args) -> None:
 
 
 def handle_describe(args) -> None:
+    cfg = _apply_config(args)
     if args.dcgm:
-        describe_dcgm(ALL_SPECS if args.ext else DEFAULT_SPECS)
+        wide = cfg.metrics.extended
+        describe_dcgm(list(wide if args.ext else cfg.metrics.summary), extended=wide)
     else:
-        describe(args.diagnose)
+        describe()
 
 
 def handle_config(args) -> None:
@@ -760,7 +772,57 @@ def handle_config(args) -> None:
         return
     exists = os.path.exists(str(path))
     print("config path: %s%s" % (path, "" if exists else " (not present; using built-in defaults)"))
+    cfg = config.load_config(str(path)) if exists else config.load_config()
+    for view, bands in (("summary", cfg.thresholds),
+                        ("timeslice", cfg.timeslice_thresholds)):
+        print()
+        _print_bands(view, bands)
+    print()
+    print("[metrics]  (GPU/DCGM only; CPU%/MEM% are fixed)")
+    for view in ("summary", "timeseries", "extended"):
+        specs = getattr(cfg.metrics, view)
+        print("  %-11s %s" % (view, " ".join(s.header for s in specs)))
+    print("  --per-gpu keeps its own fixed four: %s"
+          % " ".join(DCGM_HEADERS))
+    print()
+    print("[colors]")
+    for role in config.COLOR_ROLES:
+        print("  %-13s %s" % (role, cfg.palette.colors[role]))
+    print()
+    print("[defaults]")
+    for key, value in sorted(vars(cfg.defaults).items()):
+        print("  %-13s %s" % (key, value))
+    print()
     print("print an example with: jobscope config --example")
+
+
+def _print_bands(view: str, bands) -> None:
+    """One view's resolved band table, as a grid of edges by metric.
+
+    Resolved, not as written: the two views inherit nothing from each other and a
+    metric inherits the default for any edge it does not name, so what a site wrote
+    and what it is graded by are two different things. This is the one place to see
+    the second.
+    """
+    print("[thresholds.%s]" % view)
+    rows = [("default", bands.edges())]
+    rows += [(header, bands.edges(header)) for header in sorted(bands.by_metric)]
+    name_width = max([len(name) for name, _edges in rows] + [len("metric")])
+    widths = [max(len(key), max(len("%g" % r[i]) for _n, r in rows))
+              for i, key in enumerate(config.EDGE_KEYS)]
+
+    def line(name, cells):
+        return "  %-*s  %s" % (name_width, name,
+                               "  ".join(c.rjust(widths[i]) for i, c in enumerate(cells)))
+
+    print(line("metric", config.EDGE_KEYS))
+    for name, edges in rows:
+        print(line(name, ["%g" % edge for edge in edges]))
+    print("  POWER_W is a watt floor, not a band: red below %g W, green above."
+          % bands.power_w)
+    if bands.power_w_by_model:
+        for model, floor in sorted(bands.power_w_by_model.items()):
+            print("    %s: %g W" % (model, floor))
 
 
 def main(argv=None) -> None:

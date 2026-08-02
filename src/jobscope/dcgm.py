@@ -43,10 +43,13 @@ class MetricSpec:
 METRICS: List[MetricSpec] = [
     MetricSpec("duty", "GPU%", "nvidia_gpu_duty_cycle", 1, 0, "default", uuid_label="uuid"),
     MetricSpec("smact", "SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE", 100, 1, "default"),
-    MetricSpec("occ", "OCC%", "DCGM_FI_PROF_SM_OCCUPANCY", 100, 1, "default"),
     MetricSpec("tensor", "TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE", 100, 1, "default"),
     MetricSpec("dram", "DRAM%", "DCGM_FI_PROF_DRAM_ACTIVE", 100, 1, "default"),
     MetricSpec("power", "POWER_W", "DCGM_FI_DEV_POWER_USAGE", 1, 0, "default"),
+    # OCC% sits here, right after the default group, so the extended catalog's
+    # column order keeps DEFAULT_SPECS as a contiguous prefix -- it is the first
+    # "all"-only metric rather than interspersed among the default ones.
+    MetricSpec("occ", "OCC%", "DCGM_FI_PROF_SM_OCCUPANCY", 100, 1, "all"),
     MetricSpec("engine", "ENGINE%", "DCGM_FI_PROF_GR_ENGINE_ACTIVE", 100, 1, "all"),
     MetricSpec("hmma", "HMMA%", "DCGM_FI_PROF_PIPE_TENSOR_HMMA_ACTIVE", 100, 1, "all"),
     MetricSpec("imma", "IMMA%", "DCGM_FI_PROF_PIPE_TENSOR_IMMA_ACTIVE", 100, 1, "all"),
@@ -141,6 +144,12 @@ SPEC_BY_HEADER: Dict[str, MetricSpec] = {spec.header: spec for spec in METRICS}
 DEFAULT_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group == "default"]
 ALL_SPECS: List[MetricSpec] = list(METRICS)
 
+# The --ts/--plot_ts/--classify default when --dcgm/--ext is not given: a smaller,
+# curated set than DEFAULT_SPECS (which also carries the GPU memory pair) --
+# deliberately narrower, for the time-series family specifically.
+_KEY_SPEC_KEYS = ("duty", "smact", "tensor", "dram", "power")
+KEY_SPECS: List[MetricSpec] = [spec for spec in DEFAULT_SPECS if spec.key in _KEY_SPEC_KEYS]
+
 # Quantities the sacct blob already supplies, which the summary and detail views
 # render from it directly (GPU%, GMEM%, and GPU-MEM). Excluded from those views'
 # DCGM columns so a job does not get two columns for one number -- and for a
@@ -155,6 +164,70 @@ DCGM_HEADERS: List[str] = [spec.header for spec in GPU_SUMMARY_SPECS]
 DCGM_BLOB_HEADERS: Tuple[str, ...] = tuple(
     [spec.header for spec in METRICS if spec.key in BLOB_BACKED_KEYS]
     + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(BLOB_BACKED_KEYS)])
+
+# Position in METRICS, so a resolved selection can be put back into catalog order.
+_CATALOG_ORDER: Dict[str, int] = {spec.key: i for i, spec in enumerate(METRICS)}
+
+
+def _alias_table() -> Dict[str, MetricSpec]:
+    """Every name a config may call a metric by -> its spec.
+
+    Derived from the catalog rather than spelled out, so a metric added to
+    ``METRICS`` is nameable immediately. Three forms per spec: its ``key``
+    (``duty``, ``smact``, ``power``), its lowercased ``header`` (``gpu%``,
+    ``power_w``), and the header without a trailing ``%`` (``gpu``, ``sm_act``).
+    That makes the short lowercase names ``[thresholds]`` already takes -- ``gpu``,
+    ``sm_act``, ``dram`` -- work here too, which is what a reader expects.
+
+    A collision would silently shadow one spec with another, so it is an error at
+    import rather than a mystery at render: the catalog is ours to keep unambiguous.
+    """
+    table: Dict[str, MetricSpec] = {}
+    for spec in METRICS:
+        lower = spec.header.lower()
+        for alias in (spec.key, lower, lower.rstrip("%")):
+            if table.setdefault(alias, spec) is not spec:
+                raise AssertionError(
+                    "metric alias %r is claimed by both %s and %s"
+                    % (alias, table[alias].header, spec.header))
+    return table
+
+
+SPEC_ALIASES: Dict[str, MetricSpec] = _alias_table()
+# One canonical name per metric, to offer when a config gets one wrong. The header
+# without its "%" where there is one (``gpu``, ``sm_act``) and the key otherwise
+# (``power``, not ``power_w``; ``energy``, not ``energy_kwh``) -- the shorter and
+# more readable of the two forms in each case. Every alias still resolves.
+METRIC_NAMES: Tuple[str, ...] = tuple(
+    spec.header.lower()[:-1] if spec.header.endswith("%") else spec.key
+    for spec in METRICS)
+
+
+def spec_named(name: str) -> Optional[MetricSpec]:
+    """The spec ``name`` refers to, or None when the catalog has no such metric."""
+    return SPEC_ALIASES.get(str(name).strip().lower())
+
+
+def specs_named(names, live: bool = False) -> List[MetricSpec]:
+    """Resolve metric names to specs, in catalog order, dropping duplicates.
+
+    Catalog order rather than the order given, because column order is a property
+    of the report and not of how a site happened to list them -- and because it is
+    what keeps a narrower selection a prefix of a wider one, which several callers
+    rely on to tell "default" from "extended".
+
+    ``live`` drops metrics whose reducer is ``delta`` (ENERGY_kWh): the running view
+    synthesizes a jobstats-shaped blob and a counter difference has no meaning over
+    a window that has not finished. Unknown names are the caller's to validate --
+    :func:`spec_named` returns None and this skips them.
+    """
+    found = {}
+    for name in names:
+        spec = spec_named(name)
+        if spec is None or (live and spec.reducer == "delta"):
+            continue
+        found[spec.key] = spec
+    return [found[key] for key in sorted(found, key=_CATALOG_ORDER.__getitem__)]
 
 DESCRIPTIONS: Dict[str, str] = {
     "GPU%": "NVML's duty cycle: the fraction of the run during which at least one kernel was "

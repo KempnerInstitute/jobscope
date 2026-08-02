@@ -190,6 +190,62 @@ def test_emit_timeseries_dispatches_to_cpu_for_a_running_request(monkeypatch):
     assert len(calls) == 1
 
 
+def test_emit_timeseries_dispatches_to_combined_for_a_finished_request(monkeypatch, gpu_record):
+    """The new default (combined) view must skip both the GPU-only and CPU-only
+    emitters for a historical selection."""
+    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: (["100"], "x"))
+    monkeypatch.setattr(select_mod, "fetch", lambda i, t: {"100": gpu_record})
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: object())
+    calls = []
+    monkeypatch.setattr(select_mod, "combined_timeseries",
+                        lambda *a, **k: calls.append(("combined", a, k)))
+
+    def boom(*a, **k):
+        raise AssertionError("neither GPU-only nor CPU-only should run when combined")
+    monkeypatch.setattr(select_mod, "dcgm_timeseries", boom)
+    monkeypatch.setattr(select_mod, "cpu_timeseries", boom)
+
+    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+                    None, RenderOptions(view="all", combined=True))
+    assert len(calls) == 1
+
+
+def test_emit_timeseries_combined_wins_over_cpu_only_when_both_are_set(monkeypatch, gpu_record):
+    """--cpu --dcgm resolves to view=="cpu" AND combined=True (cli.py's truth
+    table) -- combined must win, not the cpu-only branch."""
+    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: (["100"], "x"))
+    monkeypatch.setattr(select_mod, "fetch", lambda i, t: {"100": gpu_record})
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: object())
+    calls = []
+    monkeypatch.setattr(select_mod, "combined_timeseries",
+                        lambda *a, **k: calls.append(("combined", a, k)))
+
+    def boom(*a, **k):
+        raise AssertionError("cpu-only must not run when combined is also set")
+    monkeypatch.setattr(select_mod, "cpu_timeseries", boom)
+
+    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+                    None, RenderOptions(view="cpu", combined=True))
+    assert len(calls) == 1
+
+
+def test_emit_timeseries_dispatches_to_combined_for_a_running_request(monkeypatch):
+    """The new default (combined) view must skip live_cpu_timeseries for a live
+    selection, and still do GPU discovery (unlike cpu-only)."""
+    _patch_live(monkeypatch)
+    calls = []
+    monkeypatch.setattr(select_mod, "live_combined_timeseries",
+                        lambda *a, **k: calls.append(("live_combined", a, k)))
+
+    def boom(*a, **k):
+        raise AssertionError("live_cpu_timeseries must not run when combined")
+    monkeypatch.setattr(select_mod, "live_cpu_timeseries", boom)
+
+    emit_timeseries(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+                    None, RenderOptions(view="all", combined=True))
+    assert len(calls) == 1
+
+
 def test_no_matching_jobs_returns_none(monkeypatch, capsys):
     monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: ([], "last 1 day"))
     assert resolve(Request(mode=FINISHED, user="nobody"), _cfg(), None, 1, None) is None
