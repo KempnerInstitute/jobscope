@@ -5,6 +5,29 @@
 # falls back to the built-in defaults shown here. Print this template any time
 # with: jobscope config --example
 
+# [site] -- the label conventions your exporters use.
+#
+# Only needed when porting jobscope to a cluster whose Prometheus labels series
+# differently. Every one of these fails *silently* if wrong, which is why
+# 'jobscope doctor' checks each against the live server: read the wrong host label
+# and every node shows as "?", the cgroup divisor lookup misses, and CPU%/MEM%
+# come back blank with no error.
+#
+# Run 'jobscope doctor' first -- it names the label your server actually uses.
+#
+# [site]
+# host_label   = "host"        # the node a series came from. A stock Prometheus
+#                              # usually calls this "instance".
+# jobid_label  = "jobid"       # the label cgroup_* series carry the job id in
+# gpu_job_join = "nvidia_gpu_jobId"
+#                              # the series whose *value* is the job id holding
+#                              # each card. GPU metrics carry no job label, so
+#                              # this is the only join to Slurm.
+# cgroup_selector = "step='',task=''"
+#                              # appended to every cgroup_* query, to pin the
+#                              # job-level cgroup rather than a per-step one.
+#                              # ='' also matches the label being absent.
+
 [prometheus]
 # Endpoint that serves the DCGM (DCGM_FI_*) and nvidia_gpu_* series that jobstats
 # scrapes. Required for the GPU and DCGM views; the CPU-only and offline (blob)

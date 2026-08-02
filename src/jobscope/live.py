@@ -315,7 +315,7 @@ def discover_gpus(client: PrometheusClient, jobs: Dict[int, LiveJob],
     docstring.
     """
     try:
-        series = client.query("nvidia_gpu_jobId", int(time.time()), timeout)
+        series = client.query(config.gpu_join(), int(time.time()), timeout)
     except Exception as exc:
         raise JobscopeError("could not read GPU ownership from Prometheus: %s" % exc)
 
@@ -334,7 +334,7 @@ def discover_gpus(client: PrometheusClient, jobs: Dict[int, LiveJob],
         if not uuid or minor is None:
             continue
         try:
-            found.append((uuid, jobid, labels.get("host", "").split(":")[0], int(minor),
+            found.append((uuid, jobid, config.host_of(labels), int(minor),
                           labels.get("name", "")))
         except ValueError:
             continue
@@ -435,7 +435,8 @@ def clip_to_job(spec: MetricSpec, raw_jobid: int) -> Optional[str]:
     label sets differ (``UUID``/``Hostname``/``gpu``), so PromQL's ``and`` can never
     match there and the window alone has to bound them.
     """
-    return "nvidia_gpu_jobId == %d" % raw_jobid if spec.uuid_label == "uuid" else None
+    return ("%s == %d" % (config.gpu_join(), raw_jobid)
+            if spec.uuid_label == "uuid" else None)
 
 
 def add_derived(results: LiveMetrics, specs: List[MetricSpec]) -> None:

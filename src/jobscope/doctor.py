@@ -350,32 +350,42 @@ def check_prometheus(out, cfg, timeout: Optional[float]):
 def check_labels(out, client, timeout: Optional[float]) -> None:
     """Whether the join labels the collectors assume are the ones in use here.
 
-    The collectors read ``host`` off every series and split a ``:port`` from it. A
-    stock Prometheus labels that ``instance``, and the failure mode is silent --
-    every node reads ``?`` and the cgroup divisor lookup misses, so CPU%/MEM% come
-    back blank with no error. Better to say so here.
+    Checks the labels ``[site]`` actually configures, not a hardcoded set -- so a
+    site that has overridden one gets told whether the override is *right*, which is
+    the only version of this check worth running.
+
+    Worth running because every one of these fails silently. The collectors read the
+    host label off every series and split a ``:port`` from it; a stock Prometheus
+    calls that ``instance``, and reading the wrong one leaves every node as ``?``,
+    misses the cgroup divisor lookup, and returns blank CPU%/MEM% with no error at
+    all. The ``instance`` fallback is suggested by name because that is the single
+    most likely correct answer.
     """
-    checks = (("host", "cgroup_cpus", "node names on cgroup series"),
-              ("jobid", "cgroup_cpus", "job join for cgroup series"),
-              ("uuid", "nvidia_gpu_jobId", "GPU join for NVML series"))
+    site = config.get_config().site
+    checks = ((site.host_label, "cgroup_cpus", "node names on cgroup series"),
+              (site.jobid_label, "cgroup_cpus", "job join for cgroup series"),
+              ("uuid", site.gpu_job_join, "GPU join for NVML series"))
     now = int(time.time())
     seen: List[str] = []
-    for label, metric, what in checks:
+    for label, metric, _what in checks:
         try:
             found = client.query("count by (%s) (%s)" % (label, metric), now, timeout)
         except Exception:
             found = []
-        labelled = [s for s in found if s.get("metric", {}).get(label)]
-        if labelled:
+        if [s for s in found if s.get("metric", {}).get(label)]:
             seen.append("%s %s" % (label, OK))
             continue
         alt = ""
-        if label == "host":
-            try:
-                if client.query("count by (instance) (%s)" % metric, now, timeout):
-                    alt = " -- this server uses 'instance'; set [site] host_label"
-            except Exception:
-                pass
+        if label == site.host_label:
+            for candidate in ("instance", "host", "node", "nodename"):
+                if candidate == label:
+                    continue
+                try:
+                    if client.query("count by (%s) (%s)" % (candidate, metric), now, timeout):
+                        alt = " -- this server uses %r; set [site] host_label" % candidate
+                        break
+                except Exception:
+                    continue
         seen.append("%s %s%s" % (label, ABSENT, alt))
     _line(out, "labels", ";  ".join(seen))
     _cont(out, "(%s)" % ", ".join(what for _l, _m, what in checks))

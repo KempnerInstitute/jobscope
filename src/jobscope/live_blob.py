@@ -24,6 +24,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Tuple
 
+from . import config
 from .prometheus import PrometheusClient
 from .sacct import JobRecord
 
@@ -48,8 +49,9 @@ _GPU_FIELDS: Tuple[Tuple[str, str, str], ...] = (
 
 
 def _host_query(metric: str, reducer: str, raw_jobid: str, duration: int) -> str:
-    return "%s_over_time(%s{jobid='%s',step='',task=''}[%ds])" % (
-        reducer, metric, raw_jobid, duration)
+    site = config.get_config().site
+    return "%s_over_time(%s{%s='%s',%s}[%ds])" % (
+        reducer, metric, site.jobid_label, raw_jobid, site.cgroup_selector, duration)
 
 
 def _host_query_many(metric: str, reducer: str, raw_jobids, duration: int) -> str:
@@ -61,8 +63,10 @@ def _host_query_many(metric: str, reducer: str, raw_jobids, duration: int) -> st
     window (the longest job's) cannot pull another job's samples into the result.
     Values are demultiplexed client-side on the ``jobid`` label.
     """
-    return "%s_over_time(%s{jobid=~\"^(%s)$\",step='',task=''}[%ds])" % (
-        reducer, metric, "|".join(str(j) for j in raw_jobids), duration)
+    site = config.get_config().site
+    return "%s_over_time(%s{%s=~\"^(%s)$\",%s}[%ds])" % (
+        reducer, metric, site.jobid_label, "|".join(str(j) for j in raw_jobids),
+        site.cgroup_selector, duration)
 
 
 def _gpu_query(metric: str, reducer: str, raw_jobid: str, duration: int) -> str:
@@ -72,8 +76,8 @@ def _gpu_query(metric: str, reducer: str, raw_jobid: str, duration: int) -> str:
     and clips the window to the samples it owned them for. Both series come from
     the same exporter, so their label sets match, which PromQL's ``and`` requires.
     """
-    return "%s_over_time((%s and nvidia_gpu_jobId == %s)[%ds:])" % (
-        reducer, metric, raw_jobid, duration)
+    return "%s_over_time((%s and %s == %s)[%ds:])" % (
+        reducer, metric, config.gpu_join(), raw_jobid, duration)
 
 
 # jobstats stores byte counts as integers and utilization to one decimal, and
@@ -90,7 +94,7 @@ def _store_as(field: str, value: float):
 
 
 def _host_of(series: dict) -> str:
-    return str(series["metric"].get("host", "?")).split(":")[0]
+    return config.host_of(series["metric"])
 
 
 def _value(series: dict) -> Optional[float]:
@@ -137,7 +141,7 @@ def host_stats_many(jobs: Dict[int, int], at, client: PrometheusClient,
             if value is None:
                 continue
             try:
-                raw_jobid = int(series["metric"].get("jobid"))
+                raw_jobid = int(series["metric"].get(config.jobid_label()))
             except (TypeError, ValueError):
                 continue
             if raw_jobid not in jobs:

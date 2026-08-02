@@ -24,6 +24,7 @@ itself, so ``denom`` names a blob field.
 from dataclasses import dataclass
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
+from . import config
 from .prometheus import PrometheusClient
 
 # rate()/increase() need several raw samples to be reliable: a range vector sized to
@@ -64,7 +65,9 @@ class CgroupSpec:
         than a per-step one; an ``=''`` matcher also matches the label being absent,
         which is the case on exporters that do not emit it at all.
         """
-        selector = "%s{jobid='%s',step='',task=''}" % (self.metric, raw_jobid)
+        site = config.get_config().site
+        selector = "%s{%s='%s',%s}" % (self.metric, site.jobid_label, raw_jobid,
+                                       site.cgroup_selector)
         if self.kind != "rate":
             return selector
         window = max(step, RATE_LOOKBACK_SCRAPES * sampling_period)
@@ -141,7 +144,7 @@ def specs_named(names) -> List[CgroupSpec]:
 
 
 def _host_of(series: dict) -> str:
-    return str(series["metric"].get("host", "?")).split(":")[0]
+    return config.host_of(series["metric"])
 
 
 def host_series(raw_jobid: str, divisors: Dict[str, Dict[str, float]],

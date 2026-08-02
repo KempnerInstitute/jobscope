@@ -13,7 +13,7 @@ import os
 import re
 import shutil
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Mapping, Optional, Tuple
 
@@ -401,6 +401,56 @@ class Metrics:
 
 
 @dataclass(frozen=True)
+class Site:
+    """The label conventions jobscope's queries assume, so a port needs no patch.
+
+    These are not preferences -- they are facts about how a cluster's exporters
+    label their series, and getting one wrong fails *silently*. A stock Prometheus
+    calls the scrape target ``instance`` where jobstats' exporter calls it ``host``;
+    read the wrong one and every node reads ``?``, the cgroup divisor lookup misses,
+    and CPU%/MEM% come back blank with no error at all. ``jobscope doctor`` checks
+    each of these against the live server for exactly that reason.
+
+    ``cgroup_selector`` is the matcher appended to every ``cgroup_*`` query. It pins
+    the job-level cgroup rather than a per-step one; ``=''`` also matches the label
+    being absent, which is the case on exporters that do not emit it. A site whose
+    exporter labels steps differently overrides the whole matcher rather than
+    guessing at its parts.
+    """
+
+    host_label: str = "host"            # the node a series came from
+    jobid_label: str = "jobid"          # cgroup_*'s job label
+    gpu_job_join: str = "nvidia_gpu_jobId"   # series whose *value* is the job id
+    cgroup_selector: str = "step='',task=''"
+
+
+def gpu_join() -> str:
+    """The series whose *value* is the job id holding each card.
+
+    A function rather than a module constant because ``[site]`` can override it, and
+    a constant read at import time would freeze the default before any config was
+    loaded.
+    """
+    return get_config().site.gpu_job_join
+
+
+def jobid_label() -> str:
+    """The label ``cgroup_*`` series carry their job id in."""
+    return get_config().site.jobid_label
+
+
+def host_of(labels: Mapping[str, str], site: Optional["Site"] = None) -> str:
+    """The node name from a series' labels, port stripped.
+
+    One definition for every collector: the four that each had their own copy of
+    ``labels.get("host", "?").split(":")[0]`` could not be ported without finding
+    all four, and three of them would have failed quietly.
+    """
+    site = get_config().site if site is None else site
+    return str(labels.get(site.host_label, "?")).split(":")[0]
+
+
+@dataclass(frozen=True)
 class Config:
     """Resolved jobscope settings."""
 
@@ -418,6 +468,7 @@ class Config:
     timeslice_thresholds: Thresholds = field(default_factory=Thresholds)
     metrics: "Metrics" = field(default_factory=lambda: Metrics())
     palette: Palette = field(default_factory=Palette)
+    site: "Site" = field(default_factory=lambda: Site())
 
 
 def default_config_path(env: Optional[Mapping[str, str]] = None) -> Path:
@@ -501,6 +552,7 @@ def load_config(path: Optional[str] = None,
         timeslice_thresholds=bands["timeslice"],
         metrics=_metrics(data.get("metrics") or {}),
         palette=_palette(data.get("colors") or {}),
+        site=_site(data.get("site") or {}),
     )
 
 
@@ -529,6 +581,29 @@ def _state_name(raw) -> str:
     except JobscopeError as exc:
         raise JobscopeError("[defaults] state = %r: %s" % (raw, exc))
     return name
+
+
+def _site(table: Mapping) -> Site:
+    """``[site]`` -> a :class:`Site`, rejecting keys it does not understand.
+
+    Unknown keys are an error rather than a shrug: a misspelled ``host_lable`` that
+    parsed silently would leave the default in place and produce a report full of
+    ``?`` nodes, which looks like a broken cluster rather than a typo.
+    """
+    known = {f.name for f in fields(Site)}
+    unknown = sorted(set(table) - known)
+    if unknown:
+        raise JobscopeError(
+            "[site] does not know %s. Valid keys: %s."
+            % (", ".join(repr(k) for k in unknown), ", ".join(sorted(known))))
+    values = {}
+    for name in known:
+        if name in table:
+            raw = table[name]
+            if not isinstance(raw, str) or not raw.strip():
+                raise JobscopeError("[site] %s must be a non-empty string" % name)
+            values[name] = raw.strip()
+    return Site(**values)
 
 
 def _metrics(table: Mapping) -> Metrics:

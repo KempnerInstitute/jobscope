@@ -11,14 +11,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
+from . import config
 from .prometheus import PrometheusClient
 from .sacct import JobRecord
 
-# The series whose *value* is the job id holding each card -- the only join between
-# Slurm's world and the GPU exporters', since neither nvidia_gpu_* nor DCGM_FI_*
-# carries a jobid label. Named once because it is a site convention: an exporter
-# that publishes it under another name is what [site] gpu_job_join will override.
-JOB_SERIES = "nvidia_gpu_jobId"
+# The join between Slurm's world and the GPU exporters' is a series whose *value*
+# is the job id, because neither nvidia_gpu_* nor DCGM_FI_* carries a jobid label.
+# Which series that is, is a site convention -- see config.Site.gpu_job_join, read
+# through config.gpu_join() so a [site] override takes effect.
 
 
 @dataclass(frozen=True)
@@ -499,7 +499,7 @@ def collect_window(per_uuid: Dict[str, dict], specs: List[MetricSpec], uuids: Li
 def _jobid_query(record: JobRecord) -> str:
     cluster = "slurm_cluster='%s'" % record.cluster if record.cluster else ""
     return ("max_over_time((%s{%s} == %s)[%ds:])"
-            % (JOB_SERIES, cluster, record.jobid_raw, record.duration))
+            % (config.gpu_join(), cluster, record.jobid_raw, record.duration))
 
 
 def _gpu_from_series(metric: dict) -> Optional[dict]:
@@ -508,7 +508,7 @@ def _gpu_from_series(metric: dict) -> Optional[dict]:
     if not uuid:
         return None
     return {"uuid": uuid,
-            "node": metric.get("host", "?").split(":")[0],
+            "node": config.host_of(metric),
             "minor": str(metric.get("minor_number", "?")),
             # For the per-model POWER_W floor; "" falls back to global.
             "model": metric.get("name", "")}
@@ -523,7 +523,7 @@ def discover_gpus(record: JobRecord, client: PrometheusClient,
     """The GPUs that ran a job, as ``{uuid, node, minor, model}``, by (node, minor).
 
     Empty for CPU-only jobs or when no GPU samples exist. Joins via
-    :data:`JOB_SERIES`, the same mapping jobstats uses.
+    the site's GPU-join series, the same mapping jobstats uses.
 
     One query per job, and measurement says to keep it that way: answering this for
     a whole selection in one range query is correct but *slower* here, because the
@@ -546,7 +546,7 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
 
     ``({}, {})`` when the job has no GPUs or no samples. ``overall`` is keyed by
     header; ``per_gpu`` is keyed by ``(node, minor)``. Series are joined to the
-    job on UUID via :data:`JOB_SERIES`.
+    job on UUID via the site's GPU-join series.
 
     ``gpus_found`` supplies the job's cards when a caller has already discovered
     them, which skips the discovery round trip. Omit it and this discovers them
@@ -684,7 +684,7 @@ def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],
     **Three batching strategies were measured here and all three lost.** Recorded
     because the reasoning that recommends them is sound and someone will try again:
 
-    * *One range query on* :data:`JOB_SERIES` *for the whole selection's discovery.*
+    * *One range query on the GPU-join series for the whole selection's discovery.*
       Correct -- verified identical UUID sets on 40/40 jobs -- but slower: 2.1s for
       25 jobs and 3.4s for 120 against 0.4s and 1.6s for the per-job pool, because
       it returns one to two million samples in a single serial call.

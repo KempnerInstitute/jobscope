@@ -603,3 +603,62 @@ def test_the_shipped_example_reproduces_the_built_in_behaviour():
     assert dict(cfg.palette.colors) == dict(Palette().colors)
     assert (cfg.defaults.days, cfg.defaults.state, cfg.defaults.worst_jobs,
             cfg.defaults.long_running) == (1, "completed", 3, "3h")
+
+
+# --- [site]: the label conventions a port has to change -------------------
+
+def test_site_defaults_match_what_the_code_used_to_hardcode():
+    """The defaults are the only reason existing installs need no config change."""
+    site = config_module.Site()
+    assert site.host_label == "host"
+    assert site.jobid_label == "jobid"
+    assert site.gpu_job_join == "nvidia_gpu_jobId"
+    assert site.cgroup_selector == "step='',task=''"
+
+
+def test_site_overrides_reach_every_query(hermetic_config, tmp_path):
+    """The point of the section: one edit, and all five query builders follow.
+    Before this each had its own literal, so porting meant finding all of them --
+    and missing one failed silently."""
+    from jobscope.cpu import SPEC_BY_KEY
+    from jobscope.live_blob import _gpu_query, _host_query, _host_query_many
+    path = tmp_path / "c.toml"
+    path.write_text('[site]\nhost_label = "instance"\njobid_label = "slurm_job"\n'
+                    'gpu_job_join = "gpu_job"\ncgroup_selector = "container=\'\'"\n')
+    config_module.set_config(load_config(str(path)))
+    assert "slurm_job='7'" in SPEC_BY_KEY["cpu"].query("7", 300, 60)
+    assert "container=''" in SPEC_BY_KEY["cpu"].query("7", 300, 60)
+    assert "slurm_job='7'" in _host_query("cgroup_cpus", "max", "7", 60)
+    assert 'slurm_job=~"^(7)$"' in _host_query_many("cgroup_cpus", "max", [7], 60)
+    assert "gpu_job == 7" in _gpu_query("nvidia_gpu_duty_cycle", "avg", "7", 60)
+
+
+def test_host_of_reads_the_configured_label_and_strips_the_port(hermetic_config, tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text('[site]\nhost_label = "instance"\n')
+    config_module.set_config(load_config(str(path)))
+    assert config_module.host_of({"instance": "node07:9100"}) == "node07"
+    # The old label is now simply another label, not a fallback.
+    assert config_module.host_of({"host": "node07:9100"}) == "?"
+
+
+def test_host_of_defaults_to_host_with_no_config(hermetic_config):
+    assert config_module.host_of({"host": "node01:9400"}) == "node01"
+
+
+def test_an_unknown_site_key_is_rejected(hermetic_config, tmp_path):
+    """A misspelled key that parsed silently would leave the default in place and
+    produce a report full of '?' nodes -- which reads as a broken cluster."""
+    path = tmp_path / "c.toml"
+    path.write_text('[site]\nhost_lable = "instance"\n')
+    with pytest.raises(JobscopeError) as exc:
+        load_config(str(path))
+    assert "host_lable" in str(exc.value) and "host_label" in str(exc.value)
+
+
+@pytest.mark.parametrize("value", ['""', '"   "', "42", "true"])
+def test_a_site_value_must_be_a_non_empty_string(hermetic_config, tmp_path, value):
+    path = tmp_path / "c.toml"
+    path.write_text("[site]\nhost_label = %s\n" % value)
+    with pytest.raises(JobscopeError):
+        load_config(str(path))
