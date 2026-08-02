@@ -928,6 +928,28 @@ def test_single_job_classification_describes_the_voting_metrics():
     assert "CPU% can vote no higher than inefficient" in text
 
 
+def test_classification_description_names_a_site_configured_ceiling(
+        hermetic_config, tmp_path):
+    """The line must describe the rule the run used, not the built-in default.
+
+    It read config.DEFAULT_VOTE_CEILING directly, so a ceiling added through
+    [classify.ceiling] capped verdicts while going unmentioned -- the one thing a
+    "judged by" line exists to prevent.
+    """
+    from jobscope.classifier import classify_description
+    from jobscope.config import load_config
+
+    path = tmp_path / "c.toml"
+    path.write_text('[classify]\nvote = ["gpu", "sm_act", "cpu"]\n'
+                    '[classify.ceiling]\nsm_act = "average"\n')
+    thresholds = load_config(str(path)).thresholds
+    text = classify_description(["GPU%", "SM_ACT%", "CPU%"], [], thresholds)
+    assert "SM_ACT% can vote no higher than average" in text
+    assert "CPU% can vote no higher than inefficient" in text
+    # GPU% carries no ceiling, so it must not be named as if it did.
+    assert "GPU% can vote" not in text
+
+
 def test_single_job_classification_description_omits_cpu_for_a_gpu_view():
     records = {"1": _gpu_job("1", {"0": 90.0})}
     text = _finish(records, view="gpu")
