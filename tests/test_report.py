@@ -1002,7 +1002,7 @@ def test_the_legend_names_each_metrics_cutoffs_once_they_differ():
     """One sentence cannot be true of the table when the rows are graded
     differently, so it becomes a list -- of the metrics in the table, and of the
     three edges its own RED/YELLOW columns turn on."""
-    from jobscope.config import Thresholds
+    from jobscope.config import Thresholds, power_floors
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True,
@@ -2589,8 +2589,8 @@ _FLOORS = {"NVIDIA RTX PRO 6000 Blackwell Server Edition": 330,
 
 
 def _per_model_thresholds():
-    from jobscope.config import Thresholds
-    return Thresholds(power_w=100, power_w_by_model=_FLOORS)
+    from jobscope.config import Thresholds, power_floors
+    return Thresholds(floors=power_floors(100, _FLOORS))
 
 
 def _per_model_options(**kw):

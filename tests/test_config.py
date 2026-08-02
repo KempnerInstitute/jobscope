@@ -9,6 +9,7 @@ from jobscope.config import (
     Thresholds,
     example_config_text,
     floor_band,
+    power_floors,
     load_config,
     resolve_prometheus,
 )
@@ -267,7 +268,7 @@ def test_power_has_no_yellow_band():
     An absolute floor has no such headroom: at 330 W, twice is 660 W and the card
     that floor exists for tops out near 480, so it could never read green.
     """
-    t = Thresholds(power_w=100, power_w_by_model={"RTX": 330})
+    t = Thresholds(floors=power_floors(100, {"RTX": 330}))
     assert {t.grade("POWER_W", w) for w in (0, 99, 135, 289, 700)} == {"red", "green"}
     assert t.grade("POWER_W", 100) == "green"     # at the floor, not below it
     assert floor_band(480, 330) == "green"        # the case that had no green at all
@@ -281,7 +282,7 @@ def test_power_is_graded_in_watts_not_percent():
     A GPU below the floor is idle, which is the signal a duty cycle cannot fake: a
     job spinning on a trivial kernel reads busy on GPU% and draws idle watts.
     """
-    t = Thresholds(power_w=100)
+    t = Thresholds(floors=power_floors(100))
     assert t.grade("POWER_W", 73) == "red"        # measured idle floor
     assert t.grade("POWER_W", 289) == "green"     # the measured median
 
@@ -402,16 +403,16 @@ def test_the_power_floor_can_differ_per_gpu_model():
 
     One number is wrong at one end or the other, so the floor is looked up per model.
     """
-    t = Thresholds(power_w=100, power_w_by_model={
+    t = Thresholds(floors=power_floors(100, {
         "NVIDIA RTX PRO 6000 Blackwell Server Edition": 330,
-        "Tesla V100-PCIE-32GB": 45})
+        "Tesla V100-PCIE-32GB": 45}))
     assert t.floor_for("NVIDIA RTX PRO 6000 Blackwell Server Edition") == 330
     assert t.floor_for("Tesla V100-PCIE-32GB") == 45
 
 
 @pytest.mark.parametrize("model", ["NVIDIA H100 80GB HBM3", None, ""])
 def test_an_unlisted_or_unknown_model_falls_back_to_the_global_floor(model):
-    t = Thresholds(power_w=100, power_w_by_model={"Tesla V100-PCIE-32GB": 45})
+    t = Thresholds(floors=power_floors(100, {"Tesla V100-PCIE-32GB": 45}))
     assert t.floor_for(model) == 100
 
 

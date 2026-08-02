@@ -86,6 +86,9 @@ DEFAULT_BANDS = {"wasteful": 2.0, "inefficient": 10.0, "improvement": 20.0,
 # SM_ACT% 0.0, the next values were 99-101 W, and the median was 289 W against a
 # 573 W maximum.
 DEFAULT_POWER_W = 100.0
+# The one metric that ships with a floor. Named because several places have to agree
+# on it and it is not a percentage, so it never appears in an edge table.
+POWER_HEADER = "POWER_W"
 
 # The two view-scoped band tables. Each is defined in full or not at all: a config
 # naming only one leaves the other on DEFAULT_BANDS rather than copying across, so
@@ -224,12 +227,21 @@ class Thresholds:
     # ``{header: {edge key: value}}`` for the metrics a site named explicitly. A
     # metric may name only some of its four edges; the rest fall to ``defaults``.
     by_metric: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
-    power_w: float = DEFAULT_POWER_W
-    # Per-GPU-model watt floors, keyed by the exporter's own model string. Idle draw
-    # is hardware, not policy: measured on one cluster it ran from 27 W on a V100 to
-    # 165 W on an RTX PRO 6000, so a single number is wrong at one end or the other.
-    # Empty by default -- see config.example.toml for how to derive a site's values.
-    power_w_by_model: Mapping[str, float] = field(default_factory=dict)
+    # ``{header: {"": global floor, "<gpu model>": that card's floor}}``.
+    #
+    # A *floor* metric is one that can only pull a verdict **down**, never up, which
+    # is a different thing from a tiered percentage and cannot be expressed as one:
+    # under best-of-N voting a metric can only ever raise a verdict. POWER_W is the
+    # built-in case -- a job spinning on a trivial kernel reads busy on GPU% and
+    # draws idle watts, and watts are the one signal a duty cycle cannot fake.
+    #
+    # Per-model because idle draw is hardware, not policy: measured on one cluster it
+    # ran from 27 W on a V100 to 165 W on an RTX PRO 6000, so a single number is
+    # wrong at one end or the other. Keyed on the exporter's exact model string,
+    # which is what is available where the grading happens; normalising model names
+    # would be a second thing to get wrong.
+    floors: Mapping[str, Mapping[str, float]] = field(
+        default_factory=lambda: {POWER_HEADER: {"": DEFAULT_POWER_W}})
 
     def __post_init__(self) -> None:
         # Fill any edge the caller left out, so a partial ``defaults`` -- a TOML that
@@ -238,18 +250,39 @@ class Thresholds:
         if set(self.defaults) != set(DEFAULT_BANDS):
             object.__setattr__(self, "defaults", {**DEFAULT_BANDS, **self.defaults})
 
-    def floor_for(self, model: Optional[str]) -> float:
-        """The watt floor for ``model``, or the global one.
+    def floor_of(self, header: str, model: Optional[str] = None) -> Optional[float]:
+        """``header``'s floor for ``model``, or None if it has no floor at all.
 
-        Matched on the exporter's exact string, which is what is available where the
-        grading happens; normalising model names would be a second thing to get wrong.
+        None rather than zero: "this metric does not cap anything" and "this metric
+        caps at 0 W" are different claims, and a caller that treats a missing floor
+        as 0 would silently stop capping.
         """
-        if model:
-            return float(self.power_w_by_model.get(model, self.power_w))
-        return self.power_w
+        table = self.floors.get(header)
+        if not table:
+            return None
+        if model and model in table:
+            return float(table[model])
+        return float(table[""]) if "" in table else None
+
+    def floor_for(self, model: Optional[str] = None) -> float:
+        """POWER_W's floor for ``model``. The common case, kept as its own name."""
+        found = self.floor_of(POWER_HEADER, model)
+        return DEFAULT_POWER_W if found is None else found
+
+    @property
+    def power_w(self) -> float:
+        """POWER_W's global floor -- the pre-``floors`` spelling, still read widely."""
+        return self.floor_for(None)
+
+    @property
+    def power_w_by_model(self) -> Mapping[str, float]:
+        """POWER_W's per-model floors, without the global entry."""
+        return {model: value
+                for model, value in (self.floors.get(POWER_HEADER) or {}).items()
+                if model}
 
     def for_model(self, model: Optional[str]) -> "Thresholds":
-        """These thresholds with ``POWER_W``'s floor resolved for one card.
+        """These thresholds with every floor resolved for one card.
 
         Binding the model once beats handing it to every grading call. The floor was
         previously an optional argument on four separate methods, and the sites that
@@ -258,8 +291,15 @@ class Thresholds:
         card's. One 165 W sample came out red in the table and green in the cell.
         Resolved here, a caller cannot forget what it never passes.
         """
-        floor = self.floor_for(model)
-        return self if floor == self.power_w else replace(self, power_w=floor)
+        resolved = {}
+        changed = False
+        for header in self.floors:
+            here = self.floor_of(header, model)
+            if here is None:
+                continue
+            resolved[header] = {"": here}
+            changed = changed or here != self.floor_of(header, None)
+        return replace(self, floors=resolved) if changed else self
 
     def edge(self, key: str, header: str = "") -> float:
         """``header``'s value for edge ``key``: its own if set, else the default."""
@@ -315,6 +355,14 @@ class Thresholds:
         if header == "POWER_W":
             return floor_band(value, self.power_w)
         return BUCKET_OF.get(self.tier(header, value), "")
+
+
+def power_floors(default: float = DEFAULT_POWER_W,
+                 by_model: Optional[Mapping[str, float]] = None) -> dict:
+    """A ``floors`` table holding only POWER_W -- the common case, spelled once."""
+    table = {"": float(default)}
+    table.update({str(model): float(value) for model, value in (by_model or {}).items()})
+    return {POWER_HEADER: table}
 
 
 def floor_band(value: float, floor: float) -> str:
@@ -904,8 +952,8 @@ def _band_table(table: Mapping, view: str, power_w: float,
         for stray in strays:
             del by_metric[stray]
 
-    bands = Thresholds(defaults=defaults, by_metric=by_metric, power_w=power_w,
-                       power_w_by_model=by_model)
+    bands = Thresholds(defaults=defaults, by_metric=by_metric,
+                       floors=power_floors(power_w, by_model))
     _check_order(bands, where)
     return bands
 
