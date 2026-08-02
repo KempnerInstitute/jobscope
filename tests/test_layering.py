@@ -11,7 +11,7 @@ Layers, bottom up:
     config, metrics, classifier    policy -- read settings, return decisions
     prometheus                     the client
     blob, cpu, nvml, dcgm,         collectors -- turn a source into numbers
-      slurm, running,
+      slurm, running, timeseries,
       extra_metric, job_ave_stats
     report, plot                   render -- turn numbers into text
     select, cli, doctor            orchestration -- wire the above together
@@ -30,17 +30,15 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "jobscope"
 
 LEAVES = {"errors", "models"}
 POLICY = {"config", "metrics", "classifier"}
-COLLECTORS = {"blob", "cpu", "nvml", "dcgm", "slurm", "running", "extra_metric",
-              "job_ave_stats"}
+COLLECTORS = {"blob", "cpu", "nvml", "dcgm", "slurm", "running", "timeseries",
+              "extra_metric", "job_ave_stats"}
 RENDER = {"report", "plot"}
 
-# report.py still both collects and renders: six of its time-series functions take a
-# PrometheusClient and query inside the render pass (dcgm_timeseries,
-# cpu_timeseries, combined_timeseries, running_cpu_timeseries,
-# running_combined_timeseries and their shared helpers). Splitting collect from
-# render there is a real change, not a move, so it is recorded here rather than
-# quietly tolerated -- the assertion below is that this set does not grow.
-COLLECTS_WHILE_RENDERING = {"report"}
+# Empty, and the test below is what keeps it that way. report.py used to query inside
+# the render pass -- five time-series functions took a PrometheusClient -- so this held
+# {"report"} while that was true. jobscope.timeseries now issues those queries and the
+# renderers take what it yields.
+COLLECTS_WHILE_RENDERING: set = set()
 
 
 def imports_of(stem: str) -> set:
@@ -79,16 +77,19 @@ def test_no_collector_imports_the_render_layer(stem):
 
 @pytest.mark.parametrize("stem", sorted(RENDER))
 def test_the_render_layer_does_not_query_prometheus(stem):
-    """Rendering takes numbers, not a client -- so a report can be tested offline."""
-    if stem in COLLECTS_WHILE_RENDERING:
-        pytest.xfail("%s still collects; see COLLECTS_WHILE_RENDERING" % stem)
+    """Rendering takes numbers, not a client -- so a report can be tested offline.
+
+    It is also what lets --ts stream: the collectors are generators, and a renderer
+    that held the client would have had to choose between querying per job inside its
+    own loop (what it used to do) and buffering the whole sweep.
+    """
     assert "prometheus" not in imports_of(stem)
 
 
-def test_the_collect_while_rendering_exemption_does_not_grow():
-    """New render modules must not inherit report.py's unfinished split."""
+def test_no_render_module_collects():
+    """The exemption this test guards is empty; it must stay that way."""
     offenders = {s for s in RENDER if "prometheus" in imports_of(s)}
-    assert offenders == COLLECTS_WHILE_RENDERING
+    assert offenders == COLLECTS_WHILE_RENDERING == set()
 
 
 @pytest.mark.parametrize("stem", sorted(LEAVES))

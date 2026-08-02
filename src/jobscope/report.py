@@ -11,7 +11,6 @@ import sys
 import textwrap
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -20,9 +19,7 @@ from .blob import GIB, blob_capacity, blob_detail, blob_metrics
 from .config import (
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
-    EDGE_KEYS,
     REPORT_SECTIONS,
-    TIERS,
     Palette,
     Thresholds,
     parse_duration,
@@ -32,7 +29,7 @@ from .config import (
 # kind of waste: a short bad job costs little, whereas hours of idle hardware do
 # not come back. Its entry is highlighted. [defaults] long_running overrides it.
 LONG_RUNNING = parse_duration(DEFAULT_LONG_RUNNING)
-from .cpu import DEFAULT_CGROUP_SPECS, CgroupSpec, host_series
+from .cpu import CgroupSpec, chosen_specs
 from .dcgm import (
     ALL_SPECS,
     DCGM_BLOB_HEADERS,
@@ -42,11 +39,9 @@ from .dcgm import (
     MetricSpec,
     applicable_derived,
     columns_for,
-    discover_gpus,
     format_by_header,
     format_number,
     gpu_minor_key,
-    values_by_key,
 )
 from .classifier import (
     CATEGORIES,
@@ -59,9 +54,7 @@ from .classifier import (
     unceilinged,
 )
 from .errors import JobscopeError
-from .running import Gpu, RunningJob, build_columns, job_sort_key, range_window
-from .cpu import host_stats, host_stats_many
-from .prometheus import PrometheusClient
+from .running import Gpu, RunningJob, build_columns, job_sort_key
 from .slurm import JobRecord, Selection, format_window
 
 
@@ -1669,36 +1662,28 @@ def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
     renderer.finish()
 
 
-def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
-                    specs: List[MetricSpec], client: PrometheusClient,
-                    timeout: Optional[float], options: RenderOptions,
-                    step: Optional[int] = None, out=None) -> None:
+def dcgm_timeseries(collected, specs: List[MetricSpec], options: RenderOptions,
+                    out=None) -> None:
     """Emit the raw per-scrape DCGM time series over the job's window as CSV.
 
-    One row per GPU/timestamp; metrics are de-duplicated by Prometheus name. Each
-    cell is the raw sampled value, scaled for display.
+    One row per GPU/timestamp; each cell is the raw sampled value, scaled for display.
+    ``collected`` is an iterable of :class:`jobscope.timeseries.JobSeries` -- usually
+    the generator, so a partition-wide sweep still renders one job at a time.
     """
     out = out or sys.stdout
-    seen, ts_specs = set(), []
-    for spec in specs:
-        if spec.metric not in seen:
-            seen.add(spec.metric)
-            ts_specs.append(spec)
-    # Query every spec (including hidden ones, which feed a derived column) but
-    # emit the displayed columns, so this header matches `jobscope running --ts`.
+    # Every spec was queried, including the hidden ones feeding a derived column, but
+    # only the displayed ones are emitted -- so this header matches `running --ts`.
     columns = columns_for(specs)
-    derived = applicable_derived(specs)
-    sampling_period = client.sampling_period
     writer = csv.writer(out, lineterminator="\n")
-    nodes_seen, matched, wrote_header = set(), False, False
+    wrote_header = False
 
     def write(row) -> None:
         """Emit *row*, writing the header first if it has not been written yet.
 
-        Lazily, because a --nodename that matches nothing raises below: a header with
-        no rows under it is a CSV that reads as "this node was idle" and confuses
-        `jobscope plot` into "no numeric values". Nothing written is the honest answer,
-        and it is what the running path already does.
+        Lazily, because a --nodename that matches nothing raises: a header with no
+        rows under it is a CSV that reads as "this node was idle" and confuses
+        `jobscope plot` into "no numeric values". Nothing written is the honest
+        answer, and it is what the running path already does.
         """
         nonlocal wrote_header
         if options.header and not wrote_header:
@@ -1707,70 +1692,19 @@ def dcgm_timeseries(jobids: List[str], records: Dict[str, JobRecord],
             wrote_header = True
         writer.writerow(row)
 
-    for jid in jobids:
-        record = records.get(jid)
-        gpus = discover_gpus(record, client, timeout) if record else []
-        if not gpus:
-            print("warn: job %s has no GPU samples" % jid, file=sys.stderr)
-            continue
-        uuid_to = {g["uuid"]: (g["node"], g["minor"], g.get("model", "")) for g in gpus}
-        if options.nodename:
-            # Before the queries, not after: dropping the other nodes' UUIDs here
-            # shrinks the regex, so a 4-node job costs a quarter of the range queries
-            # instead of fetching three nodes' samples to throw them away.
-            nodes_seen.update(node for node, _minor, _model in uuid_to.values())
-            uuid_to = {u: nm for u, nm in uuid_to.items() if nm[0] == options.nodename}
-            if not uuid_to:
-                continue
-            matched = True
-        regex = "^(" + "|".join(uuid_to) + ")$"
-        # --step wins; otherwise never finer than the scrape interval, and coarse
-        # enough to stay under Prometheus' points-per-series cap on a long job.
-        start, span = range_window(record.start, record.end, options.window,
-                                   sampling_period, step)
-        series: Dict[str, dict] = {uuid: {} for uuid in uuid_to}
-        for spec in ts_specs:
-            for result in client.query_range(
-                    '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex),
-                    start, record.end, span, timeout):
-                metric = result["metric"]
-                uuid = metric.get(spec.uuid_label) or metric.get("uuid") or metric.get("UUID")
-                if uuid not in series:
-                    continue
-                for stamp, value in result["values"]:
-                    try:
-                        series[uuid].setdefault(int(stamp), {})[spec.header] = float(value) * spec.scale
-                    except (TypeError, ValueError):
-                        pass
+    for job in collected:
         rows = []  # (node, minor_sort, ts, csv_row)
-        for uuid, (node, minor, model) in uuid_to.items():
-            for stamp in sorted(series[uuid]):
-                cells = series[uuid][stamp]
-                # Recomputed per timestamp, so a ratio like GMEM% tracks growth.
-                keyed = values_by_key(specs, cells)
-                for column in derived:
-                    cells[column.header] = column.fn(keyed)
+        for uuid, (node, minor, model) in job.gpus.items():
+            for stamp in sorted(job.gpu[uuid]):
+                cells = job.gpu[uuid][stamp]
                 rows.append((node, gpu_minor_key(minor), stamp,
-                             [jid, record.user, stamp,
+                             [job.jobid, job.user, stamp,
                               time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
                               node, minor, model]
                              + [format_number(cells.get(h), d, missing="")
                                 for _k, h, d in columns]))
         for _, _, _, row in sorted(rows, key=lambda x: (x[0], x[1], x[2])):
             write(row)
-
-    if options.nodename and not matched:
-        raise no_such_node(options.nodename, nodes_seen)
-
-
-def _cgroup_specs(options: "RenderOptions") -> List[CgroupSpec]:
-    """The cgroup metrics this run's host series should carry.
-
-    The default is the two the summary and detail views have always shown,
-    CPU%/MEM%; ``[metrics.cgroup]`` will widen it.
-    """
-    return list(options.cgroup_specs
-                if options.cgroup_specs is not None else DEFAULT_CGROUP_SPECS)
 
 
 def _cgroup_cells(cells: dict, specs: List[CgroupSpec]) -> List[str]:
@@ -1784,40 +1718,17 @@ def _cgroup_cells(cells: dict, specs: List[CgroupSpec]) -> List[str]:
             for spec in specs]
 
 
-def _cgroup_hosts(nodes: dict, nodename: Optional[str]):
-    """``(divisors, row hosts)`` for a cgroup series over ``nodes``.
-
-    ``divisors`` is the per-node blob dict itself -- each spec names the field that
-    divides it -- and the row set is the hosts that resolved a *core* count. That
-    second part is deliberate and unchanged: it is also the "did anything resolve"
-    guard, so a node reporting memory but no cores yields no rows, exactly as it
-    did before the catalog existed.
-    """
-    hosts = [host for host, node in nodes.items() if node.get("cpus")]
-    if nodename is None:
-        return nodes, hosts
-    if nodename not in hosts:
-        return nodes, []
-    return {nodename: nodes[nodename]}, [nodename]
-
-
-def cpu_timeseries(jobids: List[str], records: Dict[str, JobRecord],
-                   client: PrometheusClient, timeout: Optional[float],
-                   options: RenderOptions, step: Optional[int] = None, out=None) -> None:
-    """Emit the raw per-scrape CPU%/MEM% cgroup series over the job's window as CSV.
+def cpu_timeseries(collected, options: RenderOptions, out=None) -> None:
+    """Emit the raw per-scrape cgroup series over the job's window as CSV.
 
     One row per node/timestamp -- there is no GPU dimension, so GPU/MODEL are left
-    blank, keeping the schema :func:`dcgm_timeseries` writes so `jobscope plot`/
-    `--classify`/`--stats-per-job` need no changes to read it. The per-host
-    cpus/total_memory divisors come straight from the job's own stored blob
-    (``record.stats``), which a finished job already has -- no extra Prometheus
-    query needed to resolve them.
+    blank, keeping the schema :func:`dcgm_timeseries` writes so `jobscope plot`,
+    ``--classify`` and ``--stats-per-job`` need no changes to read it.
     """
     out = out or sys.stdout
     writer = csv.writer(out, lineterminator="\n")
-    sampling_period = client.sampling_period
-    cgroup = _cgroup_specs(options)
-    nodes_seen, matched, wrote_header = set(), False, False
+    cgroup = chosen_specs(options.cgroup_specs)
+    wrote_header = False
 
     def write(row) -> None:
         nonlocal wrote_header
@@ -1826,70 +1737,32 @@ def cpu_timeseries(jobids: List[str], records: Dict[str, JobRecord],
             wrote_header = True
         writer.writerow(row)
 
-    for jid in jobids:
-        record = records.get(jid)
-        nodes = (record.stats or {}).get("nodes") if record else None
-        if not nodes and record and record.jobid_raw and record.duration:
-            # A record here is usually a finished job with its blob already decoded,
-            # but an explicit -j ID can also return a job that is still RUNNING (no
-            # blob yet) -- rebuild just the two divisors from Prometheus, the same
-            # way job_ave_stats.synthesize_stats() rebuilds the whole blob for the running
-            # view (CPU-seconds/RSS themselves still come from our own range query
-            # below, since they need per-timestamp granularity this does not give).
-            nodes = host_stats(record.jobid_raw, record.duration, record.end, client, timeout)
-        if not nodes:
-            print("warn: job %s has no CPU/memory records" % jid, file=sys.stderr)
-            continue
-        if options.nodename:
-            nodes_seen.update(h for h, n in nodes.items() if n.get("cpus"))
-        divisors, hosts = _cgroup_hosts(nodes, options.nodename)
-        if not hosts:
-            continue
-        if options.nodename:
-            matched = True
-        start, span = range_window(record.start, record.end, options.window,
-                                   sampling_period, step)
-        series = host_series(record.jobid_raw, divisors, start, record.end, span,
-                             sampling_period, client, timeout, cgroup)
+    for job in collected:
         rows = []  # (host, ts, csv_row)
-        for host in hosts:
-            for stamp in sorted(series.get(host, {})):
-                cells = series[host][stamp]
+        for host in job.hosts:
+            for stamp in sorted(job.host.get(host, {})):
                 rows.append((host, stamp,
-                             [jid, record.user, stamp,
+                             [job.jobid, job.user, stamp,
                               time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
                               host, "", ""]
-                             + _cgroup_cells(cells, cgroup)))
+                             + _cgroup_cells(job.host[host][stamp], cgroup)))
         for _, _, row in sorted(rows, key=lambda x: (x[0], x[1])):
             write(row)
 
-    if options.nodename and not matched:
-        raise no_such_node(options.nodename, nodes_seen)
 
+def combined_timeseries(collected, specs: List[MetricSpec], options: RenderOptions,
+                        out=None) -> None:
+    """``dcgm_timeseries`` plus each row's node's cgroup columns appended -- the
+    default ``--ts`` view: GPU/DCGM metrics and CPU%/MEM% together in one series.
 
-def combined_timeseries(jobids: List[str], records: Dict[str, JobRecord],
-                        specs: List[MetricSpec], client: PrometheusClient,
-                        timeout: Optional[float], options: RenderOptions,
-                        step: Optional[int] = None, out=None) -> None:
-    """``dcgm_timeseries`` plus each row's node's CPU%/MEM% appended -- the default
-    ``--ts`` view: GPU/DCGM columns and CPU%/MEM% together in one series.
-
-    GPU and CPU samples share one window per job (the same ``range_window()`` call
-    feeds both queries), so they land on the same timestamp grid with no separate
-    alignment step needed.
+    GPU and host samples shared one window per job when they were collected, so they
+    are already on the same timestamp grid and a row is a plain dict lookup.
     """
     out = out or sys.stdout
-    seen, ts_specs = set(), []
-    for spec in specs:
-        if spec.metric not in seen:
-            seen.add(spec.metric)
-            ts_specs.append(spec)
     columns = columns_for(specs)
-    derived = applicable_derived(specs)
-    sampling_period = client.sampling_period
-    cgroup = _cgroup_specs(options)
+    cgroup = chosen_specs(options.cgroup_specs)
     writer = csv.writer(out, lineterminator="\n")
-    nodes_seen, matched, wrote_header = set(), False, False
+    wrote_header = False
 
     def write(row) -> None:
         nonlocal wrote_header
@@ -1899,73 +1772,25 @@ def combined_timeseries(jobids: List[str], records: Dict[str, JobRecord],
             wrote_header = True
         writer.writerow(row)
 
-    for jid in jobids:
-        record = records.get(jid)
-        gpus = discover_gpus(record, client, timeout) if record else []
-        if not gpus:
-            print("warn: job %s has no GPU samples" % jid, file=sys.stderr)
-            continue
-        uuid_to = {g["uuid"]: (g["node"], g["minor"], g.get("model", "")) for g in gpus}
-        if options.nodename:
-            nodes_seen.update(node for node, _minor, _model in uuid_to.values())
-            uuid_to = {u: nm for u, nm in uuid_to.items() if nm[0] == options.nodename}
-            if not uuid_to:
-                continue
-            matched = True
-        regex = "^(" + "|".join(uuid_to) + ")$"
-        start, span = range_window(record.start, record.end, options.window,
-                                   sampling_period, step)
-        series: Dict[str, dict] = {uuid: {} for uuid in uuid_to}
-        for spec in ts_specs:
-            for result in client.query_range(
-                    '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex),
-                    start, record.end, span, timeout):
-                metric = result["metric"]
-                uuid = metric.get(spec.uuid_label) or metric.get("uuid") or metric.get("UUID")
-                if uuid not in series:
-                    continue
-                for stamp, value in result["values"]:
-                    try:
-                        series[uuid].setdefault(int(stamp), {})[spec.header] = float(value) * spec.scale
-                    except (TypeError, ValueError):
-                        pass
-
-        # CPU/MEM: same divisor resolution as cpu_timeseries(), plus a per-job
-        # host_series() call keyed by node, looked up per GPU row below.
-        nodes = (record.stats or {}).get("nodes") if record else None
-        if not nodes and record and record.jobid_raw and record.duration:
-            nodes = host_stats(record.jobid_raw, record.duration, record.end, client, timeout)
-        nodes = nodes or {}
-        divisors, hosts = _cgroup_hosts(nodes, None)
-        cpu_series = (host_series(record.jobid_raw, divisors, start, record.end, span,
-                                  sampling_period, client, timeout, cgroup)
-                     if hosts else {})
-
+    for job in collected:
         rows = []  # (node, minor_sort, ts, csv_row)
-        for uuid, (node, minor, model) in uuid_to.items():
-            node_cpu = cpu_series.get(node, {})
-            for stamp in sorted(series[uuid]):
-                cells = series[uuid][stamp]
-                keyed = values_by_key(specs, cells)
-                for column in derived:
-                    cells[column.header] = column.fn(keyed)
-                cpu_cells = node_cpu.get(stamp, {})
+        for uuid, (node, minor, model) in job.gpus.items():
+            node_cpu = job.host.get(node, {})
+            for stamp in sorted(job.gpu[uuid]):
+                cells = job.gpu[uuid][stamp]
                 rows.append((node, gpu_minor_key(minor), stamp,
-                             [jid, record.user, stamp,
+                             [job.jobid, job.user, stamp,
                               time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
                               node, minor, model]
                              + [format_number(cells.get(h), d, missing="")
                                 for _k, h, d in columns]
-                             + _cgroup_cells(cpu_cells, cgroup)))
+                             + _cgroup_cells(node_cpu.get(stamp, {}), cgroup)))
         for _, _, _, row in sorted(rows, key=lambda x: (x[0], x[1], x[2])):
             write(row)
 
-    if options.nodename and not matched:
-        raise no_such_node(options.nodename, nodes_seen)
 
-
-# How each spec's window reducer reads in the --describe output.
 _REDUCER_NAME = {"avg": "mean", "max": "peak", "delta": "delta"}
+
 
 def _running_rows(jobs: Dict[int, RunningJob], gpus: Dict[str, Gpu]):
     """Yield ``(job, gpu_or_None)`` in display order: by job, then by GPU.
@@ -2298,138 +2123,50 @@ def running_timeseries(jobs: Dict[int, RunningJob], samples: Dict[str, Dict[int,
                    for key, _h, dec in columns])
 
 
-def running_cpu_timeseries(jobs: Dict[int, RunningJob], client: PrometheusClient,
-                        timeout: Optional[float], options: RenderOptions,
-                        workers: int, step: Optional[int] = None, out=None) -> None:
-    """Emit the raw per-scrape CPU%/MEM% cgroup series for running jobs as CSV.
+def running_cpu_timeseries(collected, order, options: RenderOptions, out=None) -> None:
+    """Emit the raw per-scrape cgroup series for running jobs as CSV.
 
-    Mirrors :func:`cpu_timeseries`, but for jobs with no stored blob yet: the
-    per-host cpus/total_memory divisors come from one batched
-    :func:`jobscope.cpu.host_stats_many` call across the whole selection --
-    the same one the summary/detail views use to reconstruct CPU%/MEM% -- and the
-    per-job range queries run concurrently, the same as
-    :func:`jobscope.running.collect_timeseries` does for the GPU/DCGM case.
+    Mirrors :func:`cpu_timeseries`; ``order`` is the display order the collector
+    resolved, since a dict of running jobs has no meaningful one of its own.
     """
     out = out or sys.stdout
     writer = csv.writer(out, lineterminator="\n")
-    sampling_period = client.sampling_period
-    cgroup = _cgroup_specs(options)
-    at = int(time.time())
-    elapsed_by_job = {raw: job["elapsed_seconds"] for raw, job in jobs.items()
-                      if (job.get("elapsed_seconds") or 0) > 0}
-    divisors = host_stats_many(elapsed_by_job, at, client, timeout)
-
-    tasks = []
-    nodes_seen, matched = set(), False
-    for raw_jobid, job in jobs.items():
-        start, elapsed = job.get("start_epoch"), job.get("elapsed_seconds")
-        if not start or not elapsed or elapsed <= 0:
-            print("note: skipping CPU/MEM series for job %s: unknown runtime" % job["jobid"],
-                  file=sys.stderr)
-            continue
-        by_host = divisors.get(raw_jobid, {})
-        if not any(node.get("cpus") for node in by_host.values()):
-            print("warn: job %s has no CPU/memory records" % job["jobid"], file=sys.stderr)
-            continue
-        if options.nodename:
-            nodes_seen.update(h for h, n in by_host.items() if n.get("cpus"))
-        job_divisors, hosts = _cgroup_hosts(by_host, options.nodename)
-        if not hosts:
-            continue
-        if options.nodename:
-            matched = True
-        end = start + elapsed
-        begin, span = range_window(start, end, options.window, sampling_period, step)
-        tasks.append((raw_jobid, job_divisors, hosts, begin, end, span))
-    if not tasks:
-        if options.nodename and not matched:
-            raise no_such_node(options.nodename, nodes_seen)
-        return
-
-    def run(task):
-        raw_jobid, job_divisors, _hosts, begin, end, span = task
-        return raw_jobid, host_series(str(raw_jobid), job_divisors, begin, end, span,
-                                      sampling_period, client, timeout, cgroup)
-
-    results: Dict[int, dict] = {}
-    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(tasks)))) as pool:
-        for raw_jobid, series in pool.map(run, tasks):
-            results[raw_jobid] = series
-    hosts_by_jobid = {raw_jobid: hosts
-                      for raw_jobid, _d, hosts, _b, _e, _s in tasks}
-
+    cgroup = chosen_specs(options.cgroup_specs)
     wrote_header = False
-    for raw_jobid in sorted(results, key=lambda j: job_sort_key(jobs[j])):
-        job = jobs[raw_jobid]
-        series = results[raw_jobid]
+
+    for raw_jobid in order:
+        job = collected[raw_jobid]
         rows = []  # (host, ts, csv_row)
-        for host in hosts_by_jobid[raw_jobid]:
-            for stamp in sorted(series.get(host, {})):
-                cells = series[host][stamp]
+        for host in job.hosts:
+            for stamp in sorted(job.host.get(host, {})):
                 rows.append((host, stamp,
-                             [job["jobid"], job.get("user", "?"), stamp,
+                             [job.jobid, job.user, stamp,
                               time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(stamp)),
                               host, "", ""]
-                             + _cgroup_cells(cells, cgroup)))
+                             + _cgroup_cells(job.host[host][stamp], cgroup)))
         for _, _, row in sorted(rows, key=lambda x: (x[0], x[1])):
             if options.header and not wrote_header:
                 writer.writerow(TS_ID_COLUMNS + [spec.header for spec in cgroup])
                 wrote_header = True
             writer.writerow(row)
 
-    if options.nodename and not matched:
-        raise no_such_node(options.nodename, nodes_seen)
 
-
-def running_combined_timeseries(jobs: Dict[int, RunningJob], samples: Dict[str, Dict[int, dict]],
-                             gpus: Dict[str, Gpu], specs: List[MetricSpec],
-                             client: PrometheusClient, timeout: Optional[float],
-                             options: RenderOptions, workers: int,
-                             step: Optional[int] = None, out=None) -> None:
-    """``running_timeseries`` plus each row's node's CPU%/MEM% appended -- the default
-    running-job ``--ts`` view.
+def running_combined_timeseries(jobs: Dict[int, RunningJob],
+                                samples: Dict[str, Dict[int, dict]],
+                                gpus: Dict[str, Gpu], specs: List[MetricSpec],
+                                collected, options: RenderOptions, out=None) -> None:
+    """``running_timeseries`` plus each row's node's cgroup columns appended -- the
+    default running-job ``--ts`` view.
 
     The GPU side is exactly ``running_timeseries()``'s pre-fetched ``samples``/``gpus``
-    (any ``--nodename`` filtering already happened before this is called, on
-    ``gpus``); the CPU side resolves divisors via one batched
-    ``cpu.host_stats_many()`` call and thread-pools a ``cpu.host_series()``
-    call per job, the same as :func:`running_cpu_timeseries`.
+    (any ``--nodename`` filtering already happened before this is called, on ``gpus``);
+    the host side is ``collected``, keyed by raw job ID.
     """
     out = out or sys.stdout
     columns = build_columns(specs)
     derived = applicable_derived(specs)
     writer = csv.writer(out, lineterminator="\n")
-    sampling_period = client.sampling_period
-    cgroup = _cgroup_specs(options)
-    at = int(time.time())
-    elapsed_by_job = {raw: job["elapsed_seconds"] for raw, job in jobs.items()
-                      if (job.get("elapsed_seconds") or 0) > 0}
-    divisors = host_stats_many(elapsed_by_job, at, client, timeout)
-
-    tasks = []
-    for raw_jobid, job in jobs.items():
-        start, elapsed = job.get("start_epoch"), job.get("elapsed_seconds")
-        if not start or not elapsed or elapsed <= 0:
-            continue
-        # No --nodename narrowing here: the GPU rows were already filtered before
-        # this was called, and a row's node comes from its GPU.
-        job_divisors, hosts = _cgroup_hosts(divisors.get(raw_jobid, {}), None)
-        if not hosts:
-            continue
-        end = start + elapsed
-        begin, span = range_window(start, end, options.window, sampling_period, step)
-        tasks.append((raw_jobid, job_divisors, begin, end, span))
-
-    def run(task):
-        raw_jobid, job_divisors, begin, end, span = task
-        return raw_jobid, host_series(str(raw_jobid), job_divisors, begin, end, span,
-                                      sampling_period, client, timeout, cgroup)
-
-    cpu_results: Dict[int, dict] = {}
-    if tasks:
-        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(tasks)))) as pool:
-            for raw_jobid, series in pool.map(run, tasks):
-                cpu_results[raw_jobid] = series
+    cgroup = chosen_specs(options.cgroup_specs)
 
     if options.header:
         writer.writerow(TS_ID_COLUMNS + [header for _k, header, _d in columns]
@@ -2438,19 +2175,19 @@ def running_combined_timeseries(jobs: Dict[int, RunningJob], samples: Dict[str, 
     for job, gpu in _running_rows(jobs, gpus):
         if gpu is None:
             continue
-        node_cpu = cpu_results.get(gpu.jobid, {}).get(gpu.host, {})
+        found = collected.get(gpu.jobid)
+        node_cpu = found.host.get(gpu.host, {}) if found else {}
         for epoch in sorted(samples.get(gpu.uuid, {})):
             values = samples[gpu.uuid][epoch]
             for column in derived:
                 values[column.key] = column.fn(values)
-            cpu_cells = node_cpu.get(epoch, {})
             writer.writerow(
                 [job["jobid"], job.get("user", "?"), epoch,
                  time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(epoch)),
                  gpu.host, gpu.csv_id, gpu.model]
                 + [format_number(values.get(key), dec, missing="")
                    for key, _h, dec in columns]
-                + _cgroup_cells(cpu_cells, cgroup))
+                + _cgroup_cells(node_cpu.get(epoch, {}), cgroup))
 
 
 def describe(out=None) -> None:

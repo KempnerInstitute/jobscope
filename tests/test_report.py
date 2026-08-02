@@ -33,6 +33,34 @@ def _render(func, *args):
     return out.getvalue()
 
 
+def _render_ts(kind, jobids, records, client, options, specs=None, step=None):
+    """Collect then render a finished-job --ts view, the way select.py wires it.
+
+    The two halves are separate calls now: `timeseries` issues the queries and the
+    report formats what it yields. Kept as one helper here because every test below
+    is about the CSV that comes out, not about the seam.
+    """
+    from jobscope import timeseries as ts
+
+    out = io.StringIO()
+    match = ts.NodeMatch(options.nodename)
+    common = dict(window=options.window, step=step,
+                  host_specs=options.cgroup_specs, match=match)
+    if kind == "cpu":
+        report.cpu_timeseries(
+            ts.finished_host(jobids, records, client, None, **common), options, out=out)
+    elif kind == "combined":
+        report.combined_timeseries(
+            ts.finished_gpu(jobids, records, specs, client, None,
+                            with_host=True, **common), specs, options, out=out)
+    else:
+        report.dcgm_timeseries(
+            ts.finished_gpu(jobids, records, specs, client, None, **common),
+            specs, options, out=out)
+    match.check()
+    return out.getvalue()
+
+
 def test_fmt_context():
     assert fmt_context("User", "alice") == "  " + "User:".ljust(11) + "alice"
 
@@ -211,8 +239,8 @@ class _TimeseriesClient:
 
 def test_dcgm_timeseries_csv(gpu_record):
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
-    text = _render(dcgm_timeseries, ["100"], {"100": gpu_record}, DEFAULT_SPECS,
-                   _TimeseriesClient(), None, options)
+    text = _render_ts("dcgm", ["100"], {"100": gpu_record}, _TimeseriesClient(),
+                      options, specs=DEFAULT_SPECS)
     columns, rows = plot.parse_csv(io.StringIO(text))
     assert columns[:6] == ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU"]
     assert [r["SM_ACT%"] for r in rows] == ["80.0", "60.0"]
@@ -238,8 +266,8 @@ def test_cpu_timeseries_csv(cpu_record):
     0.5/1.0 cores -> 50%/100% CPU, 2/4 GiB RSS out of 8 GiB -> 25%/50% MEM.
     """
     options = RenderOptions(view="cpu", header=True, csv=True)
-    text = _render(report.cpu_timeseries, ["200"], {"200": cpu_record},
-                   _CpuTimeseriesClient(), None, options)
+    text = _render_ts("cpu", ["200"], {"200": cpu_record}, _CpuTimeseriesClient(),
+                      options)
     columns, rows = plot.parse_csv(io.StringIO(text))
     assert columns == ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU", "MODEL", "CPU%", "MEM%"]
     assert rows[0]["NODE"] == "node02" and rows[0]["GPU"] == "" and rows[0]["MODEL"] == ""
@@ -260,7 +288,7 @@ def test_cpu_timeseries_falls_back_to_prometheus_for_a_still_running_job():
         stats={}, start=2000, end=2100, duration=100, jobid_raw="300", cluster="odyssey",
         user="carol")
     options = RenderOptions(view="cpu", header=True, csv=True)
-    text = _render(report.cpu_timeseries, ["300"], {"300": record}, _Client(), None, options)
+    text = _render_ts("cpu", ["300"], {"300": record}, _Client(), options)
     columns, rows = plot.parse_csv(io.StringIO(text))
     assert rows and [r["CPU%"] for r in rows] == ["50", "100"]
 
@@ -274,8 +302,8 @@ def test_cpu_timeseries_warns_and_skips_a_job_with_no_cpu_records():
     err = io.StringIO()
     old_stderr, _sys.stderr = _sys.stderr, err
     try:
-        text = _render(report.cpu_timeseries, ["400"], {"400": record},
-                      _CpuTimeseriesClient(), None, options)
+        text = _render_ts("cpu", ["400"], {"400": record}, _CpuTimeseriesClient(),
+                          options)
     finally:
         _sys.stderr = old_stderr
     assert text == ""
@@ -302,8 +330,8 @@ def test_combined_timeseries_csv(gpu_record):
     cores -> 50%/75% CPU, 4/8 GiB RSS out of 16 GiB -> 25%/50% MEM.
     """
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True, combined=True)
-    text = _render(report.combined_timeseries, ["100"], {"100": gpu_record}, DEFAULT_SPECS,
-                   _CombinedTimeseriesClient(), None, options)
+    text = _render_ts("combined", ["100"], {"100": gpu_record},
+                      _CombinedTimeseriesClient(), options, specs=DEFAULT_SPECS)
     columns, rows = plot.parse_csv(io.StringIO(text))
     assert columns[:6] == ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU"]
     assert columns[-2:] == ["CPU%", "MEM%"]
@@ -2182,8 +2210,8 @@ class _TwoNodeTimeseriesClient(_TimeseriesClient):
 def _ts_nodes(nodename, gpu_record):
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
                             nodename=nodename)
-    text = _render(dcgm_timeseries, ["100"], {"100": gpu_record}, DEFAULT_SPECS,
-                   _TwoNodeTimeseriesClient(), None, options)
+    text = _render_ts("dcgm", ["100"], {"100": gpu_record}, _TwoNodeTimeseriesClient(),
+                      options, specs=DEFAULT_SPECS)
     _cols, rows = plot.parse_csv(io.StringIO(text))
     return [r["NODE"] for r in rows]
 
@@ -2204,10 +2232,18 @@ def test_a_failed_timeseries_filter_writes_no_header(gpu_record):
     out = io.StringIO()
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
                             nodename="node99")
-    with pytest.raises(JobscopeError):
-        dcgm_timeseries(["100"], {"100": gpu_record}, DEFAULT_SPECS,
-                        _TwoNodeTimeseriesClient(), None, options, out=out)
+    from jobscope import timeseries as ts
+    match = ts.NodeMatch(options.nodename)
+    # Rendering itself must not raise -- it simply gets nothing to write. The error
+    # comes afterwards, from the filter that matched no node, which is what leaves
+    # the header unwritten rather than written-then-regretted.
+    report.dcgm_timeseries(
+        ts.finished_gpu(["100"], {"100": gpu_record}, DEFAULT_SPECS,
+                        _TwoNodeTimeseriesClient(), None, match=match),
+        DEFAULT_SPECS, options, out=out)
     assert out.getvalue() == ""
+    with pytest.raises(JobscopeError):
+        match.check()
 
 
 def test_the_timeseries_header_is_unchanged_by_the_filter(gpu_record):
@@ -2215,8 +2251,8 @@ def test_the_timeseries_header_is_unchanged_by_the_filter(gpu_record):
     def header(nodename):
         options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
                                 nodename=nodename)
-        text = _render(dcgm_timeseries, ["100"], {"100": gpu_record}, DEFAULT_SPECS,
-                       _TwoNodeTimeseriesClient(), None, options)
+        text = _render_ts("dcgm", ["100"], {"100": gpu_record},
+                          _TwoNodeTimeseriesClient(), options, specs=DEFAULT_SPECS)
         return text.splitlines()[0]
 
     assert header("node01") == header(None)

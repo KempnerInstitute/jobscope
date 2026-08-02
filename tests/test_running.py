@@ -27,6 +27,7 @@ from jobscope.running import (
     specs_for,
     timeseries_step,
 )
+from jobscope import timeseries as ts
 from jobscope.cpu import host_stats_many
 from jobscope.job_ave_stats import synthesize_stats
 from jobscope.report import (
@@ -36,6 +37,17 @@ from jobscope.report import (
     running_timeseries,
 )
 from jobscope.slurm import JobRecord
+
+
+def _render_running_cpu(jobs, client, options, out, workers=1):
+    """Collect then render the running --cpu --ts view, as select.py wires it."""
+    match = ts.NodeMatch(options.nodename)
+    collected = ts.running_host(jobs, client, None, workers=workers,
+                                window=options.window,
+                                host_specs=options.cgroup_specs, match=match)
+    running_cpu_timeseries(collected, ts.running_host_order(jobs, collected),
+                           options, out=out)
+    match.check()
 
 # squeue -o "%A|%i|%u|%N|%g|%j|%b|%C|%S": raw id, display id, user, nodelist,
 # group, name, gres, cpus, start. For array element 12345_6 the raw id differs --
@@ -477,7 +489,7 @@ def test_live_cpu_timeseries_uses_the_schema_plot_reads():
 
     jobs = {100: {"jobid": "100_6", "user": "alice", "start_epoch": 940, "elapsed_seconds": 60}}
     out = io.StringIO()
-    running_cpu_timeseries(jobs, Client(), None, RenderOptions(), workers=1, out=out)
+    _render_running_cpu(jobs, Client(), RenderOptions(), out)
     lines = out.getvalue().splitlines()
     assert lines[0] == "JOBID,USER,EPOCH,TIME,NODE,GPU,MODEL,CPU%,MEM%"
     assert lines[1].startswith("100_6,alice,1000,")
@@ -500,7 +512,7 @@ def test_live_cpu_timeseries_warns_and_skips_a_job_with_no_divisor():
     import sys as _sys
     old_stderr, _sys.stderr = _sys.stderr, err
     try:
-        running_cpu_timeseries(jobs, Client(), None, RenderOptions(), workers=1, out=out)
+        _render_running_cpu(jobs, Client(), RenderOptions(), out)
     finally:
         _sys.stderr = old_stderr
     assert out.getvalue() == ""
@@ -533,8 +545,11 @@ def test_live_combined_timeseries_uses_the_schema_plot_reads():
     gpus = {"GPU-a": Gpu("GPU-a", 1, "node01", 3, "GPU 3")}
     samples = {"GPU-a": {1000: {"duty": 90.0, "mem": 10.0, "memtot": 80.0}}}
     out = io.StringIO()
-    running_combined_timeseries(jobs, samples, gpus, DEFAULT_RUNNING_SPECS, Client(), None,
-                             RenderOptions(), workers=1, out=out)
+    options = RenderOptions()
+    collected = ts.running_host(jobs, Client(), None, workers=1,
+                                host_specs=options.cgroup_specs, warn=False)
+    running_combined_timeseries(jobs, samples, gpus, DEFAULT_RUNNING_SPECS, collected,
+                                options, out=out)
     lines = out.getvalue().splitlines()
     assert lines[0].startswith("JOBID,USER,EPOCH,TIME,NODE,GPU,")
     assert lines[0].endswith("CPU%,MEM%")

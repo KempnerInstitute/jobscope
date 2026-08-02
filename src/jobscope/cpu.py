@@ -171,6 +171,17 @@ def spec_named(name: str) -> Optional[CgroupSpec]:
     return next((s for s in CGROUP_METRICS if s.header == header), None)
 
 
+def chosen_specs(specs: Optional[List[CgroupSpec]]) -> List[CgroupSpec]:
+    """The cgroup metrics a run's host series carries -- ``specs``, or the default.
+
+    The default is the two the summary and detail views have always shown, CPU%/MEM%;
+    ``[metrics.cgroup]`` widens it. Here rather than beside either caller because the
+    header a report writes and the queries a collector issues must name the same list,
+    and two copies of that decision would eventually disagree by a column.
+    """
+    return list(specs if specs is not None else DEFAULT_CGROUP_SPECS)
+
+
 def specs_named(names) -> List[CgroupSpec]:
     """Resolve cgroup metric names to specs, in catalog order, dropping duplicates.
 

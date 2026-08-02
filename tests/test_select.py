@@ -183,6 +183,9 @@ def test_emit_timeseries_dispatches_to_cpu_for_a_running_request(monkeypatch):
     calls = []
     monkeypatch.setattr(select_mod, "running_cpu_timeseries",
                         lambda *a, **k: calls.append(("running_cpu", a, k)))
+    # The collector is stubbed too: unlike the finished-job ones it is not a
+    # generator, so it would reach for the dummy client's sampling_period.
+    monkeypatch.setattr(select_mod.timeseries, "running_host", lambda *a, **k: {})
 
     def boom(*a, **k):
         raise AssertionError("GPU discovery must not run for a --cpu --ts request")

@@ -34,6 +34,7 @@ from .running import (
     per_gpu_by_node_minor,
 )
 from .job_ave_stats import fill_running, needs_fill, note_offline_gap
+from . import timeseries
 from .prometheus import PrometheusClient, client_from_config
 from .report import (
     RenderOptions,
@@ -335,7 +336,13 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
             return
         client = client_from_config(cfg, timeout)
         if not options.combined and options.view == "cpu":
-            running_cpu_timeseries(jobs, client, timeout, options, workers, step, out=out)
+            match = timeseries.NodeMatch(options.nodename)
+            collected = timeseries.running_host(
+                jobs, client, timeout, workers, window=options.window, step=step,
+                host_specs=options.cgroup_specs, match=match)
+            running_cpu_timeseries(
+                collected, timeseries.running_host_order(jobs, collected), options, out=out)
+            match.check()
             return
         gpus = discover_gpus(client, jobs, timeout)
         if options.nodename:
@@ -348,8 +355,13 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
         samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, step,
                                      window=options.window)
         if options.combined:
-            running_combined_timeseries(jobs, samples, gpus, specs, client, timeout, options,
-                                     workers, step, out=out)
+            # warn=False: the GPU rows are the report here, so a job with no cgroup
+            # data loses two columns rather than its row.
+            collected = timeseries.running_host(
+                jobs, client, timeout, workers, window=options.window, step=step,
+                host_specs=options.cgroup_specs, warn=False)
+            running_combined_timeseries(jobs, samples, gpus, specs, collected, options,
+                                        out=out)
             return
         running_timeseries(jobs, samples, gpus, specs, options, out=out)
         return
@@ -361,10 +373,25 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
         return
     records = fetch(jobids, timeout)
     client = client_from_config(cfg, timeout)
+    # Collect and render are separate calls, but the collectors are generators, so
+    # this still walks one job at a time -- the renderer pulls the next job's samples
+    # only once it has written the last one's rows.
+    match = timeseries.NodeMatch(options.nodename)
     if not options.combined and options.view == "cpu":
-        cpu_timeseries(jobids, records, client, timeout, options, step=step, out=out)
-        return
-    if options.combined:
-        combined_timeseries(jobids, records, specs, client, timeout, options, step=step, out=out)
-        return
-    dcgm_timeseries(jobids, records, specs, client, timeout, options, step=step, out=out)
+        cpu_timeseries(
+            timeseries.finished_host(jobids, records, client, timeout,
+                                     window=options.window, step=step,
+                                     host_specs=options.cgroup_specs, match=match),
+            options, out=out)
+    elif options.combined:
+        combined_timeseries(
+            timeseries.finished_gpu(jobids, records, specs, client, timeout,
+                                    window=options.window, step=step, with_host=True,
+                                    host_specs=options.cgroup_specs, match=match),
+            specs, options, out=out)
+    else:
+        dcgm_timeseries(
+            timeseries.finished_gpu(jobids, records, specs, client, timeout,
+                                    window=options.window, step=step, match=match),
+            specs, options, out=out)
+    match.check()
