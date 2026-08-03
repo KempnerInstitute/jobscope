@@ -37,6 +37,7 @@ from .job_ave_stats import (
     apply_slurm_host,
     fill_running,
     needs_fill,
+    note_missing_host_series,
     note_offline_gap,
 )
 from . import cpu
@@ -227,6 +228,14 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
         for raw, job in jobs.items()}
     jobids = sorted((job["jobid"] for job in jobs.values()),
                     key=lambda jid: job_sort_key({"jobid": jid}))
+    # The same two steps the sacct path takes in _enrich, and they belong here more than
+    # there: a running job is the case with no stored blob to fall back on, so it is
+    # where a named slurm source has something to add and where a missing cgroup
+    # exporter is the difference between a CPU% and a dash.
+    if "slurm" in cpu.PREFERENCE:
+        apply_slurm_host(records, jobids, timeout,
+                         override=cpu.RESOLVED.source_of("CPU%") == "slurm")
+    _note_host_gap(records, jobids, host_specs)
     return Resolved(_running_context(selection, jobs, gpus, requested, host_specs),
                     iter([(jobids, records, dcgm_data)]))
 
@@ -285,12 +294,14 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
 
     return Resolved(context, _enrich(chunks, cfg, timeout, workers, specs,
                                      no_blob=request.no_blob,
-                                     nodename=nodename, gpu_ids=gpu_ids))
+                                     nodename=nodename, gpu_ids=gpu_ids,
+                                     host_specs=host_specs))
 
 
 def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
             specs: Optional[List[MetricSpec]], no_blob: bool = False,
-            nodename: Optional[str] = None, gpu_ids=()) -> Iterator[Chunk]:
+            nodename: Optional[str] = None, gpu_ids=(),
+            host_specs=None) -> Iterator[Chunk]:
     """Attach DCGM metrics and fill running jobs' blobs, chunk by chunk.
 
     The client is built lazily and at most once: a selection with no GPU jobs, or a
@@ -322,6 +333,7 @@ def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
         if "slurm" in cpu.PREFERENCE:
             apply_slurm_host(records, chunk_ids, timeout,
                              override=cpu.RESOLVED.source_of("CPU%") == "slurm")
+        _note_host_gap(records, chunk_ids, host_specs)
         yield chunk_ids, records, dcgm_data
 
 
@@ -400,6 +412,16 @@ def _fill_running(records, jobids, cfg, timeout, workers, client, force=False):
             return None
     fill_running(records, jobids, client, timeout, workers, force)
     return client
+
+
+def _note_host_gap(records, jobids, host_specs) -> None:
+    """Explain blank CPU%/MEM% once the fills have had their turn.
+
+    After both of them, because either may supply the columns: the cgroup fill above,
+    or Slurm's accounting below it. Only worth saying when the view actually prints
+    those columns -- --gpu has no CPU% to be missing."""
+    if host_specs and any(s.column in ("CPU%", "MEM%") for s in host_specs):
+        note_missing_host_series(records, jobids)
 
 
 # --- the time-series granularity -------------------------------------------

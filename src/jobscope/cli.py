@@ -796,8 +796,13 @@ def handle_report(args) -> None:
         # The host side of [metrics], the counterpart of `specs` above. Previously
         # always None, so CPU%/MEM% were fixed whatever the config said and a
         # [metrics.cgroup.<name>] definition could be defined but never selected.
-        cgroup_specs=list(cfg.metrics.host_extended if args.all_metrics
-                          else cfg.metrics.host_summary),
+        #
+        # None under --gpu, mirroring `specs if show_dcgm else None` for the other side:
+        # that view prints no host column, so there is none to attribute a source to and
+        # none to warn about being blank.
+        cgroup_specs=(list(cfg.metrics.host_extended if args.all_metrics
+                           else cfg.metrics.host_summary)
+                      if view in ("all", "cpu") else None),
         # The two views have their own band tables and inherit nothing from each
         # other, because a two-hour window that catches a checkpoint pause should
         # not answer to a nineteen-hour job's bar. --plot_ts set args.ts above, so

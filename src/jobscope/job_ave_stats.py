@@ -206,6 +206,29 @@ def _has_host_fields(record: JobRecord) -> bool:
     return False
 
 
+def note_missing_host_series(records: Dict[str, JobRecord], jobids) -> None:
+    """Say why running CPU%/MEM% are blank when an endpoint *is* configured.
+
+    :func:`note_offline_gap` covers the no-endpoint case. This is the other one, and it
+    is the one that reads as a jobscope bug: the GPU columns are full, the CPU ones are
+    dashes, and nothing connects that to an exporter. It happens wherever the
+    ``cgroup_*`` series do not cover the job -- either the exporter is not deployed on
+    the node, or it is running but stuck on cgroups from jobs that have already
+    finished, which is what this cluster does on the two nodes that report at all.
+
+    Once per report, not once per job: a hundred running jobs share one cause.
+    """
+    blind = [jid for jid in jobids if jid in records
+             and records[jid].state == "RUNNING"
+             and not _has_host_fields(records[jid])]
+    if not blind:
+        return
+    print("note: %d running job(s) have no CPU%%/MEM%% -- no cgroup_* series covers them.\n"
+          "      A running job has no stored blob (Slurm writes it at job end), so those\n"
+          "      columns can only come from the cgroup exporter. Run 'jobscope probe' to\n"
+          "      see how many hosts it reports on." % len(blind), file=sys.stderr)
+
+
 def note_offline_gap(records: Dict[str, JobRecord], jobids) -> None:
     """Warn when running jobs cannot be filled because no endpoint is configured.
 

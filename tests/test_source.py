@@ -241,6 +241,21 @@ def test_naming_slurm_replaces_the_blob_rather_than_filling_gaps():
     assert node["gpu_utilization"] == {"0": 90}
 
 
+def test_a_blank_running_cpu_says_why(capsys):
+    """The failure this was reported as: GPU columns full, CPU columns dashes, and
+    nothing connecting that to an exporter. A running job has no blob to fall back on,
+    so the note names the one source that could have served it."""
+    from jobscope.job_ave_stats import note_missing_host_series
+    running, finished = _slurm_record("RUNNING"), _slurm_record("COMPLETED")
+    note_missing_host_series({"1": running}, ["1"])
+    assert "no cgroup_* series covers them" in capsys.readouterr().err
+    # Not for a finished job -- its blob supplies them -- nor when the fields arrived.
+    note_missing_host_series({"1": finished}, ["1"])
+    running.stats = {"total_time": 60, "nodes": {"n1": {"total_time": 30.0, "cpus": 1}}}
+    note_missing_host_series({"1": running}, ["1"])
+    assert capsys.readouterr().err == ""
+
+
 def test_every_resolved_spec_agrees_with_its_uuid_label():
     """A spec claiming one family while querying the other returns rows that cannot be
     attributed to a card -- so MetricSpec checks the pair. Assert it stays checked."""
