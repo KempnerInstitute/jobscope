@@ -531,7 +531,7 @@ def gpu_source_line(specs: Optional[List] = None, have_blob: bool = True,
     per_source: Dict[str, List[str]] = {}
     for resolution, wanted in (
             (cpu.RESOLVED if have_blob else source_module.resolve(
-                cpu.CGROUP_METRICS, cpu.PREFERENCE), host_specs),
+                cpu.CANDIDATES, cpu.PREFERENCE), host_specs),
             (dcgm.RESOLVED if have_blob else source_module.resolve(
                 dcgm.METRICS, dcgm.PREFERENCE), specs)):
         if not wanted:

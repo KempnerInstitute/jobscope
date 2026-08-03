@@ -463,8 +463,63 @@ def check_labels(out, client, timeout: Optional[float]) -> Dict[str, Optional[st
                                  % (alt, field) if alt else ""))
     _line(out, "labels", ";  ".join(seen))
     _cont(out, "(%s)" % ", ".join(what for _f, _s, what in checks))
+    _report_coverage(out, client, timeout)
     _report_sources(out)
     return working
+
+
+# One representative series per family, and the column that goes blank when it is not
+# there. Chosen as the series the *default* view queries, so thin coverage here means
+# thin coverage of the report rather than of some corner of the catalog.
+_COVERAGE: Tuple[Tuple[str, str, str], ...] = (
+    ("cgroup", "cgroup_cpu_total_seconds", "running CPU%/MEM%"),
+    ("nvml", "nvidia_gpu_duty_cycle", "the GPU join, and so every GPU column"),
+    ("dcgm", "DCGM_FI_PROF_SM_ACTIVE", "SM_ACT%/TENSOR%/DRAM%"),
+)
+
+
+def host_coverage(client, timeout: Optional[float]) -> Dict[str, Optional[int]]:
+    """``{family: hosts reporting it}``, or None per family the query failed for."""
+    host_label = config.get_config().site.host_label
+    now = int(time.time())
+    found: Dict[str, Optional[int]] = {}
+    for family, series, _what in _COVERAGE:
+        try:
+            rows = client.query("count(count by (%s) (%s))" % (host_label, series),
+                                now, timeout)
+        except Exception:
+            found[family] = None      # asked and could not tell, which is not zero
+            continue
+        found[family] = int(float(rows[0]["value"][1])) if rows else 0
+    return found
+
+
+def _report_coverage(out, client, timeout: Optional[float]) -> None:
+    """How many hosts each exporter reports on, and what thin coverage costs.
+
+    Presence is not coverage, and the labels check above cannot tell the difference:
+    it asks whether a label answers *anywhere*, so two stale hosts out of four hundred
+    read as ``jobid ok``. That is how a cluster whose cgroup exporter is deployed on
+    two nodes looks healthy here while every running job shows CPU% as ``-``.
+
+    So the count, next to the widest family as a yardstick -- a bare "2 hosts" means
+    nothing without knowing the fleet is 417.
+    """
+    counts = host_coverage(client, timeout)
+    widest = max((n for n in counts.values() if n), default=0)
+    _line(out, "coverage", ";  ".join(
+        "%s on %s host(s)" % (family, "?" if counts.get(family) is None
+                              else counts[family])
+        for family, _series, _what in _COVERAGE))
+    for family, _series, what in _COVERAGE:
+        count = counts.get(family) or 0
+        # A tenth of the widest exporter is the line: below that the family is not
+        # "deployed with gaps", it is absent with a couple of leftovers reporting.
+        if widest and count * 10 < widest:
+            _cont(out, "%s is thin (%d of %d): %s will read \"-\"%s"
+                       % (family, count, widest, what,
+                          " -- the JS1: blob covers finished jobs"
+                          if family == "cgroup" else ""))
 
 
 def _report_sources(out) -> None:

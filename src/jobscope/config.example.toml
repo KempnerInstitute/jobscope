@@ -109,19 +109,26 @@ long_running = "3h"
 source = ["blob", "dcgm", "nvml"]
 
 [host]
-# The same question for CPU% and MEM%, which have their own two candidates:
+# The same question for CPU% and MEM%, which have their own three candidates:
 #
 #   blob     free, and what a finished job reports -- jobstats recorded the CPU time
 #            and peak RSS Slurm accounted.
-#   cgroup   the cgroup_* series, which is the only source for a *running* job,
-#            since Slurm writes the blob at job end.
+#   cgroup   the cgroup_* series, and the only Prometheus source for a *running*
+#            job, since Slurm writes the blob at job end.
+#   slurm    sacct's own TotalCPU / MaxRSS. For a site with no jobstats and no cgroup
+#            exporter, where the alternative is a blank column. Job totals rather
+#            than per-node series, so --nodename has nothing to narrow on one.
 #
 # A separate section from [gpu] because the axes are independent: this cluster runs
-# dcgm-exporter and no cgroup exporter, which is why running jobs show CPU% as "-".
-# The header's Source line names the resolved source either way, so a column reading
-# "-" beside "CPU% <- cgroup" says "asked cgroup, cgroup was empty" rather than
-# leaving you to guess.
-source = ["blob", "cgroup"]
+# dcgm-exporter and no cgroup exporter ('jobscope probe' says so on its coverage
+# line), which is why running jobs show CPU% as "-".
+#
+# Naming a source means the numbers come from it, so it replaces the blob rather than
+# filling its gaps -- otherwise the header would credit slurm for blob figures. Where
+# the named source has nothing the column reads "-", which for slurm is every running
+# job on a cluster whose jobacct_gather reports TotalCPU only at job end. A zero there
+# is read as "not gathered", never as an idle job.
+source = ["blob", "cgroup", "slurm"]
 
 [metrics]
 # Which GPU/DCGM metrics each view collects and shows. GPU-side only: the CPU side is

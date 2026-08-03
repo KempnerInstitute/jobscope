@@ -58,7 +58,7 @@ from .errors import JobscopeError
 # cgroup exporter is ordinary. The blob is on both: it is the one source that spans
 # them, which is what makes it the free default for each.
 SOURCES: Tuple[str, ...] = ("blob", "dcgm", "nvml")
-HOST_SOURCES: Tuple[str, ...] = ("blob", "cgroup")
+HOST_SOURCES: Tuple[str, ...] = ("blob", "cgroup", "slurm")
 DEFAULT_PREFERENCE: Tuple[str, ...] = SOURCES
 DEFAULT_HOST_PREFERENCE: Tuple[str, ...] = HOST_SOURCES
 
@@ -66,7 +66,7 @@ DEFAULT_HOST_PREFERENCE: Tuple[str, ...] = HOST_SOURCES
 # because "which exporter serves this column" and "does the blob outrank it" are
 # different questions, asked at different times: the first at config load, the
 # second per job, once it is known whether the job has a blob at all.
-EXPORTERS: Tuple[str, ...] = ("dcgm", "nvml", "cgroup")
+EXPORTERS: Tuple[str, ...] = ("dcgm", "nvml", "cgroup", "slurm")
 
 # What jobstats stored, by the column it serves. GMEM_TOTAL_GB is here because the
 # blob records used *and* total -- which is why the blob can serve GMEM% when

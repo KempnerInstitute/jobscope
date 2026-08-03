@@ -122,14 +122,37 @@ CGROUP_METRICS: List[CgroupSpec] = [
                "gauge", "total_memory", 1, "all", roles=frozenset({"memory"})),
 ]
 
+# Slurm's own accounting as a third candidate for CPU% and MEM%. Not Prometheus specs
+# -- `metric` is empty because there is no series to query; the numbers come from sacct
+# via jobscope.extra_metric, which already knows the four ways that data is easy to
+# read wrong. They exist so a preference can *name* slurm and the header can attribute
+# a column to it, which is what makes substituting Slurm's numbers acceptable at all:
+# extra_metric refuses to do it silently, and this is the not-silent version.
+#
+# Last in the default order, so it serves a column only where neither the blob nor the
+# cgroup exporter can. That matters for a site with no jobstats, where the alternative
+# to Slurm's figures is a blank column.
+SLURM_SPECS: List[CgroupSpec] = [
+    CgroupSpec("cpu_slurm", "CPU%", "", "gauge", "cpus", 0, "default",
+               family="slurm", provides="CPU%", roles=frozenset({"worst", "resource"})),
+    CgroupSpec("mem_slurm", "MEM%", "", "gauge", "total_memory", 0, "default",
+               family="slurm", provides="MEM%", roles=frozenset({"memory"})),
+]
+
 # Which source serves each host column. Only CPU% and MEM% have a choice -- the blob
-# records them, and the cgroup exporter measures them -- so this is a shorter question
-# than the GPU one, but the same question, answered in the same place. A cluster with
-# no cgroup exporter (which is this one: probe reports 0 of 6 series present) resolves
-# them to the blob, and the report now says so instead of leaving it to be inferred.
+# records them, the cgroup exporter measures them, and Slurm accounts them -- so this
+# is a shorter question than the GPU one, but the same question, answered in the same
+# place. A cluster with no cgroup exporter (which is this one: probe's coverage line
+# reports 2 hosts of 439) resolves them to the blob, and the report now says so instead
+# of leaving it to be inferred from a dash.
 PREFERENCE: Tuple[str, ...] = source.DEFAULT_HOST_PREFERENCE
+# Every candidate for a host column, which is not the same list as the cgroup catalog:
+# slurm offers CPU%/MEM% without being a Prometheus family. Exposed because anything
+# re-resolving (the running view's provenance line, which asks "and without a blob?")
+# has to weigh the same candidates or it will name a source that did not win.
+CANDIDATES: List[CgroupSpec] = list(CGROUP_METRICS) + SLURM_SPECS
 RESOLVED: source.Resolution = source.resolve(
-    CGROUP_METRICS, PREFERENCE, source.BLOB_HOST_COLUMNS)
+    CANDIDATES, PREFERENCE, source.BLOB_HOST_COLUMNS)
 
 SPEC_BY_KEY: Dict[str, CgroupSpec] = {spec.key: spec for spec in CGROUP_METRICS}
 DEFAULT_CGROUP_SPECS: List[CgroupSpec] = [s for s in CGROUP_METRICS
@@ -152,8 +175,9 @@ def _rebuild() -> None:
     to pick that up or the override does nothing where it matters most.
     """
     global SPEC_BY_KEY, DEFAULT_CGROUP_SPECS, CGROUP_HEADERS, CGROUP_NAMES, _ORDER
-    global RESOLVED
-    RESOLVED = source.resolve(CGROUP_METRICS, PREFERENCE, source.BLOB_HOST_COLUMNS)
+    global RESOLVED, CANDIDATES
+    CANDIDATES = list(CGROUP_METRICS) + SLURM_SPECS
+    RESOLVED = source.resolve(CANDIDATES, PREFERENCE, source.BLOB_HOST_COLUMNS)
     SPEC_BY_KEY = {spec.key: spec for spec in CGROUP_METRICS}
     DEFAULT_CGROUP_SPECS = [s for s in CGROUP_METRICS if s.group == "default"]
     CGROUP_HEADERS = tuple(spec.header for spec in CGROUP_METRICS)

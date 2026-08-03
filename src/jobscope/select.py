@@ -33,7 +33,13 @@ from .running import (
     running_records,
     per_gpu_by_node_minor,
 )
-from .job_ave_stats import fill_running, needs_fill, note_offline_gap
+from .job_ave_stats import (
+    apply_slurm_host,
+    fill_running,
+    needs_fill,
+    note_offline_gap,
+)
+from . import cpu
 from . import timeseries
 from .prometheus import PrometheusClient, client_from_config
 from .report import (
@@ -309,6 +315,13 @@ def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
                                      nodename=nodename, gpu_ids=gpu_ids)
         client = _fill_running(records, chunk_ids, cfg, timeout, workers, client,
                                force=no_blob)
+        # Last, and only for what is still missing: Slurm's own accounting, where the
+        # site has named it as a host source. After the blob and Prometheus because it
+        # is the coarsest of the three -- job totals rather than per-node series -- so
+        # it should never displace a measurement that arrived.
+        if "slurm" in cpu.PREFERENCE:
+            apply_slurm_host(records, chunk_ids, timeout,
+                             override=cpu.RESOLVED.source_of("CPU%") == "slurm")
         yield chunk_ids, records, dcgm_data
 
 

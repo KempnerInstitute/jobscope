@@ -148,7 +148,7 @@ def test_host_columns_have_their_own_axis():
     nvml -- so naming a GPU source for them is an error rather than a no-op."""
     from jobscope import cpu
     assert source.parse_preference("cgroup", "[host] source",
-                                   source.HOST_SOURCES) == ("cgroup", "blob")
+                                   source.HOST_SOURCES) == ("cgroup", "blob", "slurm")
     with pytest.raises(JobscopeError):
         source.parse_preference("dcgm", "[host] source", source.HOST_SOURCES)
     assert cpu.RESOLVED.source_of("CPU%") == "blob"
@@ -183,6 +183,62 @@ def test_a_name_claimed_by_both_catalogs_is_rejected_not_guessed():
     with pytest.raises(JobscopeError) as exc:
         config_module._metrics({"summary": ["cpu", "mem"]})
     assert "gmem_gb" in str(exc.value) and "mem%" in str(exc.value)
+
+
+# --- slurm as a host source -------------------------------------------------
+
+def _slurm_record(state, duration=3480):
+    from jobscope.slurm import JobRecord
+    return JobRecord(jobid="1", state=state, name="t", runtime="00:58:00", nodes="1",
+                     gpus=1, stats={}, start=0, end=duration, duration=duration,
+                     jobid_raw="1", cluster="", user="u")
+
+
+def _slurm_metrics(total_cpu_s, duration=3480, cores=16):
+    from jobscope.extra_metric import SlurmMetrics
+    return SlurmMetrics(jobid="1", gpus=1, total_cpu_s=total_cpu_s,
+                        cpu_time_s=duration * cores,
+                        used_mem_bytes=8e9, req_mem_bytes=16e9)
+
+
+@pytest.mark.parametrize("state", ["RUNNING", "COMPLETED"])
+def test_zero_cpu_seconds_is_not_gathered_rather_than_idle(state):
+    """A process that ran at all burns some CPU, so a literal zero means jobacct is not
+    recording it. Rendering 0% would say "idle", which is the one thing jobscope must
+    never say about a number it does not have. Measured on this cluster: TotalCPU=0 on a
+    finished 128-core job whose blob reports CPU% 6."""
+    from jobscope.job_ave_stats import accounted
+    assert accounted(_slurm_metrics(0.0), _slurm_record(state)) is False
+    assert accounted(_slurm_metrics(30000.0), _slurm_record(state)) is True
+
+
+def test_slurm_figures_are_job_totals_under_one_entry():
+    """sacct accounts CPU-seconds and memory per *job*, so there is no per-node split to
+    reproduce -- and the entry is not named after a host, because labelling job totals
+    with a hostname would claim a measurement Slurm did not make."""
+    from jobscope.blob import blob_metrics
+    from jobscope.job_ave_stats import SLURM_NODE, slurm_host_map
+    nodes = slurm_host_map(_slurm_metrics(30000.0), 3480)
+    assert list(nodes) == [SLURM_NODE]
+    # 30000 cpu-seconds over 3480s x 16 cores = 53.9%, and 8/16 GiB = 50%.
+    assert blob_metrics({"total_time": 3480, "nodes": nodes}, 1).known() == {
+        "CPU%": 54, "MEM%": 50}
+
+
+def test_naming_slurm_replaces_the_blob_rather_than_filling_gaps():
+    """Naming a source has to mean the numbers come from it, as --gpu-source dcgm does.
+    Falling back to the blob would leave the header crediting slurm for blob figures."""
+    from jobscope.job_ave_stats import apply_slurm_host
+    record = _slurm_record("COMPLETED")
+    record.stats = {"total_time": 3480,
+                    "nodes": {"node01": {"total_time": 999.0, "cpus": 8,
+                                         "used_memory": 1e9, "total_memory": 2e9,
+                                         "gpu_utilization": {"0": 90}}}}
+    # Slurm has nothing to give: the blob's host fields go anyway, and the GPU map stays.
+    apply_slurm_host({"1": record}, ["1"], None, override=True)
+    node = record.stats["nodes"]["node01"]
+    assert "total_time" not in node and "cpus" not in node
+    assert node["gpu_utilization"] == {"0": 90}
 
 
 def test_every_resolved_spec_agrees_with_its_uuid_label():
