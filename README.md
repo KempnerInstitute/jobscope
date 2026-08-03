@@ -11,7 +11,6 @@ calls.
 
 ## What You Get
 
-- One row per job, or one row per GPU with `--per-gpu`.
 - CPU, memory, GPU, GPU memory, SM activity, tensor activity, DRAM activity, and
   power columns.
 - Summary bands that count wasteful, borderline, and healthy jobs by metric.
