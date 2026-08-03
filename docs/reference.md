@@ -97,6 +97,7 @@ job that is running right now.
 | `--stats-per-job` | the same, pooled across every node and GPU |
 | `--classify` | with `--ts`: sort the jobs into efficiency categories, worst first |
 | `--plot_ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
+| `--plot_ts_overlay [WINDOW]` | the same series overlaid: one panel per GPU, every metric on a shared axis, one row per node |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--all-metrics` | the full DCGM metric catalog |
 | `--avg` | `running` only: fold over the runtime instead of a snapshot |
@@ -757,6 +758,33 @@ jobscope -j 36606149 --plot_ts        # single-node job: no --nodename needed
 
 It *is* `--ts`, with the CSV charted rather than written, so the schema, `--step`,
 the window below and the `--nodename` filter all behave the same.
+
+#### Overlaid instead: `--plot_ts_overlay`
+
+`--plot_ts` gives each metric its own panel and its own y-axis, which answers "how did
+this one move". The overlay answers the other question -- "did these move together" --
+by putting every metric on one shared axis, a panel per GPU, and a row per node:
+
+```bash
+jobscope -j 36770231 --plot_ts_overlay        # 2 nodes x 4 GPUs = two rows of four
+```
+
+It needs no `--nodename`: a row per node is the layout, so the guard `--plot_ts` raises
+on a multi-node job does not apply. It is exactly `jobscope plot --by gpu --columns` on
+the same CSV, and delegates to it.
+
+Two consequences of the shared axis, both stated in the output:
+
+- **Watts are omitted.** `POWER_W` against percentages means a 400 W line pins the
+  scale and flattens every percentage onto the floor. `--plot_ts` is where watts get
+  their own panel.
+- **Each panel carries its own legend**, naming the metrics where they are drawn.
+  plotext draws it inside the axes and one row per label, so the panels need more room
+  than the per-metric grid's: they get a wider floor (fewer abreast on a narrow
+  terminal, wrapped) and a height that grows with the metric set. Six metrics need
+  eleven rows; at ten plotext drops the legend silently, which is why the height is not
+  fixed. With `--no-color` the markers are identical, so the legend names the traces
+  without distinguishing them -- `--plot_ts` is the one to use without colour.
 
 #### A window: `--ts 1h`
 

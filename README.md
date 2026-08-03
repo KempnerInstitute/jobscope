@@ -143,6 +143,7 @@ the run. Time-series output keeps the per-scrape shape.
 ```bash
 jobscope -j 36788818_3 --ts --csv | jobscope plot
 jobscope -j 36788818_3 --plot-ts
+jobscope -j 36788818_3 --plot-ts-overlay
 jobscope -j 36788818_3 --plot-ts 30m
 jobscope -j 36788818_3 --ts --csv | jobscope plot --compact
 ```
@@ -150,6 +151,14 @@ jobscope -j 36788818_3 --ts --csv | jobscope plot --compact
 `--ts --csv` writes one row per GPU per scrape. `jobscope plot` charts that stream.
 `--plot-ts` does the same in one command, with one panel per metric. On multi-node
 jobs, add `--nodename` so GPU ids from different nodes do not merge.
+
+`--plot-ts-overlay` charts the same series the other way round: one panel per GPU with
+every metric on a shared axis, and one row per node — so it needs no `--nodename`. Use
+it to see whether metrics moved *together*, which is the question behind most
+diagnosis: `GPU% 90` beside `SM_ACT% 8` on one pair of axes is a card that was occupied
+but barely loaded. Watts are left out, because they cannot share a scale with
+percentages. Each panel legends its own metrics; without colour the markers are
+identical, so `--plot-ts` is the one to use then.
 
 Useful companions:
 

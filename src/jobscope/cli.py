@@ -185,6 +185,14 @@ def build_parser():
                        help="chart that time series instead of writing it: one panel per "
                             "metric, one column per GPU. Takes the same optional window. "
                             "Needs --nodename on a multi-node job")
+    grain.add_argument("--plot-ts-overlay", "--plot_ts_overlay", dest="plot_ts_overlay",
+                       nargs="?", const=True, default=False, metavar="WINDOW",
+                       help="the same series overlaid instead: one panel per GPU with "
+                            "every metric on a shared axis, one row per node -- so a "
+                            "multi-node job needs no --nodename. Answers 'did these move "
+                            "together', where --plot_ts answers 'how did this one move'. "
+                            "Watts are omitted (they cannot share an axis with "
+                            "percentages) and each panel legends its own metrics")
     level = shape.add_mutually_exclusive_group()
     level.add_argument("--stats", action="store_const", const="gpu", dest="stats",
                        help="--ts: summarize the series instead of writing it -- "
@@ -618,8 +626,25 @@ def _want_color(args) -> bool:
 _JOBID_RE = re.compile(r"^\d+([_.]\w+)*$")
 
 
+def _plot_flag(args) -> str:
+    """Which chart flag the user typed, for the messages that name one.
+
+    handle_report folds --plot_ts_overlay into plot_ts, so every guard downstream would
+    otherwise tell someone to "drop --plot_ts" about a flag they did not type.
+    """
+    return ("--plot_ts_overlay" if getattr(args, "plot_ts_overlay", False) is not False
+            else "--plot_ts")
+
+
 def _ts_value(args) -> Tuple[str, object]:
-    """``(flag, value)`` for whichever of --ts / --plot_ts carries one."""
+    """``(flag, value)`` for whichever of --ts / --plot_ts / --plot_ts_overlay carries one.
+
+    The overlay is checked first because handle_report has already folded its value into
+    ``plot_ts``: both then hold it, and the note this feeds has to name the flag the user
+    actually typed.
+    """
+    if getattr(args, "plot_ts_overlay", False) not in (None, False, True):
+        return "--plot_ts_overlay", args.plot_ts_overlay
     if args.plot_ts not in (None, False, True):
         return "--plot_ts", args.plot_ts
     return "--ts", args.ts
@@ -638,7 +663,11 @@ def _reclaim_jobid_after_ts(args) -> None:
     if value in (None, False, True) or not _JOBID_RE.match(str(value)):
         return
     args.jobids = list(args.jobids) + [str(value)]
-    setattr(args, "plot_ts" if flag == "--plot_ts" else "ts", True)
+    # The overlay sets both, since its value was folded into plot_ts and either would
+    # otherwise be left holding a job ID where a window belongs.
+    for dest in {"--ts": ["ts"], "--plot_ts": ["plot_ts"],
+                 "--plot_ts_overlay": ["plot_ts", "plot_ts_overlay"]}[flag]:
+        setattr(args, dest, True)
     # Say which reading was taken. A bare number cannot be both a job ID and a
     # window, and someone who meant "60 minutes" should not have to work out from an
     # empty report that it was read as job 60.
@@ -699,17 +728,26 @@ def _plot_timeseries(text: str, args) -> None:
         # render_line keys its series on (NODE, GPU) alone, so two jobs that shared a
         # GPU would concatenate into one line: a chart that looks right and is not.
         raise JobscopeError(
-            "--plot_ts charts one job; this selection has %d (%s%s). Pick one with -j JOBID."
-            % (len(jobids), ", ".join(jobids[:4]), ", ..." if len(jobids) > 4 else ""))
+            "%s charts one job; this selection has %d (%s%s). Pick one with -j JOBID."
+            % (_plot_flag(args), len(jobids), ", ".join(jobids[:4]),
+               ", ..." if len(jobids) > 4 else ""))
+    overlay = getattr(args, "plot_ts_overlay", False) is not False
     nodes = sorted({r.get("NODE") for r in rows if r.get("NODE")})
-    if len(nodes) > 1:
+    if len(nodes) > 1 and not overlay:
+        # Lifted for the overlay, which gives each node its own row -- that is the
+        # layout's reason to exist. The one-job guard above still applies to both:
+        # render_line keys its series on (NODE, GPU) alone.
         raise JobscopeError(
-            "--plot_ts charts one node; this job ran on %d: %s. Add --nodename=NODE."
+            "--plot_ts charts one node; this job ran on %d: %s. Add --nodename=NODE,"
+            " or use --plot_ts_overlay for a row per node."
             % (len(nodes), ", ".join(nodes)))
     # Name what is being charted. Without it a windowed chart is indistinguishable
     # from a whole-run one -- the x axis counts minutes from the window's own start.
     window = _ts_window(args)
-    print("job %s  %s%s" % (jobids[0], nodes[0] if nodes else "?",
+    # A count once there is more than one, since the overlay labels each row with its
+    # own node and naming only the first here would contradict the rows below it.
+    where = nodes[0] if len(nodes) == 1 else ("%d nodes" % len(nodes) if nodes else "?")
+    print("job %s  %s%s" % (jobids[0], where,
                             "  last %s" % format_duration(window) if window else ""))
     # The CSV is already curated to exactly the metrics --ts resolved to show
     # (KEY_SPECS, ALL_SPECS, or CPU%/MEM%), so charting everything present in it
@@ -721,21 +759,32 @@ def _plot_timeseries(text: str, args) -> None:
     # the scale and flattens every percentage onto the floor. The overlaid single-panel
     # chart is one pipe away, and the README shows it:
     #   jobscope -j JOB --ts --csv | jobscope plot
-    plot.run(plot.default_args(kind="line", by="metric", columns=True,
-                               no_color=args.no_color, all=True),
+    # --plot_ts_overlay differs by `by` alone: "gpu" puts the metrics on one shared axis
+    # in a panel per GPU, and --columns then packs those panels into a row per node.
+    # Everything else -- the curated metric set, all=True, the colour choice -- is the
+    # same call, which is what keeps the two layouts describing the same series.
+    plot.run(plot.default_args(kind="line", by="gpu" if overlay else "metric",
+                               columns=True, no_color=args.no_color, all=True),
              fobj=io.StringIO(text))
 
 
 def handle_report(args) -> None:
     """The one data path: select jobs, then render at the chosen granularity."""
+    # --plot_ts_overlay *is* --plot_ts with a different layout, so it is folded into it
+    # here -- before _reclaim_jobid_after_ts, which is the first thing to read the value.
+    # Seven places key on args.plot_ts (the window carriers, the --csv/--stats/--classify
+    # guards, the --ts implication, and the narrowed help); folding means every one of
+    # them applies to the overlay untouched, and only _plot_timeseries has to know.
+    if args.plot_ts_overlay is not False:
+        args.plot_ts = args.plot_ts_overlay
     _reclaim_jobid_after_ts(args)
     if args.plot_ts:
         # --plot_ts *is* --ts, with the CSV charted instead of written. Setting it here,
         # before anything reads it, means every --ts path applies unchanged: the schema,
         # --step, and the --nodename guard just below.
         if args.csv:
-            raise JobscopeError("--plot_ts draws a chart; drop --csv, or drop --plot_ts "
-                                "to keep the CSV")
+            raise JobscopeError("%s draws a chart; drop --csv, or drop %s to keep the CSV"
+                                % (_plot_flag(args), _plot_flag(args)))
         args.ts = True
     cfg = _apply_config(args)
     request = build_request(args, cfg)
@@ -755,7 +804,8 @@ def handle_report(args) -> None:
               file=sys.stderr)
     if args.classify and args.plot_ts:
         # The plot branch wins below, so say so rather than drop it silently.
-        print("note: --plot_ts draws the series; ignoring --classify", file=sys.stderr)
+        print("note: %s draws the series; ignoring --classify" % _plot_flag(args),
+              file=sys.stderr)
     # --nodename and --gpuid apply everywhere now. On --per-gpu and --ts they filter
     # rows, which have a node and a GPU on them; on the summary there is no row to
     # filter, so select.py narrows the numbers the summary is computed *from*. Both

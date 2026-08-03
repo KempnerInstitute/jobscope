@@ -37,6 +37,10 @@ FOOTER_ROWS = {"Mean", "MeanPerGPU", "MeanPerGPUHour", "Jobs",
 # count drops before the width does. Not configurable: it is a property of the glyphs,
 # not a preference, and setting it lower produces a chart with no readable axis.
 MIN_PANEL = 28
+# The overlay's panels carry their own legend, which plotext draws inside the axes: the
+# longest metric label plus its marker is about 11 columns, so a panel at MIN_PANEL would
+# be more legend than plot. A wider floor means fewer abreast and a readable one.
+OVERLAY_MIN_PANEL = 46
 GRID_GAP = 2
 
 # Two spellings of one quantity: DUTY% is what GPU% was called before it was renamed,
@@ -409,6 +413,34 @@ def render_line(columns, rows, args, plt, Console):
         print()
         return ncols
 
+    def overlay_grid(node, gpu_keys, drawn, height):
+        """One row of panels for ``node``, one panel per GPU, every metric overlaid.
+
+        ``grid``'s sibling, and deliberately its near-twin: the width arithmetic is the
+        same because the packing problem is. The two differences are what the row means
+        -- a node here, a metric there -- and that a panel holds every metric rather
+        than one.
+
+        The legend goes *in* each panel, naming the metrics where they are drawn. That
+        costs plot area -- plotext puts it inside the axes, and the longest label plus its
+        marker is ~11 columns -- so these panels get a wider floor than ``grid``'s
+        (:data:`OVERLAY_MIN_PANEL`). The effect is fewer panels abreast on a narrow
+        terminal, which ``in_columns`` wraps; the alternative, a key above the grid, put
+        the names somewhere the eye is not while it reads a trace.
+        """
+        available = terminal_width(sys.stdout, default=width) if args.width is None else width
+        shown = cap(gpu_keys, "GPUs on %s" % node)
+        fit = max(1, (available + GRID_GAP) // (OVERLAY_MIN_PANEL + GRID_GAP))
+        ncols = min(len(shown), fit)
+        panel = (available - GRID_GAP * (ncols - 1)) // ncols
+        blocks = [build([(m, mcolor[m], gpus[(n, g)], m) for m in drawn],
+                        n if not g or g == "?" else "gpu%s" % g, "", height, size=panel)
+                  for n, g in shown]
+        print(node)
+        for line in in_columns(blocks, columns=ncols, gap=GRID_GAP, available=available):
+            print(line)
+        print()
+
     if args.compact:
         multi = len(keys) > 1
 
@@ -439,8 +471,27 @@ def render_line(columns, rows, args, plt, Console):
     # should be asked for rather than arrived at.
     as_columns = (not multinode and n_keys > 1
                   and (args.columns or len(gpu_list(args.gpu or "")) > 1))
+    # `--by gpu --columns`: metrics overlaid on a shared axis (what --by gpu means)
+    # packed one panel per GPU into a row per node (what --columns means). The two were
+    # inert together before, because the branch below claimed every multi-node CSV.
+    overlaid_columns = args.by == "gpu" and args.columns and n_metrics > 1
 
-    if multinode:
+    if overlaid_columns:
+        # Before the multinode branch on purpose: that one charts a single metric per
+        # node, which is exactly the collapse this layout exists to avoid.
+        lines_are_gpus = False
+        dropped = [c for c in metric_cols(columns) if c not in mcols]
+        if dropped:
+            print("note: %s omitted -- watts cannot share an axis with percentages"
+                  " (--plot_ts gives each metric its own panel)" % ", ".join(dropped),
+                  file=sys.stderr)
+        # Tall enough for the in-panel legend: plotext draws one row per label inside the
+        # axes and silently drops the whole legend when it will not fit, so a fixed height
+        # loses the metric names exactly as the set grows. Measured: six metrics need 11.
+        height = args.height or max(10, len(metrics) + 5)
+        for node in cap(nodes, "nodes"):
+            overlay_grid(node, [(n, g) for n, g in keys if n == node], metrics, height)
+    elif multinode:
         metric = metrics[0]
         stat_metrics = [metric]
         lines_are_gpus = True

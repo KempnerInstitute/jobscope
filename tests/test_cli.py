@@ -927,6 +927,39 @@ def test_plot_ts_needs_no_nodename_for_a_single_node_job(monkeypatch, capsys):
     assert "┤" in capsys.readouterr().out
 
 
+def test_the_overlay_needs_no_nodename_because_each_node_is_a_row(monkeypatch, capsys):
+    """The guard --plot_ts raises is the one --plot_ts_overlay exists to lift."""
+    monkeypatch.setenv("COLUMNS", "200")
+    _fake_ts(monkeypatch, _ts_rows(nodes=("node01", "node02")))
+    main(["-j", "1", "--plot_ts_overlay"])
+    out = capsys.readouterr().out
+    assert "┤" in out
+    assert [ln.strip() for ln in out.splitlines()].count("node01") == 1
+    assert [ln.strip() for ln in out.splitlines()].count("node02") == 1
+    # The header cannot name one node when the rows below it name two.
+    assert "2 nodes" in out
+
+
+def test_the_overlay_still_refuses_several_jobs(monkeypatch, capsys):
+    """Lifting the node guard does not lift the job one: render_line keys its series on
+    (NODE, GPU) alone, so two jobs sharing a card would concatenate into one line."""
+    rows = _ts_rows(nodes=("node01",))
+    _fake_ts(monkeypatch, rows.replace("100,alice", "101,alice", 1))
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--plot_ts_overlay"])
+    assert "charts one job" in capsys.readouterr().err
+
+
+def test_the_overlay_folds_into_plot_ts_so_its_guards_apply(monkeypatch, capsys):
+    """handle_report sets args.plot_ts from it, which is what makes every --ts path --
+    the schema, the window, --csv -- apply unchanged. The message must still name the
+    flag that was actually typed."""
+    _fake_ts(monkeypatch, _ts_rows(nodes=("node01",)))
+    with pytest.raises(SystemExit):
+        main(["-j", "1", "--plot_ts_overlay", "--csv"])
+    assert "--plot_ts_overlay draws a chart" in capsys.readouterr().err
+
+
 def test_plot_ts_charts_every_metric_by_default(monkeypatch, capsys):
     """Bare --plot_ts resolves to the combined/extended view, same as --all-metrics did
     before -- so the chart shows the extended catalog either way.

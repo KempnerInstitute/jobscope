@@ -338,6 +338,75 @@ def test_columns_grids_without_naming_the_gpus(tmp_path, capsys):
     assert titles and all(("gpu%d" % g) in titles[0] for g in range(4))
 
 
+# Two nodes, two GPUs each, and a watts column -- the case --plot_ts refuses and the
+# overlay exists for.
+_OVERLAY_CSV = "JOBID,EPOCH,TIME,NODE,GPU,GPU%,SM_ACT%,POWER_W\n" + "".join(
+    "100,%d,2020-01-01T00:%02d:00,%s,%s,%d,%d,%d\n" % (1000 + 60 * t, t, n, g, 90 + t, 50 + t, 400)
+    for n in ("node01", "node02") for g in "01" for t in range(4))
+
+
+def _overlay(tmp_path, capsys, width="200"):
+    return _run_plot(tmp_path, "ov.csv", _OVERLAY_CSV, capsys,
+                     extra=["--by", "gpu", "--columns", "--all", "--width", width])
+
+
+def test_the_overlay_gives_each_node_a_row_and_each_gpu_a_panel(tmp_path, capsys):
+    """The layout --plot_ts_overlay exists for. --by gpu overlays the metrics on one
+    axis; --columns packs those panels into a row per node."""
+    out = _overlay(tmp_path, capsys)
+    lines = out.splitlines()
+    rows = [i for i, ln in enumerate(lines) if ln.strip() in ("node01", "node02")]
+    assert len(rows) == 2, out
+    # Both GPUs titled side by side on the line after each node heading.
+    for i in rows:
+        assert "gpu0" in lines[i + 1] and "gpu1" in lines[i + 1]
+
+
+def test_the_overlay_beats_the_multinode_branch(tmp_path, capsys):
+    """Without this the multi-node branch claims the CSV and charts a single metric,
+    which is the collapse the overlay exists to avoid."""
+    out = _overlay(tmp_path, capsys)
+    assert "multi-node view charts one metric" not in out
+    assert "GPU%" in out and "SM_ACT%" in out
+
+
+def test_the_overlay_drops_watts_and_says_so(tmp_path, capsys):
+    """Watts cannot share an axis with percentages: a 400 W line pins the scale and
+    flattens every percentage onto the floor."""
+    out = _overlay(tmp_path, capsys)
+    panels = out.split("node01", 1)[1].split("min / mean")[0]
+    assert "GPU%" in panels and "SM_ACT%" in panels     # legended in the panel
+    assert "POWER_W" not in panels                       # and omitted from it
+
+
+def test_the_overlay_legends_each_panel(tmp_path, capsys):
+    """The names belong where the traces are. plotext draws the legend inside the axes
+    and drops it silently when it will not fit, so this also guards the height: a fixed
+    one loses the legend as the metric set grows."""
+    out = _overlay(tmp_path, capsys)
+    body = out.split("node01", 1)[1].split("min / mean")[0]
+    legended = [ln for ln in body.splitlines() if "┤" in ln and "GPU%" in ln]
+    assert legended, body
+
+
+def test_the_overlay_height_grows_with_the_metric_set(tmp_path, capsys):
+    """Six metrics need eleven rows; the legend vanishes entirely at ten."""
+    csv = _OVERLAY_CSV.replace("GPU%,SM_ACT%,POWER_W", "GPU%,SM_ACT%,TENSOR%,DRAM%,OCC%,POWER_W")
+    csv = "\n".join(ln if i == 0 else ln.replace(",400", ",60,70,80,400", 1)
+                     for i, ln in enumerate(csv.splitlines()) if ln) + "\n"
+    out = _run_plot(tmp_path, "tall.csv", csv, capsys,
+                    extra=["--by", "gpu", "--columns", "--all", "--width", "200"])
+    body = out.split("node01", 1)[1].split("min / mean")[0]
+    assert any("DRAM%" in ln for ln in body.splitlines() if "┤" in ln or "│" in ln), body
+
+
+def test_a_narrow_overlay_wraps_rather_than_drawing_unreadable_panels(tmp_path, capsys):
+    """in_columns + MIN_PANEL already decide this; the node grouping must survive it."""
+    out = _overlay(tmp_path, capsys, width="40")
+    assert out.count("gpu0") >= 2 and out.count("gpu1") >= 2   # still both, wrapped
+    assert [ln.strip() for ln in out.splitlines()].count("node01") == 1
+
+
 def test_the_chart_grades_with_the_configured_palette(tmp_path, monkeypatch):
     """One [colors] value drives both the report's escapes and the chart's styles,
     so a job is the same colour in a table and in a chart."""
