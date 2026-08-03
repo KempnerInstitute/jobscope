@@ -172,26 +172,34 @@ what distinguishes "used half the GPU throughout" from "used all of it for half 
 run":
 
 ```bash
-jobscope -j 36770231 --nodename holygpu8a15401 --plot_ts
-jobscope -j 36770231 --nodename holygpu8a15401 --plot_ts --gpuid 0,1   # two cards
-jobscope -j 36770231 --nodename holygpu8a15401 --plot_ts 30m           # the last 30 min
+jobscope -j 36600605 --nodename holygpu8a05201 --plot_ts
+jobscope -j 36600605 --nodename holygpu8a05201 --plot_ts --gpuid 0,1  # two cards
+jobscope -j 36600605 --nodename holygpu8a05201 --plot_ts 30m         # the last 30 min
 ```
 
-One panel per metric, one column per GPU. `--nodename` is required on a multi-node job
-— the chart keys on GPU, and two nodes' card 0 would otherwise merge into one line.
+<img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/timeseries.svg" alt="jobscope -j 36600605 --plot_ts" width="900">
+
+One panel per GPU, every metric on a shared axis. This one is a healthy job — `GPU%`
+pinned near 100 with `SM_ACT%` following it — which is what you are checking against.
+An idle job is a flat line at the bottom, and a job that stalls periodically is a comb.
+
+`--nodename` is required on a multi-node job: the chart keys on GPU, so two nodes'
+card 0 would otherwise merge into one line. `--gpuid` keeps the picture readable on a
+node with many cards — every card is another panel.
 
 For the numbers rather than the picture, `--ts` writes the same series as CSV:
 
 ```
-$ jobscope -j 36770231 --nodename holygpu8a15401 --ts 20m --csv
+$ jobscope -j 36600605 --nodename holygpu8a05201 --ts 20m --csv
 JOBID,USER,EPOCH,TIME,NODE,GPU,MODEL,GPU%,SM_ACT%,TENSOR%,DRAM%,POWER_W,CPU%,MEM%
-36770231,alice,1785702734,2026-08-02T16:32:14,holygpu8a15401,0,NVIDIA H100 80GB HBM3,0,0.0,0.0,0.0,116,4,1
+36600605,alice,1785716527,2026-08-02T20:22:07,holygpu8a05201,0,NVIDIA H200,100,91.2,36.2,37.8,689,25,23
 ```
 
-Pipe it to `jobscope plot` for other chart shapes, or into whatever you normally use:
+One row per GPU per scrape. Pipe it to `jobscope plot` for other chart shapes, or into
+whatever you normally use:
 
 ```bash
-jobscope -j 36770231 --ts --csv | jobscope plot --compact
+jobscope -j 36600605 --ts --csv | jobscope plot --compact
 ```
 
 `--stats` summarises the window instead — min/mean/max/last per GPU per metric — and

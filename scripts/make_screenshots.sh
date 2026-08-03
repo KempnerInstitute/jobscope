@@ -9,8 +9,15 @@
 # Environment overrides:
 #   JOBSCOPE     jobscope executable (default: jobscope)
 #   PYBIN        python for ansi2svg (default: python3)
-#   TS_JOB       GPU job id for the time-series screenshot (required)
-#   TS_USER      its owner, masked out of the shot (default: read from sacct)
+#   TS_JOB       GPU job id for the time-series screenshot (required). Pick a busy
+#                one -- a flat line at 0% shows nothing about the chart.
+#   TS_NODE      its node, for --nodename (required if the job spans several)
+#   TS_GPUS      which cards to chart, e.g. "0,1" (default: all of them). Each card is
+#                a panel, so a 4-GPU node is 2700px of screenshot -- two is plenty to
+#                show what the chart is.
+#   ONE_JOB      job id for the single-job table shot (default: $TS_JOB). Worth a
+#                different job: the interesting table is a mediocre job, where the
+#                interesting chart is a busy one.
 #   AGG_SELECT   selector for the aggregated bars (default: -N 15)
 #   AGG_USER     user for the aggregated bars (optional; kept out of the title)
 #   SUM_SELECT   selector for the summary-table shot (default: -p kempner_h100 -D 2)
@@ -28,6 +35,11 @@ ansi2svg() { "$PYBIN" "$ROOT/scripts/ansi2svg.py" "$1" "$2"; }
 
 export FORCE_COLOR=1
 TS_JOB="${TS_JOB:?set TS_JOB to a GPU job id for the time-series screenshot}"
+TS_NODE_ARGS=()
+[ -n "${TS_NODE:-}" ] && TS_NODE_ARGS=(--nodename "$TS_NODE")
+TS_GPU_ARGS=()
+[ -n "${TS_GPUS:-}" ] && TS_GPU_ARGS=(--gpuid "$TS_GPUS")
+ONE_JOB="${ONE_JOB:-$TS_JOB}"
 AGG_SELECT="${AGG_SELECT:--N 15}"
 AGG_USER_ARGS=()
 [ -n "${AGG_USER:-}" ] && AGG_USER_ARGS=(-u "$AGG_USER")
@@ -36,9 +48,10 @@ SUM_USER_ARGS=()
 [ -n "${SUM_USER:-}" ] && SUM_USER_ARGS=(-u "$SUM_USER")
 
 echo "[1/4] time series  (job $TS_JOB)"
-"$JOBSCOPE" -j "$TS_JOB" --ts --csv \
+"$JOBSCOPE" -j "$TS_JOB" "${TS_NODE_ARGS[@]}" "${TS_GPU_ARGS[@]}" --ts --csv \
   | "$JOBSCOPE" plot --width 90 --height 18 \
-  | ansi2svg docs/timeseries.svg "jobscope -j $TS_JOB --ts --csv | jobscope plot"
+  | ansi2svg docs/timeseries.svg \
+      "jobscope -j $TS_JOB${TS_NODE:+ --nodename $TS_NODE}${TS_GPUS:+ --gpuid $TS_GPUS} --ts --csv | jobscope plot"
 
 echo "[2/4] aggregated bars  ($AGG_SELECT)"
 "$JOBSCOPE" "${AGG_USER_ARGS[@]}" --gpu $AGG_SELECT --csv \
@@ -53,14 +66,14 @@ mask() { sed -e "s/$1/alice /g"; }
 # The job's OWNER, not whoever is running this: masking $(id -un) leaked the owner of
 # a job belonging to someone else, which is exactly the case a screenshot of a
 # real job is likely to be.
-TS_USER="${TS_USER:-$(sacct -X -j "$TS_JOB" -o User -n 2>/dev/null | tr -d ' ' | head -1)}"
-[ -n "$TS_USER" ] || { echo "cannot determine the owner of job $TS_JOB; set TS_USER" >&2; exit 1; }
+ONE_USER="${ONE_USER:-$(sacct -X -j "$ONE_JOB" -o User -n 2>/dev/null | tr -d ' ' | head -1)}"
+[ -n "$ONE_USER" ] || { echo "cannot determine the owner of job $ONE_JOB; set ONE_USER" >&2; exit 1; }
 
-echo "[3/4] one job  (job $TS_JOB, owner masked)"
-"$JOBSCOPE" -j "$TS_JOB" \
-  | mask "$TS_USER" \
+echo "[3/4] one job  (job $ONE_JOB, owner masked)"
+"$JOBSCOPE" -j "$ONE_JOB" \
+  | mask "$ONE_USER" \
   | grep -v "use each metric\|(wasteful/red/yellow)\|^  USED is\|^  bands catch" \
-  | ansi2svg docs/onejob.svg "jobscope -j $TS_JOB"
+  | ansi2svg docs/onejob.svg "jobscope -j $ONE_JOB"
 
 echo "[4/4] partition summary  ($SUM_SELECT)"
 # Trimmed to a spread of rows: the full selection is tens of jobs and 2700px tall,
