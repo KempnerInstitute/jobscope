@@ -34,56 +34,62 @@ Restart your shell so `uv` is on your `PATH`. Later, `uv tool upgrade jobscope` 
 `uv tool uninstall jobscope`. (Other ways to get `uv`: `pipx install uv`,
 `brew install uv`, or the [uv install docs](https://docs.astral.sh/uv/getting-started/installation/).)
 
-If your cluster has no jobscope configuration yet, that is a one-time setup — see
-[`docs/admin.md`](docs/admin.md).
+If your cluster has no jobscope configuration yet, that is a one-time setup — two
+commands, once:
+
+```bash
+jobscope probe        # what does this cluster expose, and can jobscope read it
+jobscope probe --init # write a config from what it just found
+```
+
+`probe` reads your cluster and reports what it found; `--init` turns that into a
+config file (and refuses to overwrite one that already exists). Details, and what
+each detected setting means, in [`docs/admin.md`](docs/admin.md).
 
 ## One job
 
-```
-$ jobscope -j 36770231
-JOBID        USER    STATE     NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  TENSOR%  DRAM%  POWER_W  RUNTIME
-36770231     alice   COMPLETED 2     6     28    8     28    70     6.0      3.3      2.6    149      01:29:10
-
-1. Summary by metric
-METRIC   USED          RED  YELLOW  GREEN
-CPU%     11.4h (6%)    1    0       0
-GPU%     33.2h (28%)   0    1       0
-SM_ACT%  7.1h (6%)     1    0       0
-...
-
-2. Average efficiency  (filled = used, grey = idle)
-     CPU%    6%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-     GPU%   28%  ██████████░░░░░░░░░░░░░░░░░░░░░░░░
-    GMEM%   70%  ████████████████████████░░░░░░░░░░
-```
+<img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/onejob.svg" alt="jobscope -j 36770231" width="900">
 
 The row is the job. `USED` under it is resource-time that did work and its share of
-what was allocated — so `GPU% 33.2h (28%)` means the job held GPU-hours of which 28%
-were busy. The bars draw the same figures.
+what was allocated — so `GPU% 3.3h (28%)` means the job held GPU-hours of which 28%
+were busy. The bars draw the same figures, and everything is tinted by the band it
+falls in: red is pathological, green is fine.
 
 Read `GMEM% 70%` beside `GPU% 28%` as a job that filled the cards' memory and then
 barely computed — the shape a too-small batch or a data-loading bottleneck makes.
+That is why the last line reads `average` rather than `good`.
 
 `jobscope 36770231` works too; `-j` is there so you can repeat it for several jobs.
 
 ## Your finished jobs in a partition
 
-```
-$ jobscope finished -p kempner_h100 -D 3
-  User:      alice
-  Partition: kempner_h100
-  Select:    last 3 days, completed
-  Window:    2026-07-30 19:51 .. 2026-08-02 19:51
-JOBID        USER   STATE     NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  TENSOR%  DRAM%  POWER_W  RUNTIME
-36533024     alice  COMPLETED 1     14    5     1     0     11     0.3      0.4      0.1    90       00:02:34
-36534792     alice  COMPLETED 1     26    7     1     0     12     2.1      0.2      1.3    128      00:19:32
-36536469     alice  COMPLETED 1     30    6     1     10    12     3.6      0.1      1.2    140      00:11:20
-... 180 more rows, then the same summary block ...
+```bash
+jobscope finished -p kempner_h100          # the last day (the default)
+jobscope finished -p kempner_h100 -D 3     # widen it to three days
 ```
 
+<img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/summary.svg" alt="jobscope finished -p kempner_h100" width="900">
+
 `finished` is the mode; without it, bare `jobscope` shows what is **running** now. The
-header always restates the window it actually scanned, so a report cannot claim a
-range it did not read.
+header always restates the window it actually scanned, so a report cannot claim a range
+it did not read.
+
+Three things to read here, and the third is the point:
+
+1. **The rows**, tinted per metric. The spread is the story — `GPU% 0` on one job and
+   `70` on another means the problem is not the partition, it is particular jobs.
+2. **`1. Summary by metric`** pools every job: `GPU% 1.8h (41%)` is the GPU-time that
+   did work across the whole selection, and `RED / YELLOW / GREEN` count how many jobs
+   fell in each band. A low `USED` with no red jobs means everyone wastes a little; red
+   jobs with a decent `USED` means a few jobs waste a lot. Those need different
+   conversations.
+3. **`3. Problem jobs`** names them. Each row is one measure, with the count that
+   tripped it and the cutoff used, then the worst offenders by wasted resource-time —
+   `36738257:0%:0.1h(00:06:58)` is that job at 0%, 0.1 GPU-hours wasted, over a
+   seven-minute run. `Wasteful all` is the jobs that failed every measure at once,
+   which is where to start.
+
+`-D 3` above widens the window; the next section covers the rest.
 
 ## Selecting by date
 

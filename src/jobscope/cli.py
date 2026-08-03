@@ -561,9 +561,16 @@ def _want_color(args) -> bool:
 
     Only for a table on a terminal: escape codes in a CSV or a redirected file are
     corruption, not decoration, and $NO_COLOR is the cross-tool way to say no.
+
+    $FORCE_COLOR is its mirror, for the case where the destination is not a tty but
+    the caller knows it wants colour anyway -- scripts/make_screenshots.sh piping into
+    a recorder, or a CI job rendering docs. Never over --csv or --no-color: those are
+    explicit, and a machine format with escapes in it is corrupt whoever asked.
     """
     if args.csv or args.no_color or os.environ.get("NO_COLOR"):
         return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
     return bool(getattr(sys.stdout, "isatty", lambda: False)())
 
 

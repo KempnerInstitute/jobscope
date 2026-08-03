@@ -1358,3 +1358,27 @@ def test_config_shows_the_endpoint_redacted(monkeypatch, capsys):
     assert "***@prom.grafana.net/api/prom" in out
     assert "$JOBSCOPE_PROM_URL" in out       # and where it came from
     assert "scrape" in out
+
+
+def test_force_color_is_the_mirror_of_no_color(monkeypatch):
+    """scripts/make_screenshots.sh exports FORCE_COLOR to capture coloured tables for
+    the docs; before this it was ignored and every screenshot came out grey.
+
+    Neither variable may override an explicit flag: escapes in a CSV are corruption
+    whoever asked for them.
+    """
+    args = argparse.Namespace(csv=False, no_color=False)
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    assert cli._want_color(args) is False           # not a tty under pytest
+
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    assert cli._want_color(args) is True
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert cli._want_color(args) is False           # NO_COLOR wins over FORCE_COLOR
+
+    monkeypatch.delenv("NO_COLOR")
+    assert cli._want_color(argparse.Namespace(csv=True, no_color=False)) is False
+    assert cli._want_color(argparse.Namespace(csv=False, no_color=True)) is False
