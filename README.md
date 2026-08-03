@@ -11,11 +11,17 @@ and no cap on how many jobs you look at.
 
 ## Screenshots
 
+<!-- Image paths are RELATIVE on purpose. An absolute
+     raw.githubusercontent.com/.../main/... URL can only point at main, so a
+     screenshot added or regenerated on a branch reads as "image not found" until
+     the branch merges -- and a regenerated one silently serves main's old version,
+     which is worse. Relative paths resolve against whatever ref you are viewing.
+     The cost is that PyPI does not resolve them, so images do not render there. -->
 <table width="800">
   <tr><td><strong>Per-job DCGM time series</strong></td></tr>
-  <tr><td><img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/timeseries.svg" alt="per-job DCGM time series" width="800"></td></tr>
+  <tr><td><img src="docs/timeseries.svg" alt="per-job DCGM time series" width="800"></td></tr>
   <tr><td><strong>Aggregated utilization across jobs</strong></td></tr>
-  <tr><td><img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/aggregated.svg" alt="aggregated mean-utilization bars" width="800"></td></tr>
+  <tr><td><img src="docs/aggregated.svg" alt="aggregated mean-utilization bars" width="800"></td></tr>
 </table>
 
 ## Install
@@ -48,7 +54,7 @@ each detected setting means, in [`docs/admin.md`](docs/admin.md).
 
 ## One job
 
-<img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/onejob.svg" alt="jobscope -j 36770231" width="900">
+<img src="docs/onejob.svg" alt="jobscope -j 36770231" width="900">
 
 The row is the job. `USED` under it is resource-time that did work and its share of
 what was allocated — so `GPU% 3.3h (28%)` means the job held GPU-hours of which 28%
@@ -68,7 +74,7 @@ jobscope finished -p kempner_h100          # the last day (the default)
 jobscope finished -p kempner_h100 -D 3     # widen it to three days
 ```
 
-<img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/summary.svg" alt="jobscope finished -p kempner_h100" width="900">
+<img src="docs/summary.svg" alt="jobscope finished -p kempner_h100" width="900">
 
 `finished` is the mode; without it, bare `jobscope` shows what is **running** now. The
 header always restates the window it actually scanned, so a report cannot claim a range
@@ -175,7 +181,7 @@ run":
 jobscope -j 36788818_3 --plot_ts
 ```
 
-<img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/timeseries.svg" alt="jobscope -j 36788818_3 --plot_ts" width="900">
+<img src="docs/timeseries.svg" alt="jobscope -j 36788818_3 --plot_ts" width="900">
 
 One panel per GPU, every metric on a shared axis, with min/mean/max/last underneath.
 This job is worth reading closely: `GPU%` holds around 90 and `SM_ACT%` around 70, so
