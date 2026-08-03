@@ -96,7 +96,7 @@ job that is running right now.
 | `--stats-per-node` | the same, pooled per node |
 | `--stats-per-job` | the same, pooled across every node and GPU |
 | `--classify` | with `--ts`: sort the jobs into efficiency categories, worst first |
-| `--plot_ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
+| `--plot_ts [WINDOW]` | that time series charted instead: one panel per GPU, metrics on a shared axis. `--dcgm` widens the set it draws |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--dcgm` | the full DCGM metric catalog |
 | `--avg` | `running` only: fold over the runtime instead of a snapshot |

@@ -290,7 +290,13 @@ def render_heat(columns, rows, args, Console, Table, Text, thresholds, palette=N
 def render_line(columns, rows, args, plt, Console):
     """Time-series line chart over the job's window plus a per-metric stats summary."""
     console = Console(no_color=args.no_color)
-    mcols = [c for c in metric_cols(columns) if is_pct(c) or c in ("POWER_W",)]
+    # POWER_W only joins the set when each metric gets its own axis. `--by gpu` puts
+    # them all on one, and watts against percentages means a 500 W line pins the scale
+    # and flattens every percentage onto the floor -- the chart then shows nothing at
+    # all. A shared axis needs shared units.
+    shared_axis = args.by == "gpu"
+    mcols = [c for c in metric_cols(columns)
+             if is_pct(c) or (not shared_axis and c in ("POWER_W",))]
     if args.all:
         # CPU%/MEM% lead so a combined series keeps them even when the panel cap
         # trims a wide extended-GPU-catalog selection -- they are the whole point

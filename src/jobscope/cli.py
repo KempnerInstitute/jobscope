@@ -162,8 +162,9 @@ def build_parser():
     grain.add_argument("--plot-ts", "--plot_ts", dest="plot_ts", nargs="?", const=True,
                        default=False, metavar="WINDOW",
                        help="chart that time series instead of writing it: one panel per "
-                            "metric, one column per GPU. Takes the same optional window. "
-                            "Needs --nodename on a multi-node job")
+                            "GPU, every metric on a shared axis -- the same chart "
+                            "'--ts --csv | jobscope plot' draws. Takes the same optional "
+                            "window. Needs --nodename on a multi-node job")
     level = shape.add_mutually_exclusive_group()
     level.add_argument("--stats", action="store_const", const="gpu", dest="stats",
                        help="--ts: summarize the series instead of writing it -- "
@@ -674,8 +675,21 @@ def _plot_timeseries(text: str, args) -> None:
     # The CSV is already curated to exactly the metrics --ts resolved to show
     # (KEY_SPECS, ALL_SPECS, or CPU%/MEM%), so charting everything present in it
     # is always correct -- there is no narrower in-CSV subset left to fall back to.
-    plot.run(plot.default_args(kind="line", by="metric", columns=True,
-                               no_color=args.no_color, all=True),
+    #
+    # `by="gpu"` -- one panel per GPU with every metric on a shared axis -- rather than
+    # a panel per metric. Two reasons. It is what the pipe this flag is shorthand for
+    # already does, and a one-command form that renders differently from
+    # `--ts --csv | jobscope plot` is a surprise nobody asked for. And it is the more
+    # useful picture: the question a time series answers is "did these move together",
+    # which one axis shows and seven stacked panels make you reconstruct. The cost is
+    # that a small-valued metric sits near the floor -- TENSOR% at 2% against GPU% at
+    # 90 -- which is itself the finding more often than it is a problem.
+    # `all` only when --dcgm asked for it. On a shared axis every extra series costs
+    # legibility, and past about five plotext stops drawing the legend at all -- lines
+    # nobody can identify. So the default is [plot] metrics, the curated set a site
+    # tunes, and --dcgm is where "show me everything" is already the request.
+    plot.run(plot.default_args(kind="line", by="gpu", all=args.dcgm,
+                               no_color=args.no_color),
              fobj=io.StringIO(text))
 
 
