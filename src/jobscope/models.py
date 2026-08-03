@@ -135,6 +135,3 @@ class JobMetrics:
 # begins 2026-02-04", and the aggregator for it (dedupe the sentences, since one dead
 # exporter produces the same one for every column it served) was written before the
 # renderer and removed unused. Read `by_header` when that lands.
-
-
-EMPTY = JobMetrics({})
