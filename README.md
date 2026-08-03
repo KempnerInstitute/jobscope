@@ -70,7 +70,7 @@ That is why the last line reads `average` rather than `good`.
 ## Your finished jobs in a partition
 
 ```bash
-jobscope finished -p kempner_h100          # the last day (the default)
+jobscope finished -p kempner_h100 -D 1     # the last day (-D 1 is the default)
 jobscope finished -p kempner_h100 -D 3     # widen it to three days
 ```
 
@@ -183,8 +183,9 @@ jobscope -j 36788818_3 --plot_ts
 
 <img src="docs/timeseries.svg" alt="jobscope -j 36788818_3 --plot_ts" width="900">
 
-One panel per GPU, every metric on a shared axis, with min/mean/max/last underneath.
-This job is worth reading closely: `GPU%` holds around 90 and `SM_ACT%` around 70, so
+One panel per metric, each on its own scale, with min/mean/max/last underneath. (The
+piped form below shares one axis across metrics instead, which is denser but hides a
+low-valued metric behind a high one.) This job is worth reading closely: `GPU%` holds around 90 and `SM_ACT%` around 70, so
 the card is genuinely busy — but `TENSOR%` is flat at 2. It is compute-bound on
 arithmetic the tensor cores never see, which no single average would have told you and
 which is the difference between "this job is fine" and "this job could be much

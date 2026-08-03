@@ -20,7 +20,7 @@
 #                interesting chart is a busy one.
 #   AGG_SELECT   selector for the aggregated bars (default: -N 15)
 #   AGG_USER     user for the aggregated bars (optional; kept out of the title)
-#   SUM_SELECT   selector for the summary-table shot (default: -p kempner_h100 -D 2)
+#   SUM_SELECT   selector for the summary-table shot (default: -p kempner_h100 -D 1)
 #   SUM_USER     user for it (optional). Pick someone with a spread of efficiencies:
 #                the shot is there to show red beside green, and a uniformly busy
 #                selection demonstrates nothing.
@@ -43,15 +43,18 @@ ONE_JOB="${ONE_JOB:-$TS_JOB}"
 AGG_SELECT="${AGG_SELECT:--N 15}"
 AGG_USER_ARGS=()
 [ -n "${AGG_USER:-}" ] && AGG_USER_ARGS=(-u "$AGG_USER")
-SUM_SELECT="${SUM_SELECT:--p kempner_h100 -D 2}"
+SUM_SELECT="${SUM_SELECT:--p kempner_h100 -D 1}"
 SUM_USER_ARGS=()
 [ -n "${SUM_USER:-}" ] && SUM_USER_ARGS=(-u "$SUM_USER")
 
+# --plot_ts directly, not `--ts --csv | plot`. The two render differently -- --plot_ts
+# is one panel per metric, the pipe defaults to one panel per GPU -- so capturing the
+# pipe while captioning it --plot_ts would show a chart the caption cannot produce.
+# The caption is the command, verbatim.
 echo "[1/4] time series  (job $TS_JOB)"
-"$JOBSCOPE" -j "$TS_JOB" "${TS_NODE_ARGS[@]}" "${TS_GPU_ARGS[@]}" --ts --csv \
-  | "$JOBSCOPE" plot --width 90 --height 18 \
-  | ansi2svg docs/timeseries.svg \
-      "jobscope -j $TS_JOB${TS_NODE:+ --nodename $TS_NODE}${TS_GPUS:+ --gpuid $TS_GPUS} --ts --csv | jobscope plot"
+TS_CMD=(-j "$TS_JOB" "${TS_NODE_ARGS[@]}" "${TS_GPU_ARGS[@]}" --plot_ts)
+"$JOBSCOPE" "${TS_CMD[@]}" \
+  | ansi2svg docs/timeseries.svg "jobscope ${TS_CMD[*]}"
 
 echo "[2/4] aggregated bars  ($AGG_SELECT)"
 "$JOBSCOPE" "${AGG_USER_ARGS[@]}" --gpu $AGG_SELECT --csv \
@@ -82,5 +85,8 @@ echo "[4/4] partition summary  ($SUM_SELECT)"
   | mask "${SUM_USER:-$(id -un)}" \
   | "$PYBIN" "$ROOT/scripts/trim_rows.py" --column 8 --keep 6 \
   | ansi2svg docs/summary.svg "jobscope finished $SUM_SELECT"
+# The caption deliberately omits -u $SUM_USER: the README documents the per-user
+# default, and naming a real account in a screenshot caption is what `mask` above
+# exists to prevent.
 
 echo "done."
