@@ -1467,8 +1467,14 @@ class SummaryRenderer:
             prefix = "  %-*s" % (user_width, user + "|")
             line, count = prefix, 0
             for text, long_running in jobs:
-                cell = tint(text, "long_running") if (
-                    long_running and self.options.color) else text
+                # Every entry here is red-band by construction, so it is painted like
+                # one: red means wasteful in every other part of the report, and a
+                # section titled Wasteful printing plain text read as "not graded".
+                # long_running keeps its own role for the expensive ones -- wasteful for
+                # hours, not minutes -- which is now a brighter red rather than the only
+                # colour in the section.
+                cell = tint(text, "long_running" if long_running else "wasteful") if (
+                    self.options.color) else text
                 candidate = line + (" " if count == 0 else ", ") + cell
                 if count and len(_ESC_RE.sub("", candidate)) > self.WORST_WIDTH:
                     out.append(line + ",")

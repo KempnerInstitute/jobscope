@@ -133,8 +133,13 @@ LEGACY_THRESHOLD_KEYS = ("gpu", "gmem", "mem", "default", "red", "cpu",
 # a Wasteful row whose job ran longer than [defaults] long_running. Two tiers
 # sharing a colour is the default, not a requirement -- a site wanting five distinct
 # colours (for a colourblind-safe palette, say) can set five.
+#
+# long_running is a *brighter* red rather than plain red because the Problem-jobs
+# entries around it are now painted `wasteful` too. It used to be the only colour in
+# that section, which made a section full of wasteful jobs read as ungraded unless one
+# of them happened to have run for over three hours.
 DEFAULT_COLORS = {"wasteful": "red", "inefficient": "red", "improvement": "yellow",
-                  "average": "green", "good": "green", "long_running": "red"}
+                  "average": "green", "good": "green", "long_running": "bright_red"}
 COLOR_ROLES = tuple(DEFAULT_COLORS)
 # The eight ANSI colours and their bright variants, by SGR foreground code. `rich`
 # accepts these names too, which is what lets one config value drive both the

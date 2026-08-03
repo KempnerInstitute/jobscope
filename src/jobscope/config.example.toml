@@ -235,8 +235,11 @@ inefficient = "red"
 improvement = "yellow"   # the "needs improvement" tier
 average     = "green"
 good        = "green"
-# Not a tier: a Problem-jobs entry whose job ran past [defaults] long_running.
-long_running = "red"
+# Not a tier: a Problem-jobs entry whose job ran past [defaults] long_running. Every
+# entry in that section is painted `wasteful` -- they are all red-band by construction
+# -- so this is the brighter red that separates "wasted for hours" from "wasted for
+# minutes". Set it to "red" to stop distinguishing them.
+long_running = "bright_red"
 
 
 # #############################################################################

@@ -1599,13 +1599,18 @@ def test_each_entry_carries_value_wasted_and_elapsed():
     assert "a:0%:6h(2:00:00)" in block[i + 1]     # 3 GPUs x 2h all idle
 
 
-def test_jobs_over_three_hours_are_tinted_red():
-    """Hours of idle hardware do not come back; a brief bad job costs little."""
+def test_every_wasteful_entry_is_red_and_the_long_ones_brighter():
+    """Hours of idle hardware do not come back; a brief bad job costs little -- but both
+    are wasteful, and a section titled Wasteful printing plain text read as ungraded.
+    So both are painted, and long_running is the brighter red that separates them."""
     records = {"long": _owned("long", "u1", 3 * 3600 + 1, 0.0),
                "brief": _owned("brief", "u1", 3 * 3600 - 1, 0.0)}
     block = "".join(_worst_block(records, color=True, thresholds=_thresholds()))
-    assert report._SGR["red"] + "long:" in block
-    assert report._SGR["red"] + "brief:" not in block
+    assert report._SGR["long_running"] + "long:" in block
+    assert report._SGR["wasteful"] + "brief:" in block
+    # Distinct, or the duration signal is lost.
+    assert report._SGR["long_running"] != report._SGR["wasteful"]
+    assert report._SGR["long_running"] + "brief:" not in block
     # Exactly at the boundary counts as brief: the test is strictly greater.
     assert report.LONG_RUNNING == 3 * 3600
     # And nothing is tinted when colour is off.
