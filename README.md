@@ -173,17 +173,17 @@ to per-GPU as above.
 
 ## The time-series chart
 
-Everything above is one average per job. `--plot_ts` shows the run over time, which is
-what distinguishes "used half the GPU throughout" from "used all of it for half the
-run":
+Everything above is one average per job. A time series shows the run over time, which
+is what distinguishes "used half the GPU throughout" from "used all of it for half the
+run". `--ts --csv` writes the series and `jobscope plot` charts it:
 
 ```bash
-jobscope -j 36788818_3 --plot_ts
+jobscope -j 36788818_3 --ts --csv | jobscope plot
 ```
 
-<img src="docs/timeseries.svg" alt="jobscope -j 36788818_3 --plot_ts" width="900">
+<img src="docs/timeseries.svg" alt="jobscope -j 36788818_3 --ts --csv | jobscope plot" width="900">
 
-One panel per GPU with the metrics on a shared axis, and min/mean/max/last underneath.
+One panel per GPU, every metric on a shared axis, with min/mean/max/last underneath.
 This job is worth reading closely: `GPU%` holds around 90 and `SM_ACT%` around 70, so
 the card is genuinely busy — but `TENSOR%` is flat at 2. It is compute-bound on
 arithmetic the tensor cores never see, which no single average would have told you and
@@ -195,24 +195,20 @@ An idle job is a flat line along the bottom. A job that stalls periodically is a
 `36788818_3` is an array element, and jobscope takes that spelling directly —
 internally Slurm calls it job `36788829`, which you never have to know.
 
-A few variations:
+**`--plot_ts` does the same thing in one command**, laid out as one panel *per metric*
+rather than per GPU — each on its own axis, so watts and percentages can share a chart:
 
 ```bash
-jobscope -j 36788818_3 --plot_ts 30m                     # just the last 30 minutes
-jobscope -j 36770231 --nodename holygpu8a15401 --plot_ts # a multi-node job
-jobscope -j 36770231 --nodename holygpu8a15401 --plot_ts --gpuid 0,1
+jobscope -j 36788818_3 --plot_ts                          # one panel per metric
+jobscope -j 36788818_3 --plot_ts 30m                      # just the last 30 minutes
+jobscope -j 36770231 --nodename holygpu8a15401 --plot_ts  # a multi-node job
 ```
 
 `--nodename` is **required** on a multi-node job: the chart keys on GPU, so two nodes'
-card 0 would otherwise merge into one line. `--gpuid` keeps the picture readable when a
-node holds many cards — each one is another panel.
+card 0 would otherwise merge into one line. `--gpuid` narrows to particular cards when
+a node holds many.
 
-The chart draws the metrics in `[plot] metrics`, because a shared axis stops being
-readable past about five series. `--dcgm --plot_ts` draws the wider catalogue when you
-want it, and for one panel per metric on its own scale, pipe to
-`jobscope plot --by metric --all`.
-
-For the numbers rather than the picture, `--ts` writes the same series as CSV:
+The CSV is useful on its own:
 
 ```
 $ jobscope -j 36788818_3 --ts 20m --csv
@@ -220,8 +216,8 @@ JOBID,USER,EPOCH,TIME,NODE,GPU,MODEL,GPU%,SM_ACT%,TENSOR%,DRAM%,POWER_W,CPU%,MEM
 36788818_3,alice,1785713214,2026-08-02T19:26:54,holygpu8a11202,2,NVIDIA H100 80GB HBM3,90,71.6,2.0,46.8,402,99,10
 ```
 
-One row per GPU per scrape. Pipe it to `jobscope plot` for other chart shapes, or into
-whatever you normally use:
+One row per GPU per scrape, so it goes straight into whatever you normally use. Or add
+`--compact` for one sparkline row per metric:
 
 ```bash
 jobscope -j 36788818_3 --ts --csv | jobscope plot --compact

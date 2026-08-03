@@ -420,3 +420,28 @@ def test_max_rows_flag_beats_the_config(hermetic_config, tmp_path, capsys):
 
     plot.run(plot.default_args(file=str(csv), max_rows=4))
     assert "showing 4 of 5" in capsys.readouterr().err
+
+
+def test_watts_stay_off_a_shared_axis(tmp_path, capsys):
+    """`--by gpu` puts every metric on one axis, so POWER_W cannot join them.
+
+    A 500 W line pins the scale and flattens every percentage onto the floor: the
+    chart then shows nothing at all. `--by metric` gives each its own axis, which is
+    what makes the wide set (and --plot_ts) legible, so watts belong there.
+    """
+    csv = tmp_path / "ts.csv"
+    csv.write_text(
+        "JOBID,USER,EPOCH,TIME,NODE,GPU,GPU%,POWER_W\n"
+        + "".join("1,alice,%d,2020-01-01T00:%02d:00,n1,0,90,500\n" % (1000 + 60 * t, t)
+                  for t in range(4)))
+
+    plot.run(plot.default_args(file=str(csv), kind="line", by="gpu", all=True,
+                               no_color=True, width=80, height=12))
+    shared = capsys.readouterr().out
+    assert "GPU%" in shared
+    assert "POWER_W" not in shared            # would have owned the scale
+
+    plot.run(plot.default_args(file=str(csv), kind="line", by="metric", all=True,
+                               no_color=True, width=80, height=12))
+    per_metric = capsys.readouterr().out
+    assert "POWER_W" in per_metric            # its own axis, so it is welcome

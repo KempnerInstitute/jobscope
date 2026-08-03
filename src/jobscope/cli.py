@@ -162,9 +162,8 @@ def build_parser():
     grain.add_argument("--plot-ts", "--plot_ts", dest="plot_ts", nargs="?", const=True,
                        default=False, metavar="WINDOW",
                        help="chart that time series instead of writing it: one panel per "
-                            "GPU, every metric on a shared axis -- the same chart "
-                            "'--ts --csv | jobscope plot' draws. Takes the same optional "
-                            "window. Needs --nodename on a multi-node job")
+                            "metric, one column per GPU. Takes the same optional window. "
+                            "Needs --nodename on a multi-node job")
     level = shape.add_mutually_exclusive_group()
     level.add_argument("--stats", action="store_const", const="gpu", dest="stats",
                        help="--ts: summarize the series instead of writing it -- "
@@ -676,20 +675,14 @@ def _plot_timeseries(text: str, args) -> None:
     # (KEY_SPECS, ALL_SPECS, or CPU%/MEM%), so charting everything present in it
     # is always correct -- there is no narrower in-CSV subset left to fall back to.
     #
-    # `by="gpu"` -- one panel per GPU with every metric on a shared axis -- rather than
-    # a panel per metric. Two reasons. It is what the pipe this flag is shorthand for
-    # already does, and a one-command form that renders differently from
-    # `--ts --csv | jobscope plot` is a surprise nobody asked for. And it is the more
-    # useful picture: the question a time series answers is "did these move together",
-    # which one axis shows and seven stacked panels make you reconstruct. The cost is
-    # that a small-valued metric sits near the floor -- TENSOR% at 2% against GPU% at
-    # 90 -- which is itself the finding more often than it is a problem.
-    # `all` only when --dcgm asked for it. On a shared axis every extra series costs
-    # legibility, and past about five plotext stops drawing the legend at all -- lines
-    # nobody can identify. So the default is [plot] metrics, the curated set a site
-    # tunes, and --dcgm is where "show me everything" is already the request.
-    plot.run(plot.default_args(kind="line", by="gpu", all=args.dcgm,
-                               no_color=args.no_color),
+    # One panel per metric, each on its own axis. That is what makes `all=True` safe:
+    # POWER_W in watts beside percentages is fine when nothing shares a scale, which is
+    # why the two belong together -- put watts on a shared axis and a 500 W line pins
+    # the scale and flattens every percentage onto the floor. The overlaid single-panel
+    # chart is one pipe away, and the README shows it:
+    #   jobscope -j JOB --ts --csv | jobscope plot
+    plot.run(plot.default_args(kind="line", by="metric", columns=True,
+                               no_color=args.no_color, all=True),
              fobj=io.StringIO(text))
 
 

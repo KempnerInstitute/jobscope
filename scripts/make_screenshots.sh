@@ -47,14 +47,15 @@ SUM_SELECT="${SUM_SELECT:--p kempner_h100 -D 1}"
 SUM_USER_ARGS=()
 [ -n "${SUM_USER:-}" ] && SUM_USER_ARGS=(-u "$SUM_USER")
 
-# --plot_ts directly, not `--ts --csv | plot`. The two render differently -- --plot_ts
-# is one panel per metric, the pipe defaults to one panel per GPU -- so capturing the
-# pipe while captioning it --plot_ts would show a chart the caption cannot produce.
-# The caption is the command, verbatim.
+# The piped form, captioned as the pipe. --plot_ts renders the same series as one
+# panel per metric; this is the overlaid single-panel chart, which is the more
+# readable picture for a screenshot and the one the README shows. The caption is the
+# command verbatim either way -- a caption you cannot paste is worse than none.
 echo "[1/4] time series  (job $TS_JOB)"
-TS_CMD=(-j "$TS_JOB" "${TS_NODE_ARGS[@]}" "${TS_GPU_ARGS[@]}" --plot_ts)
+TS_CMD=(-j "$TS_JOB" "${TS_NODE_ARGS[@]}" "${TS_GPU_ARGS[@]}" --ts --csv)
 "$JOBSCOPE" "${TS_CMD[@]}" \
-  | ansi2svg docs/timeseries.svg "jobscope ${TS_CMD[*]}"
+  | "$JOBSCOPE" plot --width 90 --height 18 \
+  | ansi2svg docs/timeseries.svg "jobscope ${TS_CMD[*]} | jobscope plot"
 
 echo "[2/4] aggregated bars  ($AGG_SELECT)"
 "$JOBSCOPE" "${AGG_USER_ARGS[@]}" --gpu $AGG_SELECT --csv \

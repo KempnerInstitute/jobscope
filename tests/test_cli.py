@@ -894,16 +894,12 @@ def test_plot_ts_charts_instead_of_writing_the_csv(monkeypatch, capsys):
 
 
 def test_plot_ts_takes_its_column_count_from_the_data(monkeypatch, capsys):
-    """No --gpu to type: the CSV already says how many there are.
-
-    One panel per GPU, laid out abreast while the terminal is wide enough -- the same
-    chart `--ts --csv | jobscope plot` draws, which is the point of the flag.
-    """
+    """No --gpu to type: the CSV already says how many there are."""
     monkeypatch.setenv("COLUMNS", "210")     # wide enough for all four abreast
     _fake_ts(monkeypatch, _ts_rows(gpus=("0", "1", "2", "3")))
     main(["-j", "1", "--plot_ts"])
-    out = capsys.readouterr().out
-    assert all(("gpu%d" % g) in out for g in range(4))
+    titles = [ln for ln in capsys.readouterr().out.splitlines() if "gpu0" in ln]
+    assert titles and all(("gpu%d" % g) in titles[0] for g in range(4))
 
 
 def test_plot_ts_narrows_the_columns_to_the_terminal(monkeypatch, capsys):
@@ -930,14 +926,12 @@ def test_plot_ts_needs_no_nodename_for_a_single_node_job(monkeypatch, capsys):
     assert "┤" in capsys.readouterr().out
 
 
-def test_plot_ts_charts_the_curated_set_and_dcgm_widens_it(monkeypatch, capsys):
-    """The chart puts every metric on one axis, so each extra series costs legibility
-    -- past about five, plotext stops drawing the legend and the lines become
-    unidentifiable. So the default is [plot] metrics, and --dcgm is where "show me
-    everything" was already the request.
+def test_plot_ts_charts_every_metric_by_default(monkeypatch, capsys):
+    """Bare --plot_ts resolves to the combined/extended view, same as --dcgm did
+    before -- so the chart shows the extended catalog either way.
 
-    Bare --plot_ts still *collects* the extended series (the CSV carries ENGINE%); it
-    just does not draw all of them. Piping to `plot --by metric --all` does.
+    It can, because each metric gets its own panel and its own axis: nothing here has
+    to share a scale with anything else, which is what would make a wide set unreadable.
     """
     header = "JOBID,USER,EPOCH,TIME,NODE,GPU,GPU%,GMEM%,ENGINE%\n"
     body = "".join(
@@ -950,7 +944,7 @@ def test_plot_ts_charts_the_curated_set_and_dcgm_widens_it(monkeypatch, capsys):
     monkeypatch.setattr(cli, "emit_timeseries", emit)
 
     main(["-j", "1", "--plot_ts"])
-    assert "ENGINE%" not in capsys.readouterr().out    # collected, not charted
+    assert "ENGINE%" in capsys.readouterr().out
 
     main(["-j", "1", "--dcgm", "--plot_ts"])
     assert "ENGINE%" in capsys.readouterr().out
