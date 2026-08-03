@@ -1,0 +1,34 @@
+  User:      alice
+  Select:    1 job ID(s)
+JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME
+----------------------------------------------------------------------------------------------------------------------------
+36770231     alice        COMPLETED 2     6      28     8     28     70      6.0      3.3      2.6     149      01:29:10
+
+1. Summary by metric
+-----------------------------------------------------------------------------------------------------------------------------
+  red/yellow/green use each metric's own cutoffs -- CPU% 5/10/20, MEM% 2/10/20, GPU% 2/10/20, GMEM% 2/10/20, SM_ACT% 2/10/20,
+    TENSOR% 2/10/20, DRAM% 2/10/20 (wasteful/red/yellow); POWER_W red below 100 W, green above, no yellow. Counts are jobs.
+  USED is resource-time that did work, and its share of the allocation -- for POWER_W, the time spent above that floor.
+  bands catch pathological jobs, USED measures efficiency: no red with a low USED means every job wastes a little
+METRIC   USED            RED  YELLOW  GREEN
+CPU%     11.4h (6%)      1    0       0
+MEM%     665.8GBh (28%)  0    0       1
+GPU%     3.3h (28%)      0    0       1
+GMEM%    8.3h (70%)      0    0       1
+SM_ACT%  0.7h (6%)       1    0       0
+TENSOR%  0.4h (3%)       1    0       0
+DRAM%    0.3h (3%)       1    0       0
+POWER_W  11.9h (100%)    0    0       1
+
+2. Average efficiency  (filled = used, grey = idle)
+---------------------------------------------------
+     CPU%    6%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+     MEM%   28%  ██████████░░░░░░░░░░░░░░░░░░░░░░░░
+     GPU%   28%  ██████████░░░░░░░░░░░░░░░░░░░░░░░░
+    GMEM%   70%  ████████████████████████░░░░░░░░░░
+  SM_ACT%    6%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+  TENSOR%    3%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    DRAM%    3%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+Classified by best of GPU%, SM_ACT%, TENSOR%, DRAM%, CPU% (CPU% can vote no higher than inefficient; POWER_W lowers it below the floor).
+Classification: average (20-40%)

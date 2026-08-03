@@ -54,12 +54,52 @@ each detected setting means, in [`docs/admin.md`](docs/admin.md).
 
 ## One job
 
-<img src="docs/onejob.svg" alt="jobscope -j 36770231" width="900">
+```bash
+jobscope -j 36770231
+```
+
+```
+  User:      alice
+  Select:    1 job ID(s)
+JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME
+----------------------------------------------------------------------------------------------------------------------------
+36770231     alice        COMPLETED 2     6      28     8     28     70      6.0      3.3      2.6     149      01:29:10
+
+1. Summary by metric
+-----------------------------------------------------------------------------------------------------------------------------
+  red/yellow/green use each metric's own cutoffs -- CPU% 5/10/20, MEM% 2/10/20, GPU% 2/10/20, GMEM% 2/10/20, SM_ACT% 2/10/20,
+    TENSOR% 2/10/20, DRAM% 2/10/20 (wasteful/red/yellow); POWER_W red below 100 W, green above, no yellow. Counts are jobs.
+  USED is resource-time that did work, and its share of the allocation -- for POWER_W, the time spent above that floor.
+  bands catch pathological jobs, USED measures efficiency: no red with a low USED means every job wastes a little
+METRIC   USED            RED  YELLOW  GREEN
+CPU%     11.4h (6%)      1    0       0
+MEM%     665.8GBh (28%)  0    0       1
+GPU%     3.3h (28%)      0    0       1
+GMEM%    8.3h (70%)      0    0       1
+SM_ACT%  0.7h (6%)       1    0       0
+TENSOR%  0.4h (3%)       1    0       0
+DRAM%    0.3h (3%)       1    0       0
+POWER_W  11.9h (100%)    0    0       1
+
+2. Average efficiency  (filled = used, grey = idle)
+---------------------------------------------------
+     CPU%    6%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+     MEM%   28%  ██████████░░░░░░░░░░░░░░░░░░░░░░░░
+     GPU%   28%  ██████████░░░░░░░░░░░░░░░░░░░░░░░░
+    GMEM%   70%  ████████████████████████░░░░░░░░░░
+  SM_ACT%    6%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+  TENSOR%    3%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    DRAM%    3%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+Classified by best of GPU%, SM_ACT%, TENSOR%, DRAM%, CPU% (CPU% can vote no higher than inefficient; POWER_W lowers it below the floor).
+Classification: average (20-40%)
+```
 
 The row is the job. `USED` under it is resource-time that did work and its share of
 what was allocated — so `GPU% 3.3h (28%)` means the job held GPU-hours of which 28%
-were busy. The bars draw the same figures, and everything is tinted by the band it
-falls in: red is pathological, green is fine.
+were busy. The bars draw the same figures. On a terminal every figure is also tinted
+by the band it falls in — red is pathological, green is fine — which is the one thing
+these plain-text blocks cannot show you.
 
 Read `GMEM% 70%` beside `GPU% 28%` as a job that filled the cards' memory and then
 barely computed — the shape a too-small batch or a data-loading bottleneck makes.
@@ -74,7 +114,64 @@ jobscope finished -p kempner_h100 -D 1     # the last day (-D 1 is the default)
 jobscope finished -p kempner_h100 -D 3     # widen it to three days
 ```
 
-<img src="docs/summary.svg" alt="jobscope finished -p kempner_h100" width="900">
+```
+  User:      alice
+  Partition: kempner_h100
+  Select:    last 1 day, completed
+  Window:    2026-08-01 23:49 .. 2026-08-02 23:49
+JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME
+----------------------------------------------------------------------------------------------------------------------------
+36738257     alice        COMPLETED 1     2      1      1     0      1       0.4      0.0      0.4     94       00:06:58
+36739730     alice        COMPLETED 1     91     2      1     67     24      34.3     1.7      24.4    255      00:34:33
+36759002     alice        COMPLETED 1     78     2      1     56     60      24.5     2.1      21.4    226      00:48:07
+36765938     alice        COMPLETED 1     13     1      1     2      19      0.0      0.0      0.0     74       00:02:22
+36775213     alice        COMPLETED 1     14     1      1     0      21      0.2      0.0      0.0     84       00:06:01
+36828732     alice        COMPLETED 1     10     1      1     1      21      0.1      0.0      0.0     85       00:09:36
+... 21 more rows ...
+
+1. Summary by metric
+-----------------------------------------------------------------------------------------------------------------------------
+Used/GPU-hr:                              69     20           39     39      17.4     1.3      14.3    182
+  red/yellow/green use each metric's own cutoffs -- CPU% 5/10/20, MEM% 2/10/20, GPU% 2/10/20, GMEM% 2/10/20, SM_ACT% 2/10/20,
+    TENSOR% 2/10/20, DRAM% 2/10/20 (wasteful/red/yellow); POWER_W red below 100 W, green above, no yellow. Counts are jobs.
+  USED is resource-time that did work, and its share of the allocation -- for POWER_W, the time spent above that floor.
+  bands catch pathological jobs, USED measures efficiency: no red with a low USED means every job wastes a little
+METRIC   USED           RED  YELLOW  GREEN
+CPU%     2.9h (69%)     8    2       8
+MEM%     84.3GBh (20%)  17   0       1
+GPU%     1.7h (39%)     11   0       7
+GMEM%    1.7h (39%)     2    6       10
+SM_ACT%  0.8h (18%)     11   3       4
+TENSOR%  0.1h (1%)      18   0       0
+DRAM%    0.6h (15%)     11   4       3
+POWER_W  3.3h (77%)     10   0       8
+
+2. Average efficiency  (filled = used, grey = idle)
+---------------------------------------------------
+     CPU%   69%  ███████████████████████░░░░░░░░░░░
+     MEM%   20%  ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░
+     GPU%   39%  █████████████░░░░░░░░░░░░░░░░░░░░░
+    GMEM%   39%  █████████████░░░░░░░░░░░░░░░░░░░░░
+  SM_ACT%   18%  ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+  TENSOR%    1%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    DRAM%   15%  █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+3. Problem jobs
+-----------------------------------------------------------------------------------------------
+Wasteful GPU (11/18): GPU < 2%
+  alice | 36828732:1%:0.2h(00:09:36), 36836738:0%:0.1h(00:02:55), 36822372:0%:0.1h(00:08:30)
+Wasteful SM (11/18): SM < 2%
+  alice | 36828732:0%:0.2h(00:09:36), 36822372:0%:0.1h(00:08:30), 36827829:0%:0.1h(00:07:27)
+Wasteful POWER (10/18): POWER < 100W
+  alice | 36828732:85W:0.2h(00:09:36), 36836738:83W:0.1h(00:02:55), 36822372:80W:0.1h(00:08:30)
+Wasteful CPU (8/18): CPU < 5%
+  alice | 36738257:2%:0.1h(00:06:58)
+Wasteful gpu-cpu (1): GPU < 2%, CPU < 5%
+  alice | 36738257:gpu0%/cpu2%(00:06:58)
+Wasteful all (1): GPU < 2%, SM < 2%, POWER < 100W, CPU < 5%
+  alice | 36738257:gpu0%/sm0%/pw94W/cpu2%(00:06:58)
+Jobs: cpu-jobs=18  gpu-jobs=18  gpus=20  no-blob=9
+```
 
 `finished` is the mode; without it, bare `jobscope` shows what is **running** now. The
 header always restates the window it actually scanned, so a report cannot claim a range
@@ -82,18 +179,18 @@ it did not read.
 
 Three things to read here, and the third is the point:
 
-1. **The rows**, tinted per metric. The spread is the story — `GPU% 0` on one job and
-   `70` on another means the problem is not the partition, it is particular jobs.
-2. **`1. Summary by metric`** pools every job: `GPU% 1.8h (41%)` is the GPU-time that
+1. **The rows**, one per job. The spread is the story — `GPU% 0` on one job and `67` on
+   another means the problem is not the partition, it is particular jobs.
+2. **`1. Summary by metric`** pools every job: `GPU% 1.7h (39%)` is the GPU-time that
    did work across the whole selection, and `RED / YELLOW / GREEN` count how many jobs
    fell in each band. A low `USED` with no red jobs means everyone wastes a little; red
    jobs with a decent `USED` means a few jobs waste a lot. Those need different
    conversations.
 3. **`3. Problem jobs`** names them. Each row is one measure, with the count that
    tripped it and the cutoff used, then the worst offenders by wasted resource-time —
-   `36738257:0%:0.1h(00:06:58)` is that job at 0%, 0.1 GPU-hours wasted, over a
-   seven-minute run. `Wasteful all` is the jobs that failed every measure at once,
-   which is where to start.
+   `36828732:1%:0.2h(00:09:36)` is that job at 1%, 0.2 GPU-hours wasted, over a
+   nine-minute run. `Wasteful all` is the jobs that failed every measure at once, which
+   is where to start.
 
 `-D 3` above widens the window; the next section covers the rest.
 
