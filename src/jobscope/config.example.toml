@@ -10,7 +10,7 @@
 #
 # `jobscope config` prints what your file actually resolves to, after all overrides.
 # The reasoning behind the trickier settings -- how to choose a power floor, why the
-# two band tables inherit nothing -- is in docs/config.md rather than in here.
+# two band tables inherit nothing -- is in docs/admin.md rather than in here.
 
 
 # =============================================================================
@@ -120,7 +120,7 @@ extended   = "all"
 #    10..20   needs improvement  (yellow)
 #
 # This seeds BOTH views. Split them only if a --ts window should be graded
-# differently from a whole job -- see the tuning block below, and docs/config.md.
+# differently from a whole job -- see the tuning block below, and docs/admin.md.
 #
 # CAREFUL: jobscope ships one per-metric calibration -- CPU% wasteful 5, since a GPU
 # job legitimately idles its cores. Retuning `wasteful` here switches it OFF: "3 for
@@ -131,7 +131,7 @@ edges = [2, 10, 20, 40]
 # POWER_W is graded in WATTS, so it has no bands -- just a floor: a GPU drawing less
 # counts as idle. This is the fallback for any model not listed in the tuning block.
 # Idle draw runs from 27 W on a V100 to 165 W on an RTX PRO 6000, so one number is
-# wrong at one end of a mixed fleet: docs/config.md has measured figures and a method.
+# wrong at one end of a mixed fleet: docs/admin.md has measured figures and a method.
 power_w = 100
 
 # [classify] -- how a job's metrics become a verdict. Two roles:
@@ -196,7 +196,7 @@ long_running = "red"
 #   Everything above is enough to run jobscope. Below is tuning: per view, per
 #   metric, per GPU model. Skip it until a number looks wrong.
 #
-#   docs/config.md explains the reasoning; this is the syntax.
+#   docs/admin.md explains the reasoning; this is the syntax.
 #
 # #############################################################################
 
@@ -236,7 +236,7 @@ long_running = "red"
 #
 # Keys are the model string the exporter reports (`name` on nvidia_gpu_*, `modelName`
 # on DCGM_FI_*), matched exactly -- copy it verbatim. 'jobscope <job> --per-gpu' shows
-# which cards a job ran on. docs/config.md has measured idle/busy figures per model
+# which cards a job ran on. docs/admin.md has measured idle/busy figures per model
 # and the method for choosing a value.
 #
 # [classify.floor.power]

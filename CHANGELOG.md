@@ -190,7 +190,7 @@ own percentage and the idle share is the remainder.
 
 The template is required-first now — Prometheus, then which jobs, then which metrics,
 then how they read — with a divider below which everything is tuning. The prose that
-was longer than the setting it explained moved to [`docs/config.md`](docs/config.md).
+was longer than the setting it explained moved to [`docs/admin.md`](docs/admin.md).
 351 lines to 293, and 56 live settings to 31.
 
 **One behaviour change if you copied the old template.** It shipped three live values
@@ -203,7 +203,7 @@ that were *opinions, not jobscope's defaults*, so copying it silently changed gr
 | `[thresholds.timeslice.wasteful] sm_act` | 3 | 2 |
 
 Both are still in the file as commented suggestions one keystroke away, with the
-reasoning in `docs/config.md`. The template now resolves identically to running with
+reasoning in `docs/admin.md`. The template now resolves identically to running with
 no config at all, and a test enforces that. If you want the old numbers, uncomment
 those blocks. A config file you wrote yourself is unaffected.
 
