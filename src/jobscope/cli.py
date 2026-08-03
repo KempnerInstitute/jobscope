@@ -67,9 +67,29 @@ RETIRED = {
     "doctor": "probe",
     "summary": "the default (jobscope finished ...)",
     "detail": "--per-gpu",
-    "dcgm": "--dcgm",
+    "dcgm": "--all-metrics",
     "live": "running",
 }
+
+# Flags that were retired, and what to type now. Kept as *defined* flags rather than
+# simply deleted, so the message names the replacement instead of argparse's bare
+# "unrecognized arguments". --dcgm is here because the word now belongs to a source
+# (--gpu-source dcgm) and cannot also mean "the whole catalog": leaving it accepted
+# would have made an existing flag quietly mean something else, which is worse than
+# an error.
+RETIRED_FLAGS = {
+    "--dcgm": "--all-metrics (or --gpu-source dcgm to pick the source)",
+    "--ext": "--all-metrics",
+}
+
+
+class _Retired(argparse.Action):
+    """Fail with the replacement named, the way :data:`RETIRED` does for subcommands."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        raise JobscopeError(
+            "%s is no longer a flag; use %s"
+            % (option_string, RETIRED_FLAGS.get(option_string, "--all-metrics")))
 
 # Flags that select a past window; their presence means sacct rather than squeue.
 _WINDOW_FLAGS = ("-D", "--days", "-N", "--lastn", "-S", "--starttime",
@@ -89,7 +109,8 @@ _EPILOG = (
     "  jobscope finished -D 3            your last 3 days\n"
     "  jobscope 30012345                 one job, running or finished\n"
     "  jobscope running --per-gpu        one row per GPU\n"
-    "  jobscope finished -D 7 --dcgm     the full metric catalog\n"
+    "  jobscope finished -D 7 --all-metrics   every metric the source publishes\n"
+    "  jobscope -j 30012345 --gpu-source nvml pick where the numbers come from\n"
     "  jobscope 30012345 --ts | jobscope plot\n"
     "\n"
     "Flags and JOBIDs may be given in any order.")
@@ -197,8 +218,19 @@ def build_parser():
                        help="CPU columns only")
     block.add_argument("--gpu", action="store_const", const="gpu", dest="view",
                        help="GPU columns only")
-    shape.add_argument("--dcgm", "--ext", dest="dcgm", action="store_true",
-                       help="the full DCGM metric catalog (clocks, temps, PCIe, NVLink, ...)")
+    shape.add_argument("--gpu-source", "--gpu_source", dest="gpu_source", default=None,
+                       metavar="SOURCE",
+                       help="where the GPU numbers come from: dcgm, nvml or blob, "
+                            "comma-separated for an order (default from [gpu] source). "
+                            "Each column takes its own best available source, so naming "
+                            "one promotes it rather than dropping what it cannot serve. "
+                            "Naming it here also outranks the stored jobstats blob")
+    shape.add_argument("--all-metrics", "--all_metrics", dest="all_metrics",
+                       action="store_true",
+                       help="every metric the chosen source publishes, not just the "
+                            "default columns (clocks, temps, PCIe, NVLink, ...)")
+    shape.add_argument("--dcgm", "--ext", dest="dcgm", action=_Retired,
+                       nargs=0, help=argparse.SUPPRESS)
     shape.add_argument("--avg", action="store_true",
                        help="running: fold each metric over the job's runtime, making the "
                             "values comparable to jobstats (default: the newest scrape)")
@@ -247,10 +279,13 @@ def build_parser():
 
     p_describe = subparsers.add_parser(
         "describe", parents=[base], help="describe the columns and metrics")
-    p_describe.add_argument("--dcgm", action="store_true",
-                            help="describe the DCGM metric catalog instead of the columns")
-    p_describe.add_argument("--ext", dest="ext", action="store_true",
-                            help="the full DCGM metric catalog (implies --dcgm)")
+    p_describe.add_argument("--metrics", dest="metrics", action="store_true",
+                            help="describe the GPU metric catalog instead of the columns")
+    p_describe.add_argument("--all-metrics", "--all_metrics", dest="all_metrics",
+                            action="store_true",
+                            help="the full catalog (implies --metrics)")
+    p_describe.add_argument("--dcgm", "--ext", dest="dcgm", action=_Retired,
+                            nargs=0, help=argparse.SUPPRESS)
     p_describe.set_defaults(func=handle_describe)
 
     p_config = subparsers.add_parser(
@@ -360,7 +395,9 @@ def _inert_dests(args) -> set:
         # All three summarize a series, so all three raise without one.
         hide.update({"stats", "classify", "all_categories"})
     if args.view == "cpu":
-        hide.add("dcgm")            # show_dcgm goes false, so no spec list is built
+        # show_dcgm goes false, so no GPU spec list is built -- which makes both the
+        # width of that list and where it would have been read from inert.
+        hide.update({"all_metrics", "gpu_source"})
     if args.csv:
         hide.update({"no_color", "no_plot"})  # both already inert for a CSV
     return hide
@@ -433,8 +470,11 @@ def resolve_argv(argv):
 
 def _apply_config(args) -> config.Config:
     path = getattr(args, "config_path", None)
-    if path:
-        config.set_config(config.load_config(path=path))
+    source = getattr(args, "gpu_source", None)
+    # Reloaded when --gpu-source is given even without -c, because the order has to be
+    # in place before the config resolves a metric name -- see load_config.
+    if path or source:
+        config.set_config(config.load_config(path=path, gpu_source=source))
     cfg = config.get_config()
     # Every command that renders goes through here first, and tint() is called from
     # too many places to hand a palette to each -- so the colours are installed once,
@@ -726,19 +766,19 @@ def handle_report(args) -> None:
     # site has not said otherwise. --per-gpu is the exception and keeps its fixed
     # four profiling columns: DETAIL_COLUMNS carries row indices that have to agree
     # with the blob tuple and with DCGM_HEADERS' order, so its width is not free.
-    specs = list(cfg.metrics.extended if args.dcgm else cfg.metrics.summary)
+    specs = list(cfg.metrics.extended if args.all_metrics else cfg.metrics.summary)
     # --ts's own view resolution: combined (GPU + CPU%/MEM% together) is the
-    # default -- bare --ts behaves as --cpu --dcgm --ts would. --cpu alone (no
-    # --dcgm) narrows to CPU-only; --dcgm alone (no --cpu) narrows to GPU-only,
-    # unchanged from before this feature. --gpu has no say in this -- it stays the
-    # inert flag it already was under --ts (see the notes below). Whenever the
-    # mode is not cpu-only, the GPU catalog is [metrics] timeseries (a small curated
-    # set by default), widening to [metrics] extended only when --dcgm/--ext was
-    # actually passed -- printing/plotting everything is opt-in, not the default.
-    ts_cpu_only = (view == "cpu" and not args.dcgm)
-    ts_combined = not ts_cpu_only and not (view != "cpu" and args.dcgm)
+    # default -- bare --ts behaves as --cpu --all-metrics --ts would. --cpu alone (no
+    # --all-metrics) narrows to CPU-only; --all-metrics alone (no --cpu) narrows to
+    # GPU-only, unchanged from before this feature. --gpu has no say in this -- it
+    # stays the inert flag it already was under --ts (see the notes below). Whenever
+    # the mode is not cpu-only, the GPU catalog is [metrics] timeseries (a small
+    # curated set by default), widening to [metrics] extended only when --all-metrics
+    # was actually passed -- printing/plotting everything is opt-in, not the default.
+    ts_cpu_only = (view == "cpu" and not args.all_metrics)
+    ts_combined = not ts_cpu_only and not (view != "cpu" and args.all_metrics)
     ts_specs = specs if ts_cpu_only else list(
-        cfg.metrics.extended if args.dcgm else cfg.metrics.timeseries)
+        cfg.metrics.extended if args.all_metrics else cfg.metrics.timeseries)
     # Weight the mean by resource-time wherever the values already span whole
     # runtimes: a finished job's blob does, an explicit job ID's reconstruction
     # does, and running --avg does. The bare running view is a snapshot of one
@@ -753,6 +793,11 @@ def handle_report(args) -> None:
         worst_jobs=cfg.defaults.worst_jobs,
         long_running=parse_duration(cfg.defaults.long_running),
         sections=cfg.report.sections,
+        # The host side of [metrics], the counterpart of `specs` above. Previously
+        # always None, so CPU%/MEM% were fixed whatever the config said and a
+        # [metrics.cgroup.<name>] definition could be defined but never selected.
+        cgroup_specs=list(cfg.metrics.host_extended if args.all_metrics
+                          else cfg.metrics.host_summary),
         # The two views have their own band tables and inherit nothing from each
         # other, because a two-hour window that catches a checkpoint pause should
         # not answer to a nineteen-hour job's bar. --plot_ts set args.ts above, so
@@ -786,7 +831,8 @@ def handle_report(args) -> None:
     # The detail granularity renders the fixed DETAIL_COLUMNS, so it takes no spec
     # list; the per-job one splices the profiling block from whichever was chosen.
     selected = resolve(request, cfg, timeout, workers, specs if show_dcgm else None,
-                       nodename=args.nodename, gpu_ids=options.gpu_ids)
+                       nodename=args.nodename, gpu_ids=options.gpu_ids,
+                       host_specs=options.cgroup_specs)
     if selected is None:
         return
     renderer = (DetailRenderer(selected.context, options) if args.per_gpu
@@ -803,11 +849,12 @@ def handle_plot(args) -> None:
 
 def handle_describe(args) -> None:
     cfg = _apply_config(args)
-    # --ext implies --dcgm: it means "the full DCGM catalog" on a report, and it used
-    # to mean nothing at all here without --dcgm beside it. One word, one meaning.
-    if args.dcgm or args.ext:
+    # --all-metrics implies --metrics: it means "the full catalog" on a report, and it
+    # used to mean nothing at all here without --dcgm beside it. One word, one meaning.
+    if args.metrics or args.all_metrics:
         wide = cfg.metrics.extended
-        describe_dcgm(list(wide if args.ext else cfg.metrics.summary), extended=wide)
+        describe_dcgm(list(wide if args.all_metrics else cfg.metrics.summary),
+                      extended=wide)
     else:
         describe()
 
@@ -943,19 +990,26 @@ def main(argv=None) -> None:
     explicit = mode_was_explicit(raw)
     argv = resolve_argv(raw)
     parser, subparsers = build_parser()
-    if argv[0] in subparsers.choices:
-        # Parse on the chosen subparser so JOBIDs and flags may appear in any
-        # order. parse_intermixed_args cannot run on the top parser, where the
-        # mode is itself a positional.
-        sub = subparsers.choices[argv[0]]
-        if argv[0] in MODES and any(a in ("-h", "--help") for a in argv[1:]):
-            # Narrow before parsing, because argparse prints the help and exits the
-            # moment it reaches -h.
-            narrow_help(sub, argv[1:], explicit)
-        args = sub.parse_intermixed_args(argv[1:])
-        args.explicit_mode = explicit
-    else:  # -h / --help / --version
-        args = parser.parse_args(argv)
+    # Parsing is inside the guard as well as handling: a retired flag raises from its
+    # own argparse action (see _Retired), which is during parse, and a traceback is a
+    # poor way to say "that flag has a new name".
+    try:
+        if argv[0] in subparsers.choices:
+            # Parse on the chosen subparser so JOBIDs and flags may appear in any
+            # order. parse_intermixed_args cannot run on the top parser, where the
+            # mode is itself a positional.
+            sub = subparsers.choices[argv[0]]
+            if argv[0] in MODES and any(a in ("-h", "--help") for a in argv[1:]):
+                # Narrow before parsing, because argparse prints the help and exits the
+                # moment it reaches -h.
+                narrow_help(sub, argv[1:], explicit)
+            args = sub.parse_intermixed_args(argv[1:])
+            args.explicit_mode = explicit
+        else:  # -h / --help / --version
+            args = parser.parse_args(argv)
+    except JobscopeError as exc:
+        print("jobscope: error: %s" % exc, file=sys.stderr)
+        sys.exit(2)  # argparse's own exit code for a usage error
     handler = getattr(args, "func", None)
     if handler is None:
         parser.print_help()

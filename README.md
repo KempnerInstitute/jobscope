@@ -162,13 +162,41 @@ Useful companions:
 ```bash
 jobscope -j 36770231 --cpu
 jobscope -j 36770231 --gpu
-jobscope -j 36770231 --dcgm
-jobscope describe --dcgm --ext
+jobscope -j 36770231 --all-metrics
+jobscope describe --all-metrics
 ```
 
 `--cpu` prints only CPU and memory columns. For finished jobs it does not need
-Prometheus, so it is the fastest wide query. `--gpu` prints the GPU side. `--dcgm`
-adds the full DCGM catalog, including clocks, temperatures, PCIe, and NVLink.
+Prometheus, so it is the fastest wide query. `--gpu` prints the GPU side.
+`--all-metrics` adds the full catalog, including clocks, temperatures, PCIe, and NVLink.
+
+## Where the GPU numbers come from
+
+Every column has its own source, and the header block names them:
+
+```
+  Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- blob;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
+```
+
+`CPU%`, `MEM%`, `GPU%` and GPU memory come from the jobstats record Slurm already
+stored, which costs no query; the activity columns come from dcgm-exporter, which is
+the only source that publishes them. To measure the first group instead of reading it
+back:
+
+```bash
+jobscope -j 36770231 --gpu-source dcgm     # GPU% from DCGM_FI_DEV_GPU_UTIL
+jobscope -j 36770231 --gpu-source nvml     # the nvidia exporter's own readings
+```
+
+Naming a source promotes it for the columns it can serve, so `--gpu-source dcgm` does
+not drop GPU memory, which DCGM has no total for here. `--gpu-source nvml` does narrow
+the table, because the nvidia exporter publishes no SM, tensor or DRAM activity at all.
+
+A running job has no stored record — Slurm writes it at job end — so its numbers are
+always measured, and the line says so: `CPU% MEM% <- cgroup;  GPU% ... <- dcgm`. A
+column whose source has nothing prints `-`, which is how a cluster with no cgroup
+exporter reads. Set the defaults with `[gpu] source` and `[host] source` (see
+`jobscope config --example`).
 
 ## Documentation
 

@@ -44,7 +44,7 @@ def test_explicit_mode_words_pass_through():
 
 
 def test_utilities_and_help_pass_through():
-    for argv in (["plot"], ["describe", "--dcgm"], ["config"], ["-h"], ["--version"]):
+    for argv in (["plot"], ["describe", "--metrics"], ["config"], ["-h"], ["--version"]):
         assert resolve_argv(list(argv)) == argv
 
 
@@ -203,8 +203,8 @@ def test_cpu_and_gpu_are_mutually_exclusive():
 
 @pytest.mark.parametrize("mode", [RUNNING, FINISHED])
 @pytest.mark.parametrize("argv", [
-    [], ["--per-gpu"], ["--ts"], ["--cpu"], ["--gpu"], ["--dcgm"],
-    ["--per-gpu", "--dcgm"], ["--ts", "--dcgm"], ["--gpu", "--dcgm"],
+    [], ["--per-gpu"], ["--ts"], ["--cpu"], ["--gpu"], ["--all-metrics"],
+    ["--per-gpu", "--all-metrics"], ["--ts", "--all-metrics"], ["--gpu", "--all-metrics"],
     ["-p", "kempner"], ["-a"], ["--csv"], ["-n"],
 ])
 def test_every_option_parses_in_every_mode(mode, argv):
@@ -240,7 +240,7 @@ def test_describe_command(capsys):
 
 
 def test_describe_dcgm_ext(capsys):
-    main(["describe", "--dcgm", "--ext"])
+    main(["describe", "--metrics", "--all-metrics"])
     out = capsys.readouterr().out
     assert "DCGM GPU metrics" in out
     from jobscope.dcgm import ALL_SPECS
@@ -714,7 +714,8 @@ def test_nodename_and_gpuid_reach_resolve_on_the_summary(monkeypatch):
     """
     seen = {}
 
-    def fake_resolve(request, cfg, timeout, workers, specs, nodename=None, gpu_ids=()):
+    def fake_resolve(request, cfg, timeout, workers, specs, nodename=None, gpu_ids=(),
+                     host_specs=None):
         seen["nodename"], seen["gpu_ids"] = nodename, gpu_ids
         return None
 
@@ -763,7 +764,7 @@ def test_the_help_hides_the_flags_an_explicit_jobid_makes_inert(capsys):
     assert "--step" in hidden         # only emit_timeseries reads it
     assert "--avg" in hidden          # running only
     # What remains is what this command actually honours.
-    for flag in ("--nodename", "--dcgm", "--csv", "--no-plot", "--per-gpu"):
+    for flag in ("--nodename", "--all-metrics", "--csv", "--no-plot", "--per-gpu"):
         assert flag in body
 
 
@@ -801,7 +802,7 @@ def test_ts_hides_what_the_series_drops(capsys):
 
 def test_cpu_hides_the_gpu_only_columns(capsys):
     _, hidden = _help_for(["--cpu"], capsys)
-    assert "--dcgm" in set(hidden)
+    assert "--all-metrics" in set(hidden)
 
 
 def test_csv_hides_what_a_csv_cannot_carry(capsys):
@@ -927,7 +928,7 @@ def test_plot_ts_needs_no_nodename_for_a_single_node_job(monkeypatch, capsys):
 
 
 def test_plot_ts_charts_every_metric_by_default(monkeypatch, capsys):
-    """Bare --plot_ts resolves to the combined/extended view, same as --dcgm did
+    """Bare --plot_ts resolves to the combined/extended view, same as --all-metrics did
     before -- so the chart shows the extended catalog either way.
 
     It can, because each metric gets its own panel and its own axis: nothing here has
@@ -946,7 +947,7 @@ def test_plot_ts_charts_every_metric_by_default(monkeypatch, capsys):
     main(["-j", "1", "--plot_ts"])
     assert "ENGINE%" in capsys.readouterr().out
 
-    main(["-j", "1", "--dcgm", "--plot_ts"])
+    main(["-j", "1", "--all-metrics", "--plot_ts"])
     assert "ENGINE%" in capsys.readouterr().out
 
 
@@ -958,9 +959,9 @@ def test_cpu_ts_no_longer_says_it_does_not_apply(monkeypatch, capsys):
 
 
 def test_cpu_and_dcgm_together_no_longer_conflict(monkeypatch, capsys):
-    """--cpu --dcgm together now means the combined view, not a dropped flag."""
+    """--cpu --all-metrics together now means the combined view, not a dropped flag."""
     _fake_ts(monkeypatch, "")
-    main(["-j", "1", "--cpu", "--dcgm", "--ts"])
+    main(["-j", "1", "--cpu", "--all-metrics", "--ts"])
     assert "does not apply" not in capsys.readouterr().err
 
 
@@ -968,14 +969,14 @@ def test_cpu_and_dcgm_together_no_longer_conflict(monkeypatch, capsys):
     ([], True, "key"),                    # bare --ts: combined + curated key metrics
     (["--cpu"], False, "default"),        # --cpu alone: cpu-only (specs unused, but this
                                           # is what the outer `specs` var resolves to)
-    (["--dcgm"], False, "all"),           # --dcgm alone: gpu-only/extended, unchanged
-    (["--cpu", "--dcgm"], True, "all"),   # both: combined + extended
+    (["--all-metrics"], False, "all"),           # --all-metrics alone: gpu-only/extended, unchanged
+    (["--cpu", "--all-metrics"], True, "all"),   # both: combined + extended
 ])
 def test_ts_view_resolution_truth_table(monkeypatch, flags, expect_combined, expect_specs_name):
     """The one genuinely new piece of branching logic in this feature: which of
     cpu-only/gpu-only/combined --ts resolves to, and whether the GPU catalog is
-    KEY_SPECS (curated default) or ALL_SPECS (--dcgm/--ext), for every
-    (--cpu, --dcgm) combination."""
+    KEY_SPECS (curated default) or ALL_SPECS (--all-metrics), for every
+    (--cpu, --all-metrics) combination."""
     from jobscope.dcgm import ALL_SPECS, DEFAULT_SPECS, KEY_SPECS
     captured = {}
 
@@ -1291,7 +1292,7 @@ def test_an_explicit_flag_still_beats_the_config(monkeypatch):
 # --- [metrics] reach each view's spec list -----------------------------------
 
 def test_each_view_gets_its_configured_metric_list(monkeypatch):
-    """The summary, the time series and --dcgm each read their own [metrics] key."""
+    """The summary, the time series and --all-metrics each read their own [metrics] key."""
     from jobscope import config as config_module
     from jobscope.dcgm import specs_named
     config_module.set_config(dataclasses.replace(
@@ -1324,7 +1325,7 @@ def test_each_view_gets_its_configured_metric_list(monkeypatch):
     assert captured["ts"] == ["GPU%", "OCC%"]
     main(["-j", "1"])
     assert "SM_ACT%" in captured["summary"] and "TENSOR%" not in captured["summary"]
-    main(["-j", "1", "--dcgm"])
+    main(["-j", "1", "--all-metrics"])
     assert "TEMP_C" in captured["summary"] and "SM_ACT%" not in captured["summary"]
 
 

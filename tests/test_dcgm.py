@@ -19,6 +19,7 @@ from jobscope.dcgm import (
     SPEC_BY_HEADER,
     columns_for,
     compute_dcgm,
+    spec_named,
     dcgm_for_job,
     discover_gpus,
     format_by_header,
@@ -95,12 +96,16 @@ def test_catalog_shape():
     assert len(GPU_SUMMARY_SPECS) == 4
     # The summary/detail DCGM columns exclude what the blob already supplies, so
     # neither GPU% nor the GMEM columns appear twice in those views. OCC% moved to
-    # the "all" group -- --dcgm/--ext only -- so it is not part of the default set.
+    # the "all" group -- --all-metrics only -- so it is not part of the default set.
     assert DCGM_HEADERS == ["SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
-    headers = [spec.header for spec in METRICS]
+    # METRICS is the *candidates*, so its headers repeat wherever two exporters
+    # offer one column. Uniqueness is a property of the resolved view, which is what
+    # SPEC_BY_HEADER and every consumer read -- see jobscope.source.
+    headers = [spec.header for spec in ALL_SPECS]
     assert len(headers) == len(set(headers))
     assert set(SPEC_BY_HEADER) == set(headers)
-    assert any(spec.key == "duty" for spec in DEFAULT_SPECS)
+    assert len(METRICS) > len(ALL_SPECS)
+    assert any(spec.column == "GPU%" for spec in DEFAULT_SPECS)
 
 
 def test_key_specs_is_the_curated_ts_default():
@@ -305,7 +310,7 @@ def test_every_offered_name_actually_resolves():
     one had better work."""
     from jobscope.dcgm import METRIC_NAMES, spec_named
     assert all(spec_named(n) is not None for n in METRIC_NAMES)
-    assert len(METRIC_NAMES) == len(METRICS)
+    assert len(METRIC_NAMES) == len(ALL_SPECS)
 
 
 def test_specs_named_sorts_by_catalog_position():
@@ -367,7 +372,8 @@ def test_group_key_splits_on_reducer_and_on_uuid_label():
     """Both matter: the reducer picks the function, and the label differs by family
     -- NVML uses lowercase uuid where DCGM uses uppercase UUID."""
     assert group_key(SPEC_BY_HEADER["SM_ACT%"]) == ("avg", "UUID")
-    assert group_key(SPEC_BY_HEADER["GPU%"]) == ("avg", "uuid")      # NVML
+    assert group_key(spec_named("duty")) == ("avg", "uuid")           # NVML
+    assert group_key(spec_named("duty_dcgm")) == ("avg", "UUID")      # same column
     assert group_key(SPEC_BY_HEADER["PWRmax_W"]) == ("max", "UUID")
     assert group_key(SPEC_BY_HEADER["ENERGY_kWh"]) == ("delta", "UUID")
 

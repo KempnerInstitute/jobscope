@@ -6,7 +6,7 @@ could answer. Read this when a number looks wrong, when two views disagree, or
 before adding a metric.
 
 Companion documents: `jobscope describe` (column reference) and `jobscope describe
---dcgm --ext` (the full metric catalog). `--per-gpu` and `--ts` give per-GPU rows, and `--plot_ts` charts that series in
+--all-metrics` (the full metric catalog). `--per-gpu` and `--ts` give per-GPU rows, and `--plot_ts` charts that series in
 place of writing it. Both time-series flags take an optional window (`--ts 1h`),
 which narrows the range queries to the end of the run rather than filtering rows,
 and `--ts --stats` reduces the series to min/mean/max/last per GPU per metric
@@ -66,7 +66,7 @@ JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR% 
 ```
 
 Reports differ only in how jobs are selected (`sacct` versus `squeue`, behind
-`jobscope/select.py`) and how wide the profiling block is (`--dcgm`). Because the
+`jobscope/select.py`) and how wide the profiling block is (`--all-metrics`). Because the
 columns are a pure function of the spec list the renderer is handed, the modes
 cannot drift apart.
 
@@ -302,7 +302,7 @@ job row gives the numbers, the table says where they sit. For one job the rest o
 the block is suppressed: the pooled row would repeat that job's own row, a `Worst`
 row would name it again, and every job count would be 1. The set follows the view:
 eight rows by default, `CPU%`/`MEM%` under `--cpu`, six under `--gpu`, the full
-catalog (18) under `--dcgm`. A metric that no job reported is omitted rather than
+catalog (18) under `--all-metrics`. A metric that no job reported is omitted rather than
 printed as zeros, which would read as "nothing used it" instead of "nothing
 measured it".
 
@@ -379,7 +379,7 @@ utilization, the filled run tinted by the band that value falls in. It draws the
 same number the `USED` column prints -- both are `EfficiencyTally.pooled()` -- so a
 chart and the table it sits under cannot disagree.
 
-It reuses the table's metric list, so the set follows `--cpu` / `--gpu` / `--dcgm`
+It reuses the table's metric list, so the set follows `--cpu` / `--gpu` / `--all-metrics`
 and omits whatever no job reported, minus `POWER_W`: it has a row but no bar, since
 its "used" is time above the watt floor rather than a fraction of a resource, and
 drawing that as an efficiency bar makes idle-but-powered GPUs look like the healthy

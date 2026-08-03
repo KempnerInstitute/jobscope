@@ -285,6 +285,10 @@ class FakeRunningClient:
                             ("nvidia_gpu_memory_total_bytes", 80 * GIB)):
             if name in query:
                 return [{"metric": {"uuid": "U0"}, "value": [at, str(value)]}]
+        # The other candidate for GPU%, serving the same 90 so these tests stay about
+        # the reconstruction rather than about which exporter the preference picked.
+        if "DCGM_FI_DEV_GPU_UTIL" in query:
+            return [{"metric": {"UUID": "U0"}, "value": [at, "90"]}]
         for name, value in (("cgroup_cpus", 2), ("cgroup_cpu_total_seconds", 150),
                             ("cgroup_memory_rss_bytes", 8 * GIB),
                             ("cgroup_memory_total_bytes", 16 * GIB)):
@@ -340,9 +344,13 @@ def test_running_without_specs_still_builds_the_blob(monkeypatch):
     from jobscope.blob import blob_metrics
     blob = blob_metrics(records["7"].stats, records["7"].gpus)
     assert (blob.value("CPU%"), blob.value("MEM%")) == (75, 50)
-    # ... but it does not pay for the DCGM profiling queries it will not print.
-    assert not any("DCGM_FI" in q for q in client.queries)
-    assert BLOB_SPECS and all(s.key in ("duty", "mem", "memtot") for s in BLOB_SPECS)
+    # ... but it does not pay for the DCGM profiling queries it will not print. Tested
+    # against the PROF catalog specifically, not "DCGM_FI" at large: GPU% may itself be
+    # served by DCGM_FI_DEV_GPU_UTIL, which is one of the three blob columns rather
+    # than a profiling metric this view declined to print.
+    assert not any("DCGM_FI_PROF" in q for q in client.queries)
+    assert BLOB_SPECS and all(
+        s.column in ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB") for s in BLOB_SPECS)
 
 
 def test_running_context_names_the_owner_for_explicit_ids(monkeypatch):

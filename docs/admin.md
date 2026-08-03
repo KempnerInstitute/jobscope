@@ -333,7 +333,7 @@ duty cycle cannot fake.
 
 Omit `vote` and jobscope derives it: every graded percentage that is not a capacity
 reading. That follows the catalog as it grows, which is usually what you want. Set it
-to stop `--dcgm` widening the ballot from four metrics to fifteen — a job busy on ENC%
+to stop `--all-metrics` widening the ballot from four metrics to fifteen — a job busy on ENC%
 alone would otherwise read `good`.
 
 ### Ceilings
@@ -388,7 +388,7 @@ Run `jobscope probe --metrics` first: it lists every series your server carries 
 real job and marks `new` the ones with no jobscope name. `jobscope probe --toml`
 emits that as an editable config block.
 
-A defined metric joins the **extended** catalog, so it appears under `--dcgm` or in any
+A defined metric joins the **extended** catalog, so it appears under `--all-metrics` or in any
 view that names it. It never joins the default view on its own — defining a metric
 cannot silently widen every report, or the queries every sweep pays for.
 
@@ -415,7 +415,7 @@ for a while; naming one now is an error that tells you what to type instead:
 |---|---|
 | `jobscope summary -D 3` | `jobscope finished -D 3` |
 | `jobscope detail JOBID` | `jobscope JOBID --per-gpu` |
-| `jobscope dcgm --ext JOBID` | `jobscope JOBID --dcgm` |
+| `jobscope dcgm --ext JOBID` | `jobscope JOBID --all-metrics` |
 | `jobscope dcgm --ts JOBID` | `jobscope JOBID --ts` |
 | `jobscope live -a` | `jobscope -a` |
 | `jobscope doctor` | `jobscope probe` |
@@ -429,7 +429,7 @@ Retired flag spellings, each a duplicate of the one beside it:
 | `--min-runtime` | `--min-elapsed` |
 | `--timeseries` | `--ts` |
 | `--stats_per_node`, `--stats_per_job`, `--all_categories` | the `-` spellings |
-| `--extended` | `--ext` |
+| `--extended` | `--all-metrics` |
 | `--plot_avgeff` | nothing — the bars are the default; `--no-plot` omits them |
 
 `--plot_ts` and `--node` keep both spellings: they are what the docs and most

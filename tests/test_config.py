@@ -481,9 +481,10 @@ def test_the_blob_backed_metrics_cannot_be_dropped_from_the_summary(tmp_path):
     path = tmp_path / "c.toml"
     path.write_text('[metrics]\nsummary = ["sm_act"]\n')
     cfg = load_config(str(path))
-    keys = {s.key for s in cfg.metrics.summary}
-    assert {"duty", "mem", "memtot"} <= keys      # added back
-    assert "smact" in keys                        # and what was asked for is kept
+    # By column, not by key: which provider serves GPU% depends on [gpu] source.
+    columns = {s.column for s in cfg.metrics.summary}
+    assert {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB"} <= columns      # added back
+    assert "SM_ACT%" in columns                   # and what was asked for is kept
     # --ts has no fixed columns, so there a narrow list means exactly what it says.
     path.write_text('[metrics]\ntimeseries = ["sm_act"]\n')
     assert [s.header for s in load_config(str(path)).metrics.timeseries] == ["SM_ACT%"]

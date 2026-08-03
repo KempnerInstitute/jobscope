@@ -79,6 +79,7 @@ def test_cols_for_views():
 
 def test_context_pairs_explicit_ids(gpu_record):
     pairs = context_pairs(Selection(user="alice", jobids=["100"]), "1 job ID(s)", {"100": gpu_record})
+    # No GPU specs collected, so no provenance line -- see _source_pair.
     assert pairs == [("User", "alice"), ("Select", "1 job ID(s)")]
 
 

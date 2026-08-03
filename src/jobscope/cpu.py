@@ -25,7 +25,7 @@ itself, so ``denom`` names a blob field.
 from dataclasses import dataclass, replace
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
-from . import config
+from . import config, source
 from .blob import store_as
 from .prometheus import PrometheusClient, query_value
 
@@ -49,6 +49,17 @@ class CgroupSpec:
     # What the metric is *for*; read by jobscope.metrics rather than restated in
     # the header lists report.py used to keep. Same vocabulary as MetricSpec.roles.
     roles: FrozenSet[str] = frozenset()
+    # As MetricSpec.family/provides. There is one host exporter rather than two, so
+    # every spec here is `cgroup` -- but the *blob* is the other candidate for CPU%
+    # and MEM%, and jobscope.source has to be able to ask this list which column each
+    # spec is offering before it can decide between them.
+    family: str = "cgroup"
+    provides: str = ""
+
+    @property
+    def column(self) -> str:
+        """The column this spec is a candidate to serve."""
+        return self.provides or self.header
 
     @property
     def label(self) -> str:
@@ -111,6 +122,15 @@ CGROUP_METRICS: List[CgroupSpec] = [
                "gauge", "total_memory", 1, "all", roles=frozenset({"memory"})),
 ]
 
+# Which source serves each host column. Only CPU% and MEM% have a choice -- the blob
+# records them, and the cgroup exporter measures them -- so this is a shorter question
+# than the GPU one, but the same question, answered in the same place. A cluster with
+# no cgroup exporter (which is this one: probe reports 0 of 6 series present) resolves
+# them to the blob, and the report now says so instead of leaving it to be inferred.
+PREFERENCE: Tuple[str, ...] = source.DEFAULT_HOST_PREFERENCE
+RESOLVED: source.Resolution = source.resolve(
+    CGROUP_METRICS, PREFERENCE, source.BLOB_HOST_COLUMNS)
+
 SPEC_BY_KEY: Dict[str, CgroupSpec] = {spec.key: spec for spec in CGROUP_METRICS}
 DEFAULT_CGROUP_SPECS: List[CgroupSpec] = [s for s in CGROUP_METRICS
                                           if s.group == "default"]
@@ -132,11 +152,38 @@ def _rebuild() -> None:
     to pick that up or the override does nothing where it matters most.
     """
     global SPEC_BY_KEY, DEFAULT_CGROUP_SPECS, CGROUP_HEADERS, CGROUP_NAMES, _ORDER
+    global RESOLVED
+    RESOLVED = source.resolve(CGROUP_METRICS, PREFERENCE, source.BLOB_HOST_COLUMNS)
     SPEC_BY_KEY = {spec.key: spec for spec in CGROUP_METRICS}
     DEFAULT_CGROUP_SPECS = [s for s in CGROUP_METRICS if s.group == "default"]
     CGROUP_HEADERS = tuple(spec.header for spec in CGROUP_METRICS)
     CGROUP_NAMES = tuple(spec.key for spec in CGROUP_METRICS)
     _ORDER = {spec.key: i for i, spec in enumerate(CGROUP_METRICS)}
+
+
+def set_preference(preference: Tuple[str, ...]) -> None:
+    """Choose which source serves CPU%/MEM%, then recompute the resolved view.
+
+    The host counterpart of :func:`jobscope.dcgm.set_preference`, and separate from it
+    because the two axes are independent: a cluster may have dcgm-exporter and no
+    cgroup exporter, or the reverse.
+    """
+    global PREFERENCE
+    PREFERENCE = tuple(preference)
+    _rebuild()
+
+
+def default_view(view: str, family: Optional[str] = None) -> List[CgroupSpec]:
+    """The built-in host metric list for ``view``.
+
+    The two default cgroup metrics for the summary and the time series alike: unlike
+    the GPU catalog there is no narrower curated set worth having, since CPU% and MEM%
+    *are* the pair. ``extended`` widens to everything the catalog carries.
+
+    Takes ``family`` for signature parity with the GPU side so a caller can ask either
+    without branching; there is only one host exporter, so it is accepted and ignored.
+    """
+    return list(CGROUP_METRICS) if view == "extended" else list(DEFAULT_CGROUP_SPECS)
 
 
 def register(extra: List[CgroupSpec]) -> None:

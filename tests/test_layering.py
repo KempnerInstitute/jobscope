@@ -8,7 +8,8 @@ whole package to find out where the queries live. So the layering is a test.
 Layers, bottom up:
 
     errors, models                 leaves; import nothing from the package
-    config, metrics, classifier    policy -- read settings, return decisions
+    config, metrics, classifier,   policy -- read settings, return decisions
+      source
     prometheus                     the client
     blob, cpu, nvml, dcgm,         collectors -- turn a source into numbers
       slurm, running, timeseries,
@@ -29,7 +30,7 @@ import pytest
 SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "jobscope"
 
 LEAVES = {"errors", "models"}
-POLICY = {"config", "metrics", "classifier"}
+POLICY = {"config", "metrics", "classifier", "source"}
 COLLECTORS = {"blob", "cpu", "nvml", "dcgm", "slurm", "running", "timeseries",
               "extra_metric", "job_ave_stats"}
 RENDER = {"report", "plot"}

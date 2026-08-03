@@ -77,7 +77,7 @@ class Column:
 # already per-job, not per-node); #GPU is the allocated GPU count. The blob group
 # is shown by every view, since CPU% next to SM_ACT% is the comparison that tells
 # you whether a GPU job is actually CPU-bound -- previously no single view had both.
-# OCC% moved to the "all" group (dcgm.py's METRICS) -- --dcgm/--ext only, not the
+# OCC% moved to the "all" group (dcgm.py's METRICS) -- --all-metrics only, not the
 # default -- so it is absent here; this list mirrors DEFAULT_SPECS/GPU_SUMMARY_SPECS.
 SUMMARY_COLUMNS: List[Column] = [
     Column("JOBID", "{:<12}", "id"),
@@ -101,7 +101,7 @@ def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
     """:data:`SUMMARY_COLUMNS` with its DCGM block taken from ``specs``.
 
     The identity and blob columns are fixed; only the profiling block varies, which
-    is what lets `dcgm --ext` widen the table without becoming a different view.
+    is what lets `--all-metrics` widen the table without becoming a different view.
     Blob-backed metrics are dropped from the block -- GPU% and the GMEM columns are
     already rendered from the blob, and one number deserves one column.
     """
@@ -138,7 +138,7 @@ DETAIL_COLUMNS: List[Column] = [
 _NODE_INDEX = 0
 _GPU_INDEX = 1
 
-# OCC% moved to dcgm.py's "all" group -- --dcgm/--ext only -- so DCGM_HEADERS (which
+# OCC% moved to dcgm.py's "all" group -- --all-metrics only -- so DCGM_HEADERS (which
 # this mirrors) no longer carries it either.
 DETAIL_HEADER: Tuple[str, ...] = (
     "NODE", "GPU", "CPU%", "CPU-MEM", "GPU%", "GPU-MEM", "GMEM%",
@@ -464,7 +464,9 @@ def narrowing_pairs(nodename: Optional[str], gpu_ids) -> List[Tuple[str, str]]:
 
 
 def context_pairs(selection: Selection, desc: str,
-                  records: Dict[str, JobRecord]) -> List[Tuple[str, str]]:
+                  records: Dict[str, JobRecord],
+                  specs: Optional[List] = None,
+                  host_specs: Optional[List] = None) -> List[Tuple[str, str]]:
     """Context lines for the header block.
 
     With explicit JOBIDs the -u/-A/-p filters are bypassed, so show the jobs'
@@ -474,7 +476,8 @@ def context_pairs(selection: Selection, desc: str,
     if selection.jobids:
         owners = sorted({r.user for r in records.values() if r.user})
         user_val = ", ".join(owners) if owners else "(explicit job IDs)"
-        return [("User", user_val), ("Select", desc)]
+        pairs = [("User", user_val), ("Select", desc)]
+        return pairs + source_pair(specs, host_specs=host_specs)
     # -a/--all-users leaves `user` unset, so say so rather than printing None.
     pairs = [("User", selection.user or "(all users)")]
     if selection.account:
@@ -488,7 +491,65 @@ def context_pairs(selection: Selection, desc: str,
         # the default lookback, so a reader could not otherwise tell what was scanned.
         # Not for an explicit -S/-E, where the Select line already is the window.
         pairs.append(("Window", format_window(*selection.window())))
-    return pairs
+    return pairs + source_pair(specs, host_specs=host_specs)
+
+
+def gpu_source_line(specs: Optional[List] = None, have_blob: bool = True,
+                    host_specs: Optional[List] = None) -> str:
+    """Which source served which column, for the header block.
+
+    The header already restates the window it actually scanned, so a report cannot
+    claim a range it did not read; this is the same promise about *provenance*. It
+    matters because the default GPU block is genuinely mixed -- GPU% and the memory
+    pair out of the jobstats blob, the activity columns out of dcgm-exporter -- and
+    a reader comparing two clusters, or two runs either side of a `--gpu-source`,
+    has no other way to tell which numbers moved because the source did.
+
+    Named per column rather than as one word for the same reason
+    :mod:`jobscope.extra_metric` refuses to substitute silently: a mixed set
+    described as "dcgm" would be wrong about half its own columns.
+
+    ``have_blob=False`` for the running view, where the claim would otherwise be
+    false in the other direction: Slurm writes the blob at job *end*, so a running
+    job's GPU% is measured by an exporter no matter what the preference says, and
+    naming the blob there would credit a source that had nothing to give.
+
+    Covers the host columns as well, since CPU%/MEM% have the same choice between the
+    stored blob and an exporter and the reader has no more way to tell for those than
+    for GPU%. Host columns first, matching the order they print in.
+
+    States which source each column *resolved to*, not which one returned data -- a
+    column whose source had nothing still prints "-", and the two lines read together:
+    asked cgroup, cgroup was empty. That is deliberately more useful than omitting the
+    name, because "we queried an exporter this cluster does not run" is exactly the
+    diagnostic a port needs, and the alternative hides it.
+    """
+    from . import cpu, dcgm, source as source_module
+    if not specs and not host_specs:
+        # --cpu with no host list either: nothing collected, so nothing to attribute.
+        return ""
+    per_source: Dict[str, List[str]] = {}
+    for resolution, wanted in (
+            (cpu.RESOLVED if have_blob else source_module.resolve(
+                cpu.CGROUP_METRICS, cpu.PREFERENCE), host_specs),
+            (dcgm.RESOLVED if have_blob else source_module.resolve(
+                dcgm.METRICS, dcgm.PREFERENCE), specs)):
+        if not wanted:
+            continue
+        shown = {spec.column for spec in wanted}
+        for name, columns in resolution.by_source():
+            kept = [c for c in columns if c in shown]
+            if kept:
+                per_source.setdefault(name, []).extend(kept)
+    return ";  ".join("%s <- %s" % (" ".join(columns), name)
+                      for name, columns in per_source.items())
+
+
+def source_pair(specs, have_blob: bool = True,
+                host_specs: Optional[List] = None) -> List[Tuple[str, str]]:
+    """The Source context line, or nothing when the view collected nothing."""
+    line = gpu_source_line(specs, have_blob, host_specs)
+    return [("Source", line)] if line else []
 
 
 def extend_detail_row(row, per_gpu):
@@ -1676,7 +1737,7 @@ def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
     """One row per job, with the profiling block taken from ``specs``.
 
     The same renderer the summary view uses, so the two print identical columns;
-    ``--ext`` only widens the profiling block. Per-GPU numbers live in
+    ``--all-metrics`` only widens the profiling block. Per-GPU numbers live in
     ``jobscope detail`` and in the ``--ts`` time series.
     """
     renderer = SummaryRenderer(context, options, out, specs=specs)
@@ -2217,7 +2278,7 @@ def describe(out=None) -> None:
     out = out or sys.stdout
     print("jobscope columns. CPU/MEM/GPU/GMEM come from the sacct blob (no network);", file=out)
     print("the DCGM columns (gpu view) come from Prometheus. For the full per-GPU", file=out)
-    print("DCGM catalog, run 'jobscope describe --dcgm' (add --ext for all %d metrics).\n"
+    print("GPU catalog, run 'jobscope describe --metrics' (or --all-metrics for all %d).\n"
           % len(ALL_SPECS), file=out)
     for header, source, text in SUMMARY_DESCRIPTIONS:
         print("  %-9s %s" % (header, source), file=out)
@@ -2245,7 +2306,7 @@ def describe_dcgm(specs: List[MetricSpec], out=None, extended=None) -> None:
     print("DCGM GPU metrics. Each value is time-averaged over the job's [start,end]", file=out)
     print("window. Showing %d of %d metrics (%s). [reduce] = how the window is collapsed.\n"
           % (len(shown) + len(derived), len(widest),
-             "all" if is_widest else "default; --ext for the rest"), file=out)
+             "all" if is_widest else "default; --all-metrics for the rest"), file=out)
     for spec in shown:
         print("  %-12s %-38s [reduce: %s]" % (spec.header, spec.metric,
               reducer_name.get(spec.reducer, spec.reducer)), file=out)

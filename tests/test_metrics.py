@@ -7,7 +7,7 @@ old table -- so if a role is added to the wrong spec, the test says which.
 
 import pytest
 
-from jobscope import metrics
+from jobscope import dcgm, metrics
 from jobscope.cpu import CGROUP_METRICS
 from jobscope.dcgm import DERIVED_COLUMNS, METRICS
 
@@ -105,10 +105,22 @@ def test_a_cpu_only_series_with_cache_votes_only_on_cpu():
 
 def test_headers_are_unique_across_every_family():
     """One flat header -> spec mapping is only valid if no two families collide;
-    a duplicate would silently shadow one metric with another."""
-    headers = [s.header for s in METRICS] + [d.header for d in DERIVED_COLUMNS] \
+    a duplicate would silently shadow one metric with another.
+
+    Asserted over the *resolved* GPU catalog rather than the candidates. Two
+    exporters may both offer GPU%, and jobscope.source picks one -- so a duplicate
+    here would mean resolution failed to, which is the bug this guards."""
+    headers = [s.header for s in dcgm.ALL_SPECS] + [d.header for d in DERIVED_COLUMNS] \
         + [c.header for c in CGROUP_METRICS]
     assert len(headers) == len(set(headers))
+
+
+def test_a_column_offered_by_two_exporters_resolves_to_one():
+    """The reason the above is about ALL_SPECS: GPU% has an nvml and a dcgm candidate,
+    and exactly one of them may be live at a time."""
+    candidates = [s for s in METRICS if s.column == "GPU%"]
+    assert {s.family for s in candidates} == {"nvml", "dcgm"}
+    assert len([s for s in dcgm.ALL_SPECS if s.column == "GPU%"]) == 1
 
 
 def test_every_role_used_in_the_catalog_is_a_declared_one():

@@ -702,28 +702,42 @@ class Plot:
 
 @dataclass(frozen=True)
 class Metrics:
-    """Which GPU/DCGM metrics each view collects and shows.
+    """Which metrics each view collects and shows.
 
-    GPU-side only. The CPU side is ``CPU%``/``MEM%`` and fixed, because ``cpu.py``
-    has two queries and no spec catalog -- see its module docstring for why.
+    Split by side rather than mixed, because the two are consumed by different
+    collectors: the GPU lists become Prometheus GPU queries keyed by card UUID, the
+    host lists become cgroup queries keyed by job id. One list holding both would have
+    to be re-split at every call site.
 
-    Held as resolved :class:`~jobscope.dcgm.MetricSpec` lists rather than names, so
-    every consumer reads one place and a name is validated once, at load.
+    A ``[metrics]`` view list may name either kind -- ``summary = ["cpu", "sm_act"]``
+    -- and :func:`_metrics` sorts them into these fields by family, so a site states
+    the columns it wants without having to know which collector answers.
+
+    Held as resolved spec lists rather than names, so every consumer reads one place
+    and a name is validated once, at load.
     """
 
     summary: Tuple = ()      # the summary table's profiling block
     timeseries: Tuple = ()   # --ts / --plot_ts / --classify
-    extended: Tuple = ()     # --dcgm / --ext
+    extended: Tuple = ()     # --all-metrics
+    host_summary: Tuple = ()      # CPU%/MEM% and any other cgroup column
+    host_timeseries: Tuple = ()
+    host_extended: Tuple = ()
 
     def __post_init__(self) -> None:
         # Deferred so config stays importable without dcgm (which reaches
         # prometheus, and so back to config) -- see _known_percent_headers.
-        from .dcgm import ALL_SPECS, BLOB_BACKED_KEYS, DEFAULT_SPECS, KEY_SPECS, METRICS, specs_named
-        for name, fallback in (("summary", DEFAULT_SPECS),
-                               ("timeseries", KEY_SPECS),
-                               ("extended", ALL_SPECS)):
+        from . import cpu as cpu_module
+        from .dcgm import ALL_SPECS, BLOB_BACKED_KEYS, default_view, specs_named
+        # Per leading source, not one list for both: see dcgm.default_view. The
+        # nvidia exporter publishes no profiling metrics, so leading with it must not
+        # leave a summary asking for four columns it will render as "-".
+        for name in ("summary", "timeseries", "extended"):
             if not getattr(self, name):
-                object.__setattr__(self, name, tuple(fallback))
+                object.__setattr__(self, name, tuple(default_view(name)))
+            host = "host_" + name
+            if not getattr(self, host):
+                object.__setattr__(self, host, tuple(cpu_module.default_view(name)))
         # The blob-backed metrics feed GPU% and GMEM%, which are *fixed* columns of
         # the summary and detail tables rather than part of the configurable
         # profiling block. A config that leaves them out is not asking for narrower
@@ -731,10 +745,13 @@ class Metrics:
         # the running view, where they come from Prometheus rather than the blob. So
         # they are added back rather than obeyed. Not to `timeseries`: its CSV has no
         # fixed columns, so there a narrower list means exactly what it says.
-        required = [spec for spec in METRICS if spec.key in BLOB_BACKED_KEYS]
+        # Compared by column rather than by key: a list that named the other
+        # provider of GPU% already has that column, and adding this one too would
+        # print it twice from two exporters.
+        required = [spec for spec in ALL_SPECS if spec.key in BLOB_BACKED_KEYS]
         for name in ("summary", "extended"):
             listed = getattr(self, name)
-            missing = [s for s in required if s.key not in {x.key for x in listed}]
+            missing = [s for s in required if s.column not in {x.column for x in listed}]
             if missing:
                 object.__setattr__(self, name, tuple(specs_named(
                     [s.key for s in listed] + [s.key for s in missing])))
@@ -815,6 +832,44 @@ class Config:
     prometheus_from: str = ""
     report: "Report" = field(default_factory=lambda: Report())
     plot: "Plot" = field(default_factory=lambda: Plot())
+    gpu: "Gpu" = field(default_factory=lambda: Gpu())
+    host: "Host" = field(default_factory=lambda: Host())
+
+
+@dataclass(frozen=True)
+class Gpu:
+    """Where each GPU column's numbers come from.
+
+    ``source`` is a preference order over ``blob``, ``dcgm`` and ``nvml``, not a
+    choice of one: every column resolves to its own best available provider, so
+    naming dcgm cannot take away a column only the nvidia exporter publishes. See
+    :mod:`jobscope.source` for the resolution, and why the default puts the free
+    source first.
+    """
+
+    source: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.source:
+            from .source import DEFAULT_PREFERENCE
+            object.__setattr__(self, "source", DEFAULT_PREFERENCE)
+
+
+@dataclass(frozen=True)
+class Host:
+    """Where CPU%/MEM% come from -- the host counterpart of :class:`Gpu`.
+
+    A separate section rather than a second key in ``[gpu]`` because the axes are
+    independent: the candidates differ (``cgroup`` against ``dcgm``/``nvml``), and a
+    cluster commonly has one exporter and not the other.
+    """
+
+    source: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.source:
+            from .source import DEFAULT_HOST_PREFERENCE
+            object.__setattr__(self, "source", DEFAULT_HOST_PREFERENCE)
 
 
 def default_config_path(env: Optional[Mapping[str, str]] = None) -> Path:
@@ -830,13 +885,20 @@ def _read_toml(path: Path) -> dict:
 
 
 def load_config(path: Optional[str] = None,
-                env: Optional[Mapping[str, str]] = None) -> Config:
+                env: Optional[Mapping[str, str]] = None,
+                gpu_source: Optional[str] = None) -> Config:
     """Build a Config from a TOML file plus environment overrides.
 
     Resolution order for the file: ``path`` argument, then ``$JOBSCOPE_CONFIG``,
     then :func:`default_config_path`. A file named explicitly (argument or env
     var) must exist; the default path may be absent, in which case built-in
     defaults apply. The Prometheus URL prefers ``$JOBSCOPE_PROM_URL`` over the file.
+
+    ``gpu_source`` overrides ``[gpu] source``, and is taken here rather than applied
+    afterwards because the order decides which candidate wins each column *and* which
+    per-source ``[metrics.<family>]`` view list applies -- both of which are resolved
+    during this call. Applied after the fact, a report would collect one source's
+    metrics while resolving names against another's.
     """
     env = os.environ if env is None else env
     explicit = path if path is not None else env.get(CONFIG_ENV)
@@ -857,6 +919,17 @@ def load_config(path: Optional[str] = None,
     # check have to be able to see what a site just defined. Unconditional, because
     # a config that *removes* a definition has to un-register it too.
     register_metrics(data.get("metrics") or {})
+
+    # And before any of those names is *resolved*: the preference decides which
+    # candidate wins each column, so a name looked up before this would resolve
+    # against the previous load's source order. Unconditional for the same reason as
+    # registration -- dropping [gpu] has to restore the default order.
+    gpu_section = _gpu(data.get("gpu") or {})
+    host_section = _host(data.get("host") or {})
+    if gpu_source:
+        from .source import parse_preference
+        gpu_section = Gpu(source=parse_preference(gpu_source, "--gpu-source"))
+    _apply_preference(gpu_section.source, host_section.source)
 
     stale = [key for key in LEGACY_THRESHOLD_KEYS if key in thr]
     if stale:
@@ -917,6 +990,8 @@ def load_config(path: Optional[str] = None,
         site=_site(data.get("site") or {}),
         report=_report(data.get("report") or {}),
         plot=_plot(data.get("plot") or {}),
+        gpu=gpu_section,
+        host=host_section,
     )
 
 
@@ -1079,12 +1154,18 @@ def _builtin_named(family: str, name: str):
     ``cpu`` to point at another exporter's series must not also rename the column
     from ``CPU%`` to ``CPU`` -- the header is the identity ``[thresholds]``,
     ``--csv`` consumers and the classifier's own literals all key on.
+
+    Matched on family as well as key for the GPU families, because one column can
+    have a candidate in each: without it, ``[metrics.nvml.power]`` would inherit
+    the *DCGM* power spec, and so its uppercase ``UUID`` label, and return rows
+    that cannot be attributed to a card.
     """
     if family == "cgroup":
         from .cpu import _BUILTIN
-    else:
-        from .dcgm import _BUILTIN
-    return next((spec for spec in _BUILTIN if spec.key == name), None)
+        return next((spec for spec in _BUILTIN if spec.key == name), None)
+    from .dcgm import _BUILTIN
+    return next((spec for spec in _BUILTIN
+                 if spec.key == name and spec.family == family), None)
 
 
 def _one_of(where: str, body: Mapping, key: str, allowed, default: str) -> str:
@@ -1117,7 +1198,9 @@ def _gpu_spec(family: str, name: str, body: Mapping):
                         base.reducer if base else "avg"),
         agg=_one_of(where, body, "agg", ("mean", "sum", "max"),
                     base.agg if base else "mean"),
-        # nvml is the lowercase-uuid family, dcgm the uppercase one.
+        # nvml is the lowercase-uuid family, dcgm the uppercase one. MetricSpec
+        # checks the pair, so passing both is a guard rather than a repetition.
+        family=family,
         uuid_label="uuid" if family == "nvml" else "UUID")
 
 
@@ -1178,6 +1261,45 @@ def _int(where: str, body: Mapping, key: str, default: int) -> int:
     return raw
 
 
+def _gpu(table: Mapping) -> "Gpu":
+    """``[gpu]`` -> a resolved source preference."""
+    from .source import parse_preference
+    unknown = sorted(set(table) - {"source"})
+    if unknown:
+        raise JobscopeError("[gpu] has no %s; it takes source"
+                            % ", ".join(repr(k) for k in unknown))
+    if "source" not in table:
+        return Gpu()
+    return Gpu(source=parse_preference(table["source"]))
+
+
+def _host(table: Mapping) -> "Host":
+    """``[host]`` -> a resolved source preference for CPU%/MEM%."""
+    from .source import HOST_SOURCES, parse_preference
+    unknown = sorted(set(table) - {"source"})
+    if unknown:
+        raise JobscopeError("[host] has no %s; it takes source"
+                            % ", ".join(repr(k) for k in unknown))
+    if "source" not in table:
+        return Host()
+    return Host(source=parse_preference(table["source"], "[host] source", HOST_SOURCES))
+
+
+def _apply_preference(gpu_pref: Tuple[str, ...], host_pref: Tuple[str, ...]) -> None:
+    """Install both source orders, then recompute everything derived from them.
+
+    In this order: each catalog re-resolves which candidate serves each of its
+    columns, and ``metrics`` then recomputes the cross-family role view over the
+    winners. Skipping the last step leaves role lookups keyed to the previous order's
+    headers, which is the confusing kind of half-applied.
+    """
+    from . import cpu, dcgm
+    from . import metrics as metrics_module
+    dcgm.set_preference(gpu_pref)
+    cpu.set_preference(host_pref)
+    metrics_module.rebuild()
+
+
 def register_metrics(table: Mapping) -> None:
     """Install the ``[metrics.<family>.<name>]`` definitions into the catalogs.
 
@@ -1196,6 +1318,11 @@ def register_metrics(table: Mapping) -> None:
     gpu, cgroup = [], []
     for family in FAMILIES:
         for name, body in (definitions.get(family) or {}).items():
+            if name in VIEWS:
+                # A per-source view selection, not a metric: [metrics.dcgm] summary =
+                # [...] sits in the same table as [metrics.dcgm.<name>]. Consumed by
+                # _metrics; skipped rather than rejected so the two can coexist.
+                continue
             if not isinstance(body, Mapping):
                 raise JobscopeError(
                     "[metrics.%s.%s] must be a table, e.g.\n"
@@ -1218,9 +1345,23 @@ def _metrics(table: Mapping) -> Metrics:
     catalog. Absent, a view keeps its built-in list (see :meth:`Metrics.__post_init__`).
     Family sub-tables are metric *definitions* and were consumed by
     :func:`register_metrics` before this runs.
+
+    A view may also be stated *per source* -- ``[metrics.dcgm] summary = [...]`` --
+    which is how a site says that leading with one exporter should collect a
+    different set than leading with the other. The one that applies is the leading
+    exporter's; a top-level ``[metrics] summary`` outranks both, since it names the
+    columns unconditionally.
     """
+    from . import cpu as cpu_module
+    from . import dcgm as dcgm_module
     from .dcgm import ALL_SPECS, METRIC_NAMES, spec_named, specs_named
-    table = {k: v for k, v in table.items() if k not in _definitions(table)}
+    families = _definitions(table)
+    leading = dcgm_module.RESOLVED.leading_exporter()
+    per_source = {view: names for view, names in (families.get(leading) or {}).items()
+                  if view in VIEWS}
+    table = {k: v for k, v in table.items() if k not in families}
+    # The leading source's lists fill in only where the top level said nothing.
+    table = dict(per_source, **table)
     unknown = [key for key in table if key not in VIEWS]
     if unknown:
         raise JobscopeError(
@@ -1234,21 +1375,48 @@ def _metrics(table: Mapping) -> Metrics:
                 raise JobscopeError('[metrics] %s = %r must be a list of metric names'
                                     ' or the string "all"' % (view, names))
             resolved[view] = tuple(ALL_SPECS)
+            resolved["host_" + view] = tuple(cpu_module.default_view("extended"))
             continue
         if not isinstance(names, (list, tuple)):
             raise JobscopeError('[metrics] %s must be a list of metric names or "all",'
                                " not %r" % (view, names))
-        strays = [n for n in names if spec_named(n) is None]
+        # Sorted by family, so one list can name CPU%/MEM% beside the GPU columns: the
+        # two are collected by different queries and have to reach different callers,
+        # but a site writing the list should not have to know that.
+        #
+        # One name resolves in both catalogs -- `mem` is the DCGM key for GMEM_GB and
+        # the cgroup key for MEM% -- and picking a side would be a coin toss that reads
+        # as working. So it is an error that names the two unambiguous spellings.
+        both = [n for n in names
+                if spec_named(n) is not None and cpu_module.spec_named(n) is not None]
+        if both:
+            raise JobscopeError(
+                "[metrics] %s: %s names both %s and %s. Write %s for the GPU column or"
+                " %s for the host one."
+                % (view, ", ".join(repr(n) for n in both),
+                   spec_named(both[0]).header, cpu_module.spec_named(both[0]).header,
+                   repr(spec_named(both[0]).header.lower()),
+                   repr(cpu_module.spec_named(both[0]).header.lower())))
+        gpu_names = [n for n in names if spec_named(n) is not None]
+        host_names = [n for n in names if cpu_module.spec_named(n) is not None]
+        strays = [n for n in names if n not in gpu_names and n not in host_names]
         if strays:
             # Named, not ignored: a typo would otherwise read as a metric the
             # exporter simply did not have, which is indistinguishable from working.
             raise JobscopeError(
                 "[metrics] %s names no metric %s; the catalog is %s"
-                % (view, ", ".join(repr(n) for n in strays), ", ".join(METRIC_NAMES)))
+                % (view, ", ".join(repr(n) for n in strays),
+                   ", ".join(tuple(METRIC_NAMES) + cpu_module.CGROUP_NAMES)))
         if not names:
             raise JobscopeError("[metrics] %s is empty; omit it to keep the built-in"
                                 " list, or name at least one metric" % view)
-        resolved[view] = tuple(specs_named(names))
+        # An absent side keeps its built-in list rather than emptying: a list that
+        # names only GPU metrics is narrowing the profiling block, not asking for a
+        # table with no CPU% in it.
+        if gpu_names:
+            resolved[view] = tuple(specs_named(gpu_names))
+        if host_names:
+            resolved["host_" + view] = tuple(cpu_module.specs_named(host_names))
     return Metrics(**resolved)
 
 

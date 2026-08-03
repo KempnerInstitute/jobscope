@@ -39,6 +39,8 @@ from .dcgm import (
     columns_for,
     window_query,
 )
+from . import dcgm as _dcgm
+from . import source
 from . import config
 from .errors import JobscopeError
 from .cpu import host_stats_many
@@ -664,20 +666,31 @@ def running_records(jobs: Dict[int, RunningJob], gpus: Dict[str, Gpu],
 
 
 def _gpu_node_map(job_gpus: List[Gpu], by_uuid: Dict[str, dict]) -> Dict[str, dict]:
-    """The blob's per-node GPU maps, from values already collected per GPU."""
+    """The blob's per-node GPU maps, from values already collected per GPU.
+
+    Looked up by *column* -- via :data:`jobscope.source.BLOB_COLUMNS`, the same table
+    the finished view reads -- and then by the resolved provider's key, because which
+    key serves GPU% depends on ``[gpu] source``. Keyed on the literal ``"duty"`` this
+    silently stopped producing a GPU% the moment dcgm became the preferred exporter
+    for that column. Read through the module, since ``dcgm._rebuild`` *rebinds*
+    ``SPEC_BY_HEADER`` and a by-value import would keep the pre-config one.
+    """
     nodes: Dict[str, dict] = {}
     for gpu in job_gpus:
         values = by_uuid.get(gpu.uuid, {})
-        for blob_field, key in (("gpu_utilization", "duty"),
-                                ("gpu_used_memory", "mem"),
-                                ("gpu_total_memory", "memtot")):
-            value = values.get(key)
+        for column, blob_field in source.BLOB_COLUMNS.items():
+            spec = _dcgm.SPEC_BY_HEADER.get(column)
+            if spec is None:
+                continue
+            value = values.get(spec.key)
             if value is None:
                 continue
-            # Scaled back to bytes: the blob stores raw byte counts, and blob_metrics
-            # divides used by total, so the two must share a unit.
-            if key in ("mem", "memtot"):
-                value = value * 1024 ** 3
+            # Back to the exporter's own unit: the blob stores raw byte counts, and
+            # blob_metrics divides used by total, so the two must share a unit.
+            # Undoing the spec's own scale rather than assuming GiB keeps this right
+            # for a provider that publishes MiB.
+            if spec.scale and spec.scale != 1:
+                value = value / spec.scale
             nodes.setdefault(gpu.host, {}).setdefault(blob_field, {})[str(gpu.minor)] = value
     return nodes
 

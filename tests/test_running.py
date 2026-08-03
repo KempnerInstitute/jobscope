@@ -5,7 +5,13 @@ import io
 import pytest
 
 from jobscope.blob import GIB, blob_metrics
-from jobscope.dcgm import ALL_SPECS, DEFAULT_SPECS, SPEC_BY_HEADER, window_query
+from jobscope.dcgm import (
+    ALL_SPECS,
+    DEFAULT_SPECS,
+    SPEC_BY_HEADER,
+    spec_named,
+    window_query,
+)
 from jobscope.errors import JobscopeError
 from jobscope.running import (
     DEFAULT_RUNNING_SPECS,
@@ -275,15 +281,20 @@ def test_gmem_percent_is_per_gpu_and_handles_a_missing_total():
 # --- the runtime-window clip ------------------------------------------------
 
 def test_clip_applies_to_nvidia_metrics_only():
-    duty, smact = SPEC_BY_HEADER["GPU%"], SPEC_BY_HEADER["SM_ACT%"]
+    # By provider, not by column: which source serves GPU% depends on the preference,
+    # and the whole point of this test is that the two providers clip differently.
+    duty, smact = spec_named("duty"), SPEC_BY_HEADER["SM_ACT%"]
     # Same exporter as nvidia_gpu_jobId, so `and` can match on identical labels.
     assert clip_to_job(duty, 42) == "nvidia_gpu_jobId == 42"
     # DCGM carries different labels, so `and` never matches; the window alone bounds it.
     assert clip_to_job(smact, 42) is None
+    # Including the DCGM candidate for GPU% itself -- preferring it trades ownership
+    # clipping for a window bound, exactly as SM_ACT% is already bounded.
+    assert clip_to_job(spec_named("duty_dcgm"), 42) is None
 
 
 def test_clipped_window_query_is_well_formed():
-    duty = SPEC_BY_HEADER["GPU%"]
+    duty = spec_named("duty")
     query = window_query(duty, ["GPU-a"], 900, clip=clip_to_job(duty, 42))
     assert query == ('avg_over_time((nvidia_gpu_duty_cycle{uuid=~"^(GPU-a)$"} '
                      'and nvidia_gpu_jobId == 42)[900s:])')

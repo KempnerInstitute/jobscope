@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Callable, Dict, FrozenSet, List, NamedTuple, Optional, Tuple
 
-from . import config
+from . import config, source
 from .prometheus import PrometheusClient
 from .slurm import JobRecord
 
@@ -38,6 +38,16 @@ class MetricSpec:
     in five places. ``slug`` and ``tag`` are its short forms for a row label and a
     combined-share suffix; both derive from the header and are set only where that
     derivation reads badly.
+
+    ``family`` and ``provides`` are what let one column have more than one source.
+    ``family`` names the exporter (see :data:`jobscope.config.FAMILIES`) and is no
+    longer inferred from ``uuid_label`` -- the two are checked against each other
+    instead, since a mismatch yields a response whose rows cannot be attributed to
+    a card. ``provides`` is the header this spec is a *candidate* for, so ``duty``
+    (NVML) and ``duty_dcgm`` (DCGM) can both offer ``GPU%`` under different keys;
+    :mod:`jobscope.source` picks one per column and only the winner goes live,
+    which is what keeps headers unique. ``group`` is read per family: ``default``
+    means default *for this source*, not across the catalog.
     """
 
     key: str
@@ -53,6 +63,24 @@ class MetricSpec:
     roles: FrozenSet[str] = frozenset()
     slug: str = ""      # row-label form; defaults to the header without its "%"
     tag: str = ""       # share-tag form; defaults to the lowercased slug
+    family: str = "dcgm"
+    provides: str = ""  # column this is a candidate for; defaults to the header
+
+    def __post_init__(self) -> None:
+        # The label a family's series carry the UUID in is a property of the
+        # exporter, not a free choice: nvml publishes lowercase, DCGM uppercase.
+        # Checked rather than derived so a spec cannot claim one and query the
+        # other -- that combination returns rows silently keyed to nothing.
+        expected = "uuid" if self.family == "nvml" else "UUID"
+        if self.uuid_label != expected:
+            raise ValueError(
+                "%s: family %r uses the %r label, not %r"
+                % (self.key, self.family, expected, self.uuid_label))
+
+    @property
+    def column(self) -> str:
+        """The header this spec is a candidate to serve."""
+        return self.provides or self.header
 
     @property
     def label(self) -> str:
@@ -67,7 +95,14 @@ class MetricSpec:
 
 METRICS: List[MetricSpec] = [
     MetricSpec("duty", "GPU%", "nvidia_gpu_duty_cycle", 1, 0, "default", uuid_label="uuid",
-               roles=frozenset({"worst", "resource"})),
+               family="nvml", roles=frozenset({"worst", "resource"})),
+    # The other candidate for GPU%, from dcgm-exporter. Same quantity, same 0-100
+    # scale, and measured to agree with the nvidia exporter to a mean of 3.6 points
+    # per card at one instant -- which is scrape offset, not disagreement about what
+    # is being counted. Immediately after `duty` so whichever wins lands in the same
+    # column position; jobscope.source picks one, never both.
+    MetricSpec("duty_dcgm", "GPU%", "DCGM_FI_DEV_GPU_UTIL", 1, 0, "default",
+               provides="GPU%", roles=frozenset({"worst", "resource"})),
     MetricSpec("smact", "SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE", 100, 1, "default",
                roles=frozenset({"worst"}), slug="SM"),
     MetricSpec("tensor", "TENSOR%", "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE", 100, 1, "default"),
@@ -75,6 +110,12 @@ METRICS: List[MetricSpec] = [
     # POWER_W is a watt reading, not a percentage, so it never votes on its own --
     # it only ever pulls a verdict down. See classify()'s cap.
     MetricSpec("power", "POWER_W", "DCGM_FI_DEV_POWER_USAGE", 1, 0, "default",
+               roles=frozenset({"worst", "cap"}), slug="POWER", tag="pw"),
+    # The nvidia exporter's board watts, in milliwatts. Here so choosing nvml does
+    # not cost the POWER_W floor, which is what pulls a verdict below its band --
+    # without a candidate, an nvml-only site would silently lose that check.
+    MetricSpec("power_nvml", "POWER_W", "nvidia_gpu_power_usage_milliwatts", 1e-3, 0,
+               "default", uuid_label="uuid", family="nvml", provides="POWER_W",
                roles=frozenset({"worst", "cap"}), slug="POWER", tag="pw"),
     # OCC% sits here, right after the default group, so the extended catalog's
     # column order keeps DEFAULT_SPECS as a contiguous prefix -- it is the first
@@ -100,6 +141,8 @@ METRICS: List[MetricSpec] = [
     MetricSpec("smclk", "SMCLK_MHz", "DCGM_FI_DEV_SM_CLOCK", 1, 0, "all"),
     MetricSpec("memclk", "MEMCLK_MHz", "DCGM_FI_DEV_MEM_CLOCK", 1, 0, "all"),
     MetricSpec("temp", "TEMP_C", "DCGM_FI_DEV_GPU_TEMP", 1, 0, "all"),
+    MetricSpec("temp_nvml", "TEMP_C", "nvidia_gpu_temperature_celsius", 1, 0, "all",
+               uuid_label="uuid", family="nvml", provides="TEMP_C"),
     MetricSpec("memtemp", "MEMTEMP_C", "DCGM_FI_DEV_MEMORY_TEMP", 1, 0, "all"),
     MetricSpec("enc", "ENC%", "DCGM_FI_DEV_ENC_UTIL", 1, 0, "all"),
     MetricSpec("dec", "DEC%", "DCGM_FI_DEV_DEC_UTIL", 1, 0, "all"),
@@ -109,9 +152,11 @@ METRICS: List[MetricSpec] = [
     # a bare MEM% means HOST memory there, and reusing it for GPU memory both reads
     # as the wrong quantity and grades against the host threshold in plots.
     MetricSpec("mem", "GMEM_GB", "nvidia_gpu_memory_used_bytes", 1 / 1024 ** 3, 1, "default",
-               reducer="max", agg="max", uuid_label="uuid", roles=frozenset({"memory"})),
+               reducer="max", agg="max", uuid_label="uuid", family="nvml",
+               roles=frozenset({"memory"})),
     MetricSpec("memtot", "GMEM_TOTAL_GB", "nvidia_gpu_memory_total_bytes", 1 / 1024 ** 3, 1,
-               "default", reducer="max", agg="max", uuid_label="uuid", show=False),
+               "default", reducer="max", agg="max", uuid_label="uuid", family="nvml",
+               show=False),
 ]
 
 
@@ -173,29 +218,42 @@ def values_by_key(specs: List[MetricSpec], by_header: Dict[str, float]
     return {spec.key: by_header.get(spec.header) for spec in specs}
 
 
-SPEC_BY_HEADER: Dict[str, MetricSpec] = {spec.header: spec for spec in METRICS}
-DEFAULT_SPECS: List[MetricSpec] = [spec for spec in METRICS if spec.group == "default"]
-ALL_SPECS: List[MetricSpec] = list(METRICS)
+# METRICS is the *candidates*; several may offer the same column from different
+# exporters, so its headers are deliberately not unique. Everything below is the
+# resolved view -- one winner per column under the active preference -- and that is
+# what has unique headers and what every consumer reads. See jobscope.source.
+PREFERENCE: Tuple[str, ...] = source.DEFAULT_PREFERENCE
+RESOLVED: source.Resolution = source.resolve(METRICS, PREFERENCE, source.BLOB_COLUMNS)
 
-# The --ts/--plot_ts/--classify default when --dcgm/--ext is not given: a smaller,
+SPEC_BY_HEADER: Dict[str, MetricSpec] = {spec.header: spec for spec in RESOLVED.specs}
+DEFAULT_SPECS: List[MetricSpec] = [s for s in RESOLVED.specs if s.group == "default"]
+ALL_SPECS: List[MetricSpec] = list(RESOLVED.specs)
+
+# The --ts/--plot_ts/--classify default when --all-metrics is not given: a smaller,
 # curated set than DEFAULT_SPECS (which also carries the GPU memory pair) --
-# deliberately narrower, for the time-series family specifically.
-_KEY_SPEC_KEYS = ("duty", "smact", "tensor", "dram", "power")
-KEY_SPECS: List[MetricSpec] = [spec for spec in DEFAULT_SPECS if spec.key in _KEY_SPEC_KEYS]
+# deliberately narrower, for the time-series family specifically. Named by *column*
+# rather than by key, because which key serves GPU% depends on the source.
+_KEY_SPEC_COLUMNS = ("GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W")
+KEY_SPECS: List[MetricSpec] = [s for s in DEFAULT_SPECS if s.column in _KEY_SPEC_COLUMNS]
 
 # Quantities the sacct blob already supplies, which the summary and detail views
 # render from it directly (GPU%, GMEM%, and GPU-MEM). Excluded from those views'
 # DCGM columns so a job does not get two columns for one number -- and for a
 # finished job they would be the very same number, see _prefer_stored.
-BLOB_BACKED_KEYS = ("duty", "mem", "memtot")
-GPU_SUMMARY_SPECS: List[MetricSpec] = [spec for spec in DEFAULT_SPECS
-                                       if spec.key not in BLOB_BACKED_KEYS]
+#
+# Derived from the resolution rather than written out, so that naming an exporter
+# ahead of the blob genuinely moves these: under the default preference this is
+# exactly the ("duty", "mem", "memtot") it used to be spelled as.
+BLOB_BACKED_KEYS: Tuple[str, ...] = tuple(
+    s.key for s in RESOLVED.specs if s.column in RESOLVED.from_blob)
+GPU_SUMMARY_SPECS: List[MetricSpec] = [s for s in DEFAULT_SPECS
+                                       if s.column not in RESOLVED.from_blob]
 DCGM_HEADERS: List[str] = [spec.header for spec in GPU_SUMMARY_SPECS]
 
 # The column headers those keys produce, including the derived GMEM%. Renderers use
 # this to keep a blob-backed quantity out of the profiling block.
 DCGM_BLOB_HEADERS: Tuple[str, ...] = tuple(
-    [spec.header for spec in METRICS if spec.key in BLOB_BACKED_KEYS]
+    sorted(RESOLVED.from_blob, key=lambda h: [s.column for s in RESOLVED.specs].index(h))
     + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(BLOB_BACKED_KEYS)])
 
 # Position in METRICS, so a resolved selection can be put back into catalog order.
@@ -212,17 +270,31 @@ def _alias_table() -> Dict[str, MetricSpec]:
     That makes the short lowercase names ``[thresholds]`` already takes -- ``gpu``,
     ``sm_act``, ``dram`` -- work here too, which is what a reader expects.
 
-    A collision would silently shadow one spec with another, so it is an error at
-    import rather than a mystery at render: the catalog is ours to keep unambiguous.
+    Keys name a *candidate*, so every candidate has one and ``duty`` and
+    ``duty_dcgm`` stay separately nameable -- a per-source view list has to be able
+    to say which provider it means. The header forms name a *column*, so they
+    resolve to whichever candidate currently serves it: ``gpu`` is the active GPU%,
+    whatever source that is. Without that split the two GPU% candidates would both
+    claim ``gpu``.
+
+    A collision within either kind would silently shadow one spec with another, so
+    it is an error at import rather than a mystery at render: the catalog is ours to
+    keep unambiguous.
     """
     table: Dict[str, MetricSpec] = {}
     for spec in METRICS:
+        if table.setdefault(spec.key, spec) is not spec:
+            raise AssertionError("metric key %r is claimed by both %s and %s"
+                                 % (spec.key, table[spec.key].header, spec.header))
+    for spec in RESOLVED.specs:
         lower = spec.header.lower()
-        for alias in (spec.key, lower, lower.rstrip("%")):
-            if table.setdefault(alias, spec) is not spec:
+        for alias in (lower, lower.rstrip("%")):
+            claimed = table.get(alias)
+            if claimed is not None and claimed is not spec and claimed.column != spec.column:
                 raise AssertionError(
                     "metric alias %r is claimed by both %s and %s"
-                    % (alias, table[alias].header, spec.header))
+                    % (alias, claimed.header, spec.header))
+            table[alias] = spec
     return table
 
 
@@ -242,22 +314,68 @@ _BUILTIN: Tuple[MetricSpec, ...] = tuple(METRICS)
 
 
 def _rebuild() -> None:
-    """Recompute the tables derived from ``METRICS``.
+    """Recompute the resolved view of ``METRICS``.
 
-    Only the ones a site metric can affect. It always joins ``group="all"``, so
-    ``DEFAULT_SPECS``, ``KEY_SPECS``, ``GPU_SUMMARY_SPECS`` and the blob-backed sets
-    are untouched by construction -- a config cannot quietly change what the default
-    view collects, which is why the site form is opt-in per view rather than
-    something that widens every report.
+    Runs after a site metric joins the catalog and after the source preference
+    changes, since both alter which candidate wins a column. A site metric always
+    joins ``group="all"``, so it cannot quietly widen what the default view
+    collects; a preference can change *where* a default column comes from, which is
+    the point of naming one.
     """
     global SPEC_BY_HEADER, ALL_SPECS, SPEC_ALIASES, METRIC_NAMES, _CATALOG_ORDER
-    SPEC_BY_HEADER = {spec.header: spec for spec in METRICS}
-    ALL_SPECS = list(METRICS)
+    global RESOLVED, DEFAULT_SPECS, KEY_SPECS, BLOB_BACKED_KEYS, GPU_SUMMARY_SPECS
+    global DCGM_HEADERS, DCGM_BLOB_HEADERS
+    RESOLVED = source.resolve(METRICS, PREFERENCE, source.BLOB_COLUMNS)
+    order = [s.column for s in RESOLVED.specs]
+    SPEC_BY_HEADER = {spec.header: spec for spec in RESOLVED.specs}
+    ALL_SPECS = list(RESOLVED.specs)
+    DEFAULT_SPECS = [s for s in RESOLVED.specs if s.group == "default"]
+    KEY_SPECS = [s for s in DEFAULT_SPECS if s.column in _KEY_SPEC_COLUMNS]
+    BLOB_BACKED_KEYS = tuple(s.key for s in RESOLVED.specs
+                             if s.column in RESOLVED.from_blob)
+    GPU_SUMMARY_SPECS = [s for s in DEFAULT_SPECS if s.column not in RESOLVED.from_blob]
+    DCGM_HEADERS = [spec.header for spec in GPU_SUMMARY_SPECS]
+    DCGM_BLOB_HEADERS = tuple(
+        sorted(RESOLVED.from_blob, key=order.index)
+        + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(BLOB_BACKED_KEYS)])
     SPEC_ALIASES = _alias_table()
     METRIC_NAMES = tuple(
         spec.header.lower()[:-1] if spec.header.endswith("%") else spec.key
-        for spec in METRICS)
+        for spec in RESOLVED.specs)
     _CATALOG_ORDER = {spec.key: i for i, spec in enumerate(METRICS)}
+
+
+def default_view(view: str, family: Optional[str] = None) -> List[MetricSpec]:
+    """The built-in metric list for ``view`` under the leading source.
+
+    This is what makes each source's defaults its own rather than one list with
+    holes in it. dcgm publishes the whole profiling catalog, so leading with it gives
+    the activity columns; the nvidia exporter publishes duty cycle, memory, power and
+    temperature and no profiling metrics at all, so leading with it gives *those*
+    instead of quietly keeping a set of dcgm columns the choice was meant to leave.
+
+    Falls back to the whole pool for a family with nothing of its own, so a source
+    that turns out to publish none of a view's metrics still yields a report rather
+    than an empty table.
+    """
+    pool = {"summary": DEFAULT_SPECS, "timeseries": KEY_SPECS,
+            "extended": ALL_SPECS}[view]
+    family = family or RESOLVED.leading_exporter()
+    own = [spec for spec in pool if spec.family == family]
+    return own or list(pool)
+
+
+def set_preference(preference: Tuple[str, ...]) -> None:
+    """Choose which source serves each column, then recompute the resolved view.
+
+    Separate from :func:`register` because the two are independent: a site names its
+    series in ``[metrics.<family>]``, and names its order in ``[gpu] source``. Both
+    end in ``_rebuild``, and both have to run before :func:`jobscope.metrics.rebuild`
+    so the cross-family role view sees the same winners.
+    """
+    global PREFERENCE
+    PREFERENCE = tuple(preference)
+    _rebuild()
 
 
 def register(extra: List[MetricSpec]) -> None:
@@ -284,13 +402,15 @@ def _inherit(builtin: MetricSpec, override: Optional[MetricSpec]) -> MetricSpec:
 
     A site overriding ``duty`` means "my exporter calls that series something else",
     not "take GPU% out of the default view and out of the classifier's ballot". So
-    ``group``, ``roles``, ``show`` and the short label forms come from the built-in;
-    only how to *fetch and scale* the value comes from the config.
+    ``group``, ``roles``, ``show``, which column it serves and the short label forms
+    come from the built-in; only how to *fetch and scale* the value comes from the
+    config.
     """
     if override is None:
         return builtin
     return replace(override, group=builtin.group, roles=builtin.roles,
-                   show=builtin.show, slug=builtin.slug, tag=builtin.tag)
+                   show=builtin.show, slug=builtin.slug, tag=builtin.tag,
+                   provides=builtin.provides)
 
 
 def spec_named(name: str) -> Optional[MetricSpec]:
@@ -310,14 +430,20 @@ def specs_named(names, running: bool = False) -> List[MetricSpec]:
     synthesizes a jobstats-shaped blob and a counter difference has no meaning over
     a window that has not finished. Unknown names are the caller's to validate --
     :func:`spec_named` returns None and this skips them.
+
+    Deduplicated per *column*, not per key: naming both providers of one column --
+    ``["duty", "duty_dcgm"]``, or ``["gpu", "duty"]`` where ``gpu`` is the resolved
+    spelling of whichever is live -- asks for one column twice, from two exporters.
+    The first named wins, so a list can still say which provider it means.
     """
     found = {}
     for name in names:
         spec = spec_named(name)
         if spec is None or (running and spec.reducer == "delta"):
             continue
-        found[spec.key] = spec
-    return [found[key] for key in sorted(found, key=_CATALOG_ORDER.__getitem__)]
+        found.setdefault(spec.column, spec)
+    return [spec for spec in sorted(found.values(),
+                                    key=lambda s: _CATALOG_ORDER[s.key])]
 
 DESCRIPTIONS: Dict[str, str] = {
     "GPU%": "NVML's duty cycle: the fraction of the run during which at least one kernel was "
@@ -661,14 +787,21 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
     return overall, per_gpu
 
 
-# Blob field -> the metric key it supersedes, and how a job-level figure is formed
+# Blob field -> the *column* it supersedes, and how a job-level figure is formed
 # from the per-GPU values. GMEM_GB sums because the blob's GMEM% is the ratio of
 # summed used to summed total across the job's GPUs.
-_STORED_FIELDS: Tuple[Tuple[str, str, str], ...] = (
-    ("gpu_utilization", "duty", "mean"),
-    ("gpu_used_memory", "mem", "sum"),
-    ("gpu_total_memory", "memtot", "sum"),
-)
+#
+# By column rather than by metric key, because which key serves a column depends on
+# the source preference: keyed on "duty" this silently stopped applying the moment
+# dcgm became the preferred exporter for GPU%, since the resolved spec is then
+# `duty_dcgm`. The column is the stable identity -- and it is what
+# source.BLOB_COLUMNS states the blob can serve.
+# The blob field of each comes from source.BLOB_COLUMNS, which is the one statement
+# of what jobstats stored; only the aggregation is this view's business.
+_STORED_AGG: Dict[str, str] = {"GPU%": "mean", "GMEM_GB": "sum", "GMEM_TOTAL_GB": "sum"}
+_STORED_FIELDS: Tuple[Tuple[str, str, str], ...] = tuple(
+    (field, column, _STORED_AGG[column])
+    for column, field in source.BLOB_COLUMNS.items())
 
 
 def stored_per_gpu(record: JobRecord, field: str) -> Dict[Tuple[str, str], float]:
@@ -710,10 +843,18 @@ def _prefer_stored(record: JobRecord, specs: List[MetricSpec],
     every view. Running jobs have no blob, so they keep the Prometheus value --
     reconstructed by :mod:`jobscope.job_ave_stats` for the blob columns, so those agree
     with each other by construction.
+
+    Only for the columns the blob actually *wins*. Naming an exporter ahead of it --
+    ``--gpu-source dcgm`` -- takes those columns out of ``RESOLVED.from_blob``, and
+    then the queried value is the answer and must not be overwritten by a stored one
+    measured somewhere else. That is what makes the flag do what it says on a
+    finished job rather than being quietly ignored.
     """
-    by_key = {spec.key: spec for spec in specs}
-    for field, key, agg in _STORED_FIELDS:
-        spec = by_key.get(key)
+    by_column = {spec.column: spec for spec in specs}
+    for field, column, agg in _STORED_FIELDS:
+        if column not in RESOLVED.from_blob:
+            continue
+        spec = by_column.get(column)
         if spec is None:
             continue
         stored = stored_per_gpu(record, field)

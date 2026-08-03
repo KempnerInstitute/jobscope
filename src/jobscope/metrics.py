@@ -39,8 +39,8 @@ something the code no longer does.
 
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from . import dcgm
 from .cpu import CGROUP_METRICS
-from .dcgm import DERIVED_COLUMNS, METRICS
 
 WORST = "worst"
 RESOURCE = "resource"
@@ -57,8 +57,14 @@ def _catalog() -> List:
     print in, and reproducing the old hand-written tuples exactly is what makes
     this a substitution rather than a change. GPU before host, because
     ``WORST_METRICS`` read ``GPU%, SM_ACT%, POWER_W, CPU%``.
+
+    Reads ``dcgm.ALL_SPECS`` -- the *resolved* candidates, one per column -- rather
+    than ``dcgm.METRICS``, which holds every candidate and so has ``GPU%`` twice
+    once two exporters offer it. Roles are a property of the column, so asking a
+    duplicated header for its roles has no single answer. Via the module rather
+    than a ``from`` import because ``_rebuild`` rebinds that name.
     """
-    return list(METRICS) + list(DERIVED_COLUMNS) + list(CGROUP_METRICS)
+    return list(dcgm.ALL_SPECS) + list(dcgm.DERIVED_COLUMNS) + list(CGROUP_METRICS)
 
 
 CATALOG: List = _catalog()

@@ -1,56 +1,51 @@
   User:      alice
   Partition: kempner_h100
   Select:    last 1 day, completed
-  Window:    2026-08-01 23:49 .. 2026-08-02 23:49
+  Window:    2026-08-02 18:02 .. 2026-08-03 18:02
+  Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- blob;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
 JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME
 ----------------------------------------------------------------------------------------------------------------------------
-36738257     alice        COMPLETED 1     2      1      1     0      1       0.4      0.0      0.4     94       00:06:58
-36739730     alice        COMPLETED 1     91     2      1     67     24      34.3     1.7      24.4    255      00:34:33
-36759002     alice        COMPLETED 1     78     2      1     56     60      24.5     2.1      21.4    226      00:48:07
-36765938     alice        COMPLETED 1     13     1      1     2      19      0.0      0.0      0.0     74       00:02:22
-36775213     alice        COMPLETED 1     14     1      1     0      21      0.2      0.0      0.0     84       00:06:01
-36828732     alice        COMPLETED 1     10     1      1     1      21      0.1      0.0      0.0     85       00:09:36
-... 21 more rows ...
+36822372     alice        COMPLETED 1     10     1      1     0      21      0.1      0.0      0.0     80       00:08:30
+36827829     alice        COMPLETED 1     10     1      1     0      21      0.1      0.0      0.0     84       00:07:27
+36832040     alice        COMPLETED 1     8      1      1     2      19      0.6      0.0      0.1     105      00:02:39
+36956150     alice        COMPLETED 1     -      -      2     17     44      7.7      1.3      6.9     165      00:38:58
+36956153     alice        COMPLETED 1     -      -      2     23     46      8.6      1.6      7.6     166      00:35:59
+36956205     alice        COMPLETED 1     -      -      1     38     50      20.6     2.8      13.9    212      00:21:50
+... 27 more rows ...
 
 1. Summary by metric
 -----------------------------------------------------------------------------------------------------------------------------
-Used/GPU-hr:                              69     20           39     39      17.4     1.3      14.3    182
+Used/GPU-hr:                              20     2            17     44      8.3      1.2      6.6     156
   red/yellow/green use each metric's own cutoffs -- CPU% 5/10/20, MEM% 2/10/20, GPU% 2/10/20, GMEM% 2/10/20, SM_ACT% 2/10/20,
     TENSOR% 2/10/20, DRAM% 2/10/20 (wasteful/red/yellow); POWER_W red below 100 W, green above, no yellow. Counts are jobs.
   USED is resource-time that did work, and its share of the allocation -- for POWER_W, the time spent above that floor.
   bands catch pathological jobs, USED measures efficiency: no red with a low USED means every job wastes a little
-METRIC   USED           RED  YELLOW  GREEN
-CPU%     2.9h (69%)     8    2       8
-MEM%     84.3GBh (20%)  17   0       1
-GPU%     1.7h (39%)     11   0       7
-GMEM%    1.7h (39%)     2    6       10
-SM_ACT%  0.8h (18%)     11   3       4
-TENSOR%  0.1h (1%)      18   0       0
-DRAM%    0.6h (15%)     11   4       3
-POWER_W  3.3h (77%)     10   0       8
+METRIC   USED         RED  YELLOW  GREEN
+CPU%     0.4h (20%)   8    0       3
+MEM%     1.6GBh (2%)  11   0       0
+GPU%     1.9h (17%)   11   5       5
+GMEM%    4.9h (44%)   3    3       15
+SM_ACT%  0.9h (8%)    17   3       1
+TENSOR%  0.1h (1%)    21   0       0
+DRAM%    0.8h (7%)    18   3       0
+POWER_W  10.4h (93%)  7    0       14
 
 2. Average efficiency  (filled = used, grey = idle)
 ---------------------------------------------------
-     CPU%   69%  ███████████████████████░░░░░░░░░░░
-     MEM%   20%  ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░
-     GPU%   39%  █████████████░░░░░░░░░░░░░░░░░░░░░
-    GMEM%   39%  █████████████░░░░░░░░░░░░░░░░░░░░░
-  SM_ACT%   18%  ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+     CPU%   20%  ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░
+     MEM%    2%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+     GPU%   17%  ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    GMEM%   44%  ███████████████░░░░░░░░░░░░░░░░░░░
+  SM_ACT%    8%  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
   TENSOR%    1%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-    DRAM%   15%  █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    DRAM%    7%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
 
 3. Problem jobs
 -----------------------------------------------------------------------------------------------
-Wasteful GPU (11/18): GPU < 2%
+Wasteful GPU (11/21): GPU < 2%
   alice | 36828732:1%:0.2h(00:09:36), 36836738:0%:0.1h(00:02:55), 36822372:0%:0.1h(00:08:30)
-Wasteful SM (11/18): SM < 2%
-  alice | 36828732:0%:0.2h(00:09:36), 36822372:0%:0.1h(00:08:30), 36827829:0%:0.1h(00:07:27)
-Wasteful POWER (10/18): POWER < 100W
+Wasteful SM (17/21): SM < 2%
+  alice | 36910077:1%:0.3h(00:06:39), 36828732:0%:0.2h(00:09:36), 36822372:0%:0.1h(00:08:30)
+Wasteful POWER (7/21): POWER < 100W
   alice | 36828732:85W:0.2h(00:09:36), 36836738:83W:0.1h(00:02:55), 36822372:80W:0.1h(00:08:30)
-Wasteful CPU (8/18): CPU < 5%
-  alice | 36738257:2%:0.1h(00:06:58)
-Wasteful gpu-cpu (1): GPU < 2%, CPU < 5%
-  alice | 36738257:gpu0%/cpu2%(00:06:58)
-Wasteful all (1): GPU < 2%, SM < 2%, POWER < 100W, CPU < 5%
-  alice | 36738257:gpu0%/sm0%/pw94W/cpu2%(00:06:58)
-Jobs: cpu-jobs=18  gpu-jobs=18  gpus=20  no-blob=9
+Jobs: cpu-jobs=11  gpu-jobs=21  gpus=35  no-blob=12

@@ -87,16 +87,57 @@ long_running = "3h"
 # below is never queried. 'jobscope probe' reports which exporters answer here, and
 # 'jobscope probe --metrics' lists every series they carry for a real job.
 
+[gpu]
+# Where each GPU column's numbers come from, most preferred first. Not a choice of
+# one source: every column resolves independently to its own best available provider,
+# so naming dcgm cannot take away a column only the nvidia exporter publishes.
+#
+#   blob   free -- already in the sacct output, so no Prometheus query at all. Serves
+#          GPU% and the GPU memory pair, and nothing else.
+#   dcgm   complete -- the whole profiling catalog, and the only source for SM
+#          activity, tensor pipes and DRAM.
+#   nvml   partial -- duty cycle, memory, power, temperature.
+#
+# The default puts the free source first, so a finished job costs nothing extra and
+# reports exactly what Slurm recorded. Lead with an exporter to have GPU% measured
+# rather than read back; --gpu-source does the same for one command.
+#
+# One asymmetry worth knowing: an nvidia_* series can be intersected with the job
+# join, clipping the window to the samples where the job actually held the card, and a
+# DCGM_* series cannot (different labels -- PromQL's `and` never matches). Preferring
+# dcgm for GPU% therefore bounds it by the job's window, as SM_ACT% already is.
+source = ["blob", "dcgm", "nvml"]
+
+[host]
+# The same question for CPU% and MEM%, which have their own two candidates:
+#
+#   blob     free, and what a finished job reports -- jobstats recorded the CPU time
+#            and peak RSS Slurm accounted.
+#   cgroup   the cgroup_* series, which is the only source for a *running* job,
+#            since Slurm writes the blob at job end.
+#
+# A separate section from [gpu] because the axes are independent: this cluster runs
+# dcgm-exporter and no cgroup exporter, which is why running jobs show CPU% as "-".
+# The header's Source line names the resolved source either way, so a column reading
+# "-" beside "CPU% <- cgroup" says "asked cgroup, cgroup was empty" rather than
+# leaving you to guess.
+source = ["blob", "cgroup"]
+
 [metrics]
 # Which GPU/DCGM metrics each view collects and shows. GPU-side only: the CPU side is
 # CPU%/MEM% and fixed, because there are two cgroup queries and no catalog to choose.
 #
 #   summary     the per-job table's profiling block (jobscope -p PART -a)
 #   timeseries  --ts / --plot_ts / --classify
-#   extended    what --dcgm/--ext widens to; "all" or an explicit list
+#   extended    what --all-metrics widens to; "all" or an explicit list
 #
-# Short names, the same ones [thresholds] takes. 'jobscope describe --dcgm --ext'
+# Short names, the same ones [thresholds] takes. 'jobscope describe --all-metrics'
 # lists the catalog. Order does not matter; columns print in catalog order.
+#
+# A view may also be stated per source -- [metrics.nvml] summary = [...] -- for the
+# case where leading with one exporter should collect a different set than leading
+# with the other. Without one, each source's built-in default is the metrics *it*
+# publishes, so nothing here has to enumerate that.
 #
 # NOT covered: --per-gpu keeps a fixed four (SM_ACT%, TENSOR%, DRAM%, POWER_W) -- its
 # rows are addressed by position, so its width is not free to change. And naming a
@@ -141,7 +182,7 @@ power_w = 100
 #
 # Omit `vote` and jobscope derives it: every graded percentage that is not a capacity
 # reading. That follows the catalog as it grows, which is usually what you want. Set
-# it to stop --dcgm widening the ballot from four metrics to fifteen.
+# it to stop --all-metrics widening the ballot from four metrics to fifteen.
 #
 # [classify]
 # vote = ["gpu", "sm_act", "tensor", "dram", "cpu"]
@@ -212,7 +253,7 @@ long_running = "red"
 # NOTHING IS INHERITED between the two -- a table you leave out keeps `edges` (or the
 # built-in ladder), it does not copy the other view. jobscope prints a note when only
 # one is set. `default` covers every %-metric you do not name, which is what keeps the
-# ~18 extra columns under --dcgm graded without listing them.
+# ~18 extra columns under --all-metrics graded without listing them.
 #
 # The values below are SUGGESTIONS, not the built-ins -- uncommenting any of them
 # changes how jobs are graded. As shipped, this template resolves exactly like no
@@ -282,7 +323,7 @@ long_running = "red"
 #                                      # cpus | total_memory
 # kind   = "gauge"                     # gauge | rate (a counter)
 #
-# A defined metric joins the EXTENDED catalog, so it shows under --dcgm or wherever
+# A defined metric joins the EXTENDED catalog, so it shows under --all-metrics or wherever
 # it is named -- never the default view on its own, or defining one would silently
 # widen every report and the queries every sweep pays for.
 #

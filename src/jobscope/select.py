@@ -39,6 +39,7 @@ from .prometheus import PrometheusClient, client_from_config
 from .report import (
     RenderOptions,
     combined_timeseries,
+    source_pair,
     context_pairs,
     narrowing_pairs,
     cpu_timeseries,
@@ -114,7 +115,8 @@ class Resolved(NamedTuple):
 
 def resolve(request: Request, cfg: config.Config, timeout: Optional[float],
             workers: int, specs: Optional[List[MetricSpec]],
-            nodename: Optional[str] = None, gpu_ids=()) -> Optional[Resolved]:
+            nodename: Optional[str] = None, gpu_ids=(),
+            host_specs=None) -> Optional[Resolved]:
     """Select jobs and their metrics, or ``None`` when nothing matched.
 
     ``specs`` of ``None`` means the caller wants no DCGM columns (the ``--cpu``
@@ -127,8 +129,10 @@ def resolve(request: Request, cfg: config.Config, timeout: Optional[float],
     running equivalent is pure dict work over values already collected.
     """
     if request.running:
-        return _resolve_running(request, cfg, timeout, workers, specs, nodename, gpu_ids)
-    return _resolve_historical(request, cfg, timeout, workers, specs, nodename, gpu_ids)
+        return _resolve_running(request, cfg, timeout, workers, specs, nodename,
+                                gpu_ids, host_specs)
+    return _resolve_historical(request, cfg, timeout, workers, specs, nodename,
+                               gpu_ids, host_specs)
 
 
 # --- squeue -----------------------------------------------------------------
@@ -138,13 +142,17 @@ def _running_selection(request: Request) -> RunningSelection:
                          user=request.user, min_elapsed=request.min_elapsed)
 
 
-def _running_context(selection: RunningSelection, jobs: dict, gpus: dict
-                  ) -> List[Tuple[str, str]]:
+def _running_context(selection: RunningSelection, jobs: dict, gpus: dict,
+                     specs=None, host_specs=None) -> List[Tuple[str, str]]:
     """Header context for a squeue selection.
 
     With explicit JOBIDs the -u/-p filters are bypassed, so name the jobs' actual
     owners rather than a filter that was not applied -- as :func:`context_pairs`
     does for the historical modes.
+
+    The provenance line matters more here than in the historical modes, not less: a
+    running job has no stored blob, so its GPU% is measured rather than read back, and
+    which exporter measured it is the one thing the numbers cannot say themselves.
     """
     if selection.jobids:
         owners = sorted({job["user"] for job in jobs.values() if job.get("user")})
@@ -156,7 +164,7 @@ def _running_context(selection: RunningSelection, jobs: dict, gpus: dict
         pairs.append(("Partition", selection.partition))
     pairs.append(("Select", selection.describe()))
     pairs.append(("GPUs", "%d across %d job(s)" % (len(gpus), len(jobs))))
-    return pairs
+    return pairs + source_pair(specs, have_blob=False, host_specs=host_specs)
 
 
 def _report_no_running(selection) -> None:
@@ -176,7 +184,7 @@ def _report_no_running(selection) -> None:
 def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[float],
                      workers: int, specs: Optional[List[MetricSpec]],
                      nodename: Optional[str] = None,
-                     gpu_ids=()) -> Optional[Resolved]:
+                     gpu_ids=(), host_specs=None) -> Optional[Resolved]:
     """One chunk from squeue plus Prometheus, shaped like a sacct chunk.
 
     ``running_records`` synthesizes the blob Slurm has not written yet, so the records
@@ -198,6 +206,10 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
     # A --cpu report still needs the blob-backed GPU metrics, because running_records
     # assembles the blob from them -- but only those, so it does not pay for the
     # DCGM profiling queries whose columns it will not print.
+    # What the *report* asked for, before the blob-shaped fallback below. --cpu passes
+    # None and still needs BLOB_SPECS queried to reconstruct the blob, but it prints no
+    # GPU column -- so naming a source for one would describe a column that is not there.
+    requested = specs
     specs = specs or BLOB_SPECS
     metrics = (collect_averaged(client, jobs, gpus, specs, timeout, workers)
                if request.average else collect_instant(client, gpus, specs, timeout))
@@ -209,7 +221,7 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
         for raw, job in jobs.items()}
     jobids = sorted((job["jobid"] for job in jobs.values()),
                     key=lambda jid: job_sort_key({"jobid": jid}))
-    return Resolved(_running_context(selection, jobs, gpus),
+    return Resolved(_running_context(selection, jobs, gpus, requested, host_specs),
                     iter([(jobids, records, dcgm_data)]))
 
 
@@ -240,8 +252,8 @@ def sacct_selection(request: Request) -> Selection:
 
 def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[float],
                         workers: int, specs: Optional[List[MetricSpec]],
-                        nodename: Optional[str] = None, gpu_ids=()
-                        ) -> Optional[Resolved]:
+                        nodename: Optional[str] = None, gpu_ids=(),
+                        host_specs=None) -> Optional[Resolved]:
     """Streaming sacct chunks, each enriched with DCGM metrics as it arrives.
 
     Window selections stream so a wide selection shows rows as they land; a
@@ -259,10 +271,10 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
 
     if selection.jobids:
         records = fetch(jobids, timeout)
-        context = context_pairs(selection, desc, records) + narrowing
+        context = context_pairs(selection, desc, records, specs, host_specs) + narrowing
         chunks: Iterator[Tuple[List[str], Dict[str, JobRecord]]] = iter([(jobids, records)])
     else:
-        context = context_pairs(selection, desc, {}) + narrowing  # window: no records
+        context = context_pairs(selection, desc, {}, specs, host_specs) + narrowing
         chunks = fetch_chunks(jobids, timeout)
 
     return Resolved(context, _enrich(chunks, cfg, timeout, workers, specs,

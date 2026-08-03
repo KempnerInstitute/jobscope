@@ -1,0 +1,193 @@
+"""Per-column source resolution.
+
+The policy these assert used to be three literals in ``dcgm.BLOB_BACKED_KEYS`` plus a
+hardcoded preference for the blob inside ``_prefer_stored``. It is now data, so the
+thing worth testing is that the data reproduces the old behaviour by default and
+changes only what a stated preference asks it to.
+"""
+
+import pytest
+
+from jobscope import dcgm, source
+from jobscope.errors import JobscopeError
+
+
+@pytest.fixture(autouse=True)
+def restore_preference():
+    """Every test here moves module state, so put it back."""
+    yield
+    dcgm.set_preference(source.DEFAULT_PREFERENCE)
+
+
+# --- parsing ----------------------------------------------------------------
+
+def test_naming_one_source_promotes_it_and_keeps_the_rest():
+    """A preference is a reordering, not a filter: a column whose only candidate is an
+    unnamed source still has to be served, or naming dcgm would silently drop GMEM%."""
+    assert source.parse_preference("dcgm") == ("dcgm", "blob", "nvml")
+    assert source.parse_preference("nvml") == ("nvml", "blob", "dcgm")
+    assert set(source.parse_preference("dcgm")) == set(source.SOURCES)
+
+
+def test_an_order_may_be_given_in_full_or_comma_separated():
+    assert source.parse_preference("blob,nvml") == ("blob", "nvml", "dcgm")
+    assert source.parse_preference(["nvml", "dcgm"]) == ("nvml", "dcgm", "blob")
+
+
+def test_a_repeated_name_is_not_repeated_in_the_order():
+    assert source.parse_preference("dcgm,dcgm,blob") == ("dcgm", "blob", "nvml")
+
+
+@pytest.mark.parametrize("bad", ["dgcm", "prometheus", "", [], 7, "dcgm,nvml,oops"])
+def test_an_unknown_source_is_named_not_ignored(bad):
+    """A typo would otherwise read as a source that simply had no data, which is
+    indistinguishable from working."""
+    with pytest.raises(JobscopeError):
+        source.parse_preference(bad)
+
+
+# --- resolution -------------------------------------------------------------
+
+def test_the_default_order_reproduces_the_old_hardcoded_blob_list():
+    """What BLOB_BACKED_KEYS = ("duty", "mem", "memtot") used to say, by column."""
+    dcgm.set_preference(source.DEFAULT_PREFERENCE)
+    assert dcgm.RESOLVED.from_blob == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB"}
+    assert dcgm.DCGM_HEADERS == ["SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
+
+
+def test_exactly_one_provider_wins_each_column():
+    for spec in (dcgm.ALL_SPECS):
+        assert len([s for s in dcgm.ALL_SPECS if s.column == spec.column]) == 1
+
+
+def test_naming_an_exporter_takes_the_column_off_the_blob():
+    """The point of the flag: on a finished job it has to actually change where GPU%
+    comes from, rather than being quietly overridden by the stored value."""
+    dcgm.set_preference(source.parse_preference("dcgm"))
+    assert "GPU%" not in dcgm.RESOLVED.from_blob
+    assert dcgm.RESOLVED.source_of("GPU%") == "dcgm"
+
+
+def test_a_column_only_one_source_publishes_is_unaffected_by_the_order():
+    """SM_ACT% has no nvml candidate, so asking for nvml cannot take it away."""
+    dcgm.set_preference(source.parse_preference("nvml"))
+    assert dcgm.RESOLVED.source_of("SM_ACT%") == "dcgm"
+    dcgm.set_preference(source.parse_preference("dcgm"))
+    assert dcgm.RESOLVED.source_of("SM_ACT%") == "dcgm"
+
+
+def test_without_a_blob_the_column_falls_through_to_an_exporter():
+    """A running job, or a finished one with no JS1:, must get the exporter answer
+    rather than a no-data column."""
+    resolution = source.resolve(dcgm.METRICS, source.DEFAULT_PREFERENCE, blob_columns=())
+    assert resolution.from_blob == frozenset()
+    assert resolution.source_of("GPU%") in ("dcgm", "nvml")
+
+
+def test_the_leading_exporter_skips_the_blob():
+    """Per-source default views are per *exporter*: the blob has no catalog to take a
+    default set from, serving three columns and nothing else."""
+    assert source.resolve(dcgm.METRICS, ("blob", "dcgm", "nvml")).leading_exporter() == "dcgm"
+    assert source.resolve(dcgm.METRICS, ("blob", "nvml", "dcgm")).leading_exporter() == "nvml"
+
+
+# --- per-source default views ----------------------------------------------
+
+def test_each_source_has_its_own_default_view():
+    """nvml publishes no profiling metrics, so leading with it must not leave a summary
+    asking for four columns it would render as "-"."""
+    dcgm.set_preference(source.parse_preference("dcgm"))
+    assert [s.column for s in dcgm.default_view("summary")] == [
+        "GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
+    dcgm.set_preference(source.parse_preference("nvml"))
+    nvml_view = [s.column for s in dcgm.default_view("summary")]
+    assert "SM_ACT%" not in nvml_view and "GPU%" in nvml_view
+    assert "GMEM_GB" in nvml_view
+
+
+def test_all_metrics_is_scoped_to_the_active_source():
+    """--all-metrics means everything *this* source publishes, not the other's."""
+    dcgm.set_preference(source.parse_preference("nvml"))
+    families = {s.family for s in dcgm.default_view("extended")}
+    assert families == {"nvml"}
+
+
+# --- the mixed set stays describable ---------------------------------------
+
+def test_provenance_groups_columns_by_source_in_preference_order():
+    dcgm.set_preference(source.DEFAULT_PREFERENCE)
+    groups = dcgm.RESOLVED.by_source()
+    assert [name for name, _ in groups] == ["blob", "dcgm"]
+    blob_columns = dict(groups)["blob"]
+    # Catalog order, not set order -- from_blob is a frozenset.
+    assert blob_columns == ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB")
+
+
+def test_the_running_view_does_not_credit_a_blob_it_cannot_have():
+    """Slurm writes the blob at job *end*, so a running job's GPU% was measured by an
+    exporter whatever the preference says. Naming the blob there would credit a source
+    that had nothing to give -- the same error as claiming a window not scanned."""
+    from jobscope.report import gpu_source_line
+    dcgm.set_preference(source.DEFAULT_PREFERENCE)
+    specs = dcgm.DEFAULT_SPECS
+    assert "blob" in gpu_source_line(specs, have_blob=True)
+    assert "blob" not in gpu_source_line(specs, have_blob=False)
+
+
+def test_no_gpu_specs_means_no_provenance_line():
+    """--cpu prints no GPU column, so there is nothing to state a source for."""
+    from jobscope.report import gpu_source_line, source_pair
+    assert gpu_source_line(None) == ""
+    assert source_pair(None) == []
+
+
+# --- the host axis ----------------------------------------------------------
+
+def test_host_columns_have_their_own_axis():
+    """CPU%/MEM% choose between the blob and the cgroup exporter, not between dcgm and
+    nvml -- so naming a GPU source for them is an error rather than a no-op."""
+    from jobscope import cpu
+    assert source.parse_preference("cgroup", "[host] source",
+                                   source.HOST_SOURCES) == ("cgroup", "blob")
+    with pytest.raises(JobscopeError):
+        source.parse_preference("dcgm", "[host] source", source.HOST_SOURCES)
+    assert cpu.RESOLVED.source_of("CPU%") == "blob"
+
+
+def test_the_host_preference_moves_cpu_and_mem():
+    from jobscope import cpu
+    cpu.set_preference(("cgroup", "blob"))
+    try:
+        assert cpu.RESOLVED.source_of("CPU%") == "cgroup"
+        assert cpu.RESOLVED.from_blob == frozenset()
+    finally:
+        cpu.set_preference(source.DEFAULT_HOST_PREFERENCE)
+
+
+def test_the_source_line_names_the_host_columns_first():
+    """They print first in the table, so they read first here too."""
+    from jobscope import cpu
+    from jobscope.report import gpu_source_line
+    line = gpu_source_line(dcgm.DEFAULT_SPECS, host_specs=cpu.DEFAULT_CGROUP_SPECS)
+    assert line.index("CPU%") < line.index("GPU%")
+    assert "MEM%" in line
+
+
+def test_a_name_claimed_by_both_catalogs_is_rejected_not_guessed():
+    """`mem` is the DCGM key for GMEM_GB and the cgroup key for MEM%. Picking a side
+    would be a coin toss that reads as working."""
+    from jobscope import config as config_module
+    from jobscope import cpu
+    assert dcgm.spec_named("mem").header == "GMEM_GB"
+    assert cpu.spec_named("mem").header == "MEM%"
+    with pytest.raises(JobscopeError) as exc:
+        config_module._metrics({"summary": ["cpu", "mem"]})
+    assert "gmem_gb" in str(exc.value) and "mem%" in str(exc.value)
+
+
+def test_every_resolved_spec_agrees_with_its_uuid_label():
+    """A spec claiming one family while querying the other returns rows that cannot be
+    attributed to a card -- so MetricSpec checks the pair. Assert it stays checked."""
+    from jobscope.dcgm import MetricSpec
+    with pytest.raises(ValueError):
+        MetricSpec("x", "X%", "nvidia_gpu_x", 1, 0, "all", family="nvml")

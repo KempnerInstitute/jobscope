@@ -84,7 +84,7 @@ def _catalog() -> Dict[str, Tuple[str, str]]:
     for spec in CGROUP_METRICS:
         found.setdefault(spec.metric, ("cgroup", spec.key))
     for spec in GPU_METRICS:
-        family = "nvml" if spec.uuid_label == "uuid" else "dcgm"
+        family = spec.family
         header = spec.header.lower()
         short = header[:-1] if header.endswith("%") else spec.key
         found.setdefault(spec.metric, (family, short))
@@ -463,7 +463,29 @@ def check_labels(out, client, timeout: Optional[float]) -> Dict[str, Optional[st
                                  % (alt, field) if alt else ""))
     _line(out, "labels", ";  ".join(seen))
     _cont(out, "(%s)" % ", ".join(what for _f, _s, what in checks))
+    _report_sources(out)
     return working
+
+
+def _report_sources(out) -> None:
+    """Which source serves which GPU column, and the one that is not optional.
+
+    Worth stating next to the labels because the GPU join is the reason: the job-to-
+    card mapping is a *value* on an nvidia-exporter series, and nothing in the DCGM
+    catalog carries a job label. So a site can prefer dcgm for every number and still
+    needs the nvidia exporter running -- which is not obvious from a config that says
+    ``source = "dcgm"``, and is exactly the kind of thing a port discovers the hard way.
+    """
+    from . import config as config_module
+    from . import dcgm
+    resolution = dcgm.RESOLVED
+    _line(out, "sources", "preference %s" % ", ".join(resolution.preference))
+    for name, columns in resolution.by_source():
+        shown = list(columns)[:6]
+        _cont(out, "%-5s serves %s%s" % (name, " ".join(shown),
+                                         " ..." if len(columns) > len(shown) else ""))
+    _cont(out, "the %s join is required whatever the preference: it is the only"
+               " job-to-card mapping" % config_module.gpu_join())
 
 
 # --- detecting the numbers a config file needs -------------------------------
@@ -851,10 +873,24 @@ def _view_metrics(view: str, present: Optional[set]) -> Tuple[List[str], List[st
     """
     specs = getattr(config.get_config().metrics, view)
     if present is None:
-        return [s.key for s in specs], []
-    kept = [s.key for s in specs if s.metric in present]
-    dropped = [s.key for s in specs if s.metric not in present]
+        return [_config_name(s) for s in specs], []
+    kept = [_config_name(s) for s in specs if s.metric in present]
+    dropped = [_config_name(s) for s in specs if s.metric not in present]
     return kept, dropped
+
+
+def _config_name(spec) -> str:
+    """The name a generated config should call ``spec`` by, never an ambiguous one.
+
+    A spec's key is the short name to write, except where the *other* catalog claims
+    it too: the DCGM key for GMEM_GB is ``mem``, which is also the cgroup key for MEM%.
+    A generated file has to load, and ``[metrics]`` rejects that name rather than
+    guessing -- so fall back to the header form, which is unique catalog-wide.
+    """
+    from . import cpu
+    if cpu.spec_named(spec.key) is not None:
+        return spec.header.lower()
+    return spec.key
 
 
 def _toml_str(value: str) -> str:

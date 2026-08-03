@@ -98,7 +98,7 @@ job that is running right now.
 | `--classify` | with `--ts`: sort the jobs into efficiency categories, worst first |
 | `--plot_ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
-| `--dcgm` | the full DCGM metric catalog |
+| `--all-metrics` | the full DCGM metric catalog |
 | `--avg` | `running` only: fold over the runtime instead of a snapshot |
 
 **Output** — `--csv`, `-n`, `--step` (with `--ts`), `--timeout`, `--workers`, `-c`.
@@ -205,7 +205,7 @@ resource-time, aligned under the columns above it.
 
 **One table row per graded metric**, and the set follows the view: eight by
 default, `CPU%`/`MEM%` under `--cpu`, six under `--gpu`, the full catalog under
-`--dcgm`. A metric no job reported is left out rather than shown as zeros. Each
+`--all-metrics`. A metric no job reported is left out rather than shown as zeros. Each
 metric is measured against the resource it is a percentage *of*:
 
 | metric | resource |
@@ -356,7 +356,7 @@ a column instead of following a ragged edge.
 
 Bar length is the pooled utilization and the filled run is tinted by its band, so
 this is the `USED` column drawn rather than tabulated -- the bar and the `USED`
-percentage are the same figure. It follows the table's metric set, so `--cpu`, `--gpu` and `--dcgm`
+percentage are the same figure. It follows the table's metric set, so `--cpu`, `--gpu` and `--all-metrics`
 narrow or widen it too, and it prints for a single job as well -- there it is that
 job's profile across metrics.
 
@@ -398,7 +398,7 @@ every job count is 1.
 - `--cpu` narrows to the host columns. For *finished* jobs that needs no Prometheus
   at all; a running job's `CPU%` comes from `cgroup_*`, so it does.
 - `--gpu` narrows to the GPU columns and the profiling block.
-- `--dcgm` widens the profiling block to the full catalog.
+- `--all-metrics` widens the profiling block to the full catalog.
 
 ### Highlighting
 
@@ -501,7 +501,7 @@ Note it is `--gpuid`, not `--gpu`: `--gpu` selects the GPU *columns* and takes n
 value. Writing `--gpu 0,1` used to leave `0,1` to be read as a job ID; it is now an
 error that points here.
 
-The charts follow the view, so `--cpu` narrows them to `CPU%` and `--dcgm` widens
+The charts follow the view, so `--cpu` narrows them to `CPU%` and `--all-metrics` widens
 them, and `--no-plot` omits them.
 
 <a id="thresholds"></a>
@@ -523,7 +523,7 @@ the tiers are what `--ts --classify` reports:
 job legitimately holds cores it never uses, so `CPU%` at 4% is ordinary where `GPU%`
 at 4% is idle, and `SM_ACT%` sits structurally below `GPU%` on the same work.
 `default` covers every metric you do not name, which is what keeps the ~18 extra
-columns under `--dcgm` graded without listing them.
+columns under `--all-metrics` graded without listing them.
 
 **There are two tables, one per view, and nothing is inherited between them:**
 `[thresholds.summary]` grades the plain report (one average over each job's whole
@@ -564,7 +564,7 @@ Two more sections cover what the report *shows* rather than how it grades.
 
 `[metrics]` picks the GPU/DCGM metrics per view — `summary` for the per-job table's
 profiling block, `timeseries` for `--ts`/`--plot_ts`/`--classify`, and `extended`
-for what `--dcgm`/`--ext` widens to. Name them by their short name, the same ones
+for what `--all-metrics` widens to. Name them by their short name, the same ones
 `[thresholds]` takes:
 
 ```toml
@@ -575,7 +575,7 @@ extended   = "all"
 ```
 
 Order does not matter — columns always print in catalog order.
-`jobscope describe --dcgm --ext` lists the catalog with descriptions.
+`jobscope describe --all-metrics` lists the catalog with descriptions.
 
 Two things it deliberately does not reach. **`--per-gpu` keeps a fixed four**
 (`SM_ACT%`, `TENSOR%`, `DRAM%`, `POWER_W`): its rows are addressed by position, so
@@ -638,7 +638,7 @@ which is how one list serves files with different columns.
 | Command | Purpose |
 |---|---|
 | `jobscope plot` | render `--csv` output as a terminal chart |
-| `jobscope describe` | plain-English column and metric reference (`--dcgm` for the catalog) |
+| `jobscope describe` | plain-English column and metric reference (`--metrics` for the catalog) |
 | `jobscope config` | show the config path or print an example |
 | `jobscope probe` | check what this cluster exposes and whether jobscope can read it |
 
@@ -726,7 +726,7 @@ of the others do: `GPU%` 96 with `GMEM%` 3 is under-batched.
 ```bash
 jobscope --gpu  --csv JOBID      | jobscope plot                 # bar gauges (one job)
 jobscope --gpu  --csv -D 7       | jobscope plot --kind hist      # distribution (many jobs)
-jobscope finished --dcgm --csv -D 7 | jobscope plot              # heatmap (jobs/GPUs x metrics)
+jobscope finished --all-metrics --csv -D 7 | jobscope plot              # heatmap (jobs/GPUs x metrics)
 jobscope JOBID --ts --csv        | jobscope plot --compact        # time series
 ```
 
@@ -828,7 +828,7 @@ adds nothing there and says so.
 `--classify` sorts them instead:
 
 ```console
-$ jobscope -p kempner_h100 -a --ts 10m --classify --dcgm
+$ jobscope -p kempner_h100 -a --ts 10m --classify --all-metrics
   142 jobs, by best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM% (POWER_W caps the verdict when idle)
 
   wasteful (GPU% <2%, SM_ACT% <2%, OCC% <2%, TENSOR% <2%, DRAM% <2%)  15 jobs
@@ -864,7 +864,7 @@ every band above it *includes* its top. 10.0 is inefficient; 10.1 needs improvem
 below X" read from the other end -- the AND the `Worst all` row uses, generalised to
 five bands rather than a second notion of idle. `GMEM%` sits out: reserving 80GB and
 computing nothing is still computing nothing. The header names the metrics actually
-used, since `--dcgm` widens the set.
+used, since `--all-metrics` widens the set.
 
 **`POWER_W` plays no part in the category.** It is graded on its own terms, in watts
 against a floor that depends on the card -- see below -- and folding a per-model

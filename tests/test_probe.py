@@ -21,7 +21,7 @@ def test_a_catalogued_series_keeps_its_curated_short_name():
 def test_an_uncatalogued_series_is_named_mechanically():
     assert probe.simple_name("cgroup_memsw_used_bytes") == "cgroup-memsw_used_bytes"
     assert probe.simple_name("DCGM_FI_DEV_XID_ERRORS") == "dcgm-xid_errors"
-    assert probe.simple_name("nvidia_gpu_temperature_celsius") == "nvml-temperature_celsius"
+    assert probe.simple_name("nvidia_gpu_ecc_errors") == "nvml-ecc_errors"
 
 
 def test_a_series_in_no_known_family_gets_no_name():
@@ -245,17 +245,17 @@ def test_a_builtin_is_emitted_commented_so_its_name_is_visible(gpu_record, monke
 def test_an_uncatalogued_series_is_emitted_live(gpu_record, monkeypatch):
     """So a redirect into a config file is the only step -- no uncommenting."""
     monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
-    text = _emit({"dcgm": ["DCGM_FI_DEV_GPU_UTIL"]}, gpu_record)
-    assert "\n[metrics.dcgm.gpu_util]        # new here" in text
-    assert 'query  = "DCGM_FI_DEV_GPU_UTIL"' in text
+    text = _emit({"dcgm": ["DCGM_FI_DEV_XID_ERRORS"]}, gpu_record)
+    assert "\n[metrics.dcgm.xid_errors]        # new here" in text
+    assert 'query  = "DCGM_FI_DEV_XID_ERRORS"' in text
 
 
 def test_the_table_key_is_the_short_name_without_the_family(gpu_record, monkeypatch):
     """The family is already in the table path; repeating it would make the config
-    name `dcgm-gpu_util` inside `[metrics.dcgm]`."""
+    name `dcgm-xid_errors` inside `[metrics.dcgm]`."""
     monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
-    text = _emit({"dcgm": ["DCGM_FI_DEV_GPU_UTIL"]}, gpu_record)
-    assert "[metrics.dcgm.gpu_util]" in text and "[metrics.dcgm.dcgm-gpu_util]" not in text
+    text = _emit({"dcgm": ["DCGM_FI_DEV_XID_ERRORS"]}, gpu_record)
+    assert "[metrics.dcgm.xid_errors]" in text and "[metrics.dcgm.dcgm-xid_errors]" not in text
 
 
 def test_a_cgroup_count_is_not_given_an_invented_denominator(gpu_record, monkeypatch):
@@ -320,12 +320,12 @@ def test_the_output_is_a_loadable_config(gpu_record, monkeypatch, tmp_path,
     from jobscope import dcgm
     monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"cgroup": ["cgroup_memory_rss_bytes", "cgroup_memsw_used_bytes"],
-                  "dcgm": ["DCGM_FI_PROF_SM_ACTIVE", "DCGM_FI_DEV_GPU_UTIL"]},
+                  "dcgm": ["DCGM_FI_PROF_SM_ACTIVE", "DCGM_FI_DEV_XID_ERRORS"]},
                  gpu_record)
     path = tmp_path / "generated.toml"
     path.write_text(text)
     config_module.set_config(config_module.load_config(str(path)))
-    assert dcgm.spec_named("gpu_util").metric == "DCGM_FI_DEV_GPU_UTIL"
+    assert dcgm.spec_named("xid_errors").metric == "DCGM_FI_DEV_XID_ERRORS"
     from jobscope import cpu
     assert cpu.spec_named("memsw_used_bytes").denom == "total_memory"
     # And the commented built-in stayed a built-in, not a duplicate.
