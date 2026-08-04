@@ -70,10 +70,10 @@ those findings and refuses to overwrite an existing one. Site setup details are 
 | `jobscope` | your running jobs |
 | `jobscope 36770231` | one running or finished job |
 | `jobscope -j 36770231 -j 36770232` | several explicit jobs |
-| `jobscope finished -D 3` | your completed jobs from the last 3 days |
 | `jobscope finished -N 20` | your most recent 20 completed jobs |
 | `jobscope finished -p kempner_h100 -D 1` | your completed jobs in one partition |
-| `jobscope -p kempner_h100 -a` | every user's running jobs in one partition |
+| `jobscope -j 36788818_3 --plot-ts` | chart one job over time, a panel per metric |
+| `jobscope -j 36788818_3 --plot-ts-overlay` | the same series overlaid, a panel per GPU |
 
 Without a mode word, `jobscope` shows jobs running now. Use `finished` for history.
 Selections are scoped to your user by default; add `-a` to include all users.
