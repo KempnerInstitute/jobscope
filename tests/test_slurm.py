@@ -20,7 +20,7 @@ from jobscope.slurm import (
     select_jobs,
 )
 
-from .conftest import GPU_STATS, make_blob
+from .conftest import GPU_STATS, make_jobstats
 
 
 def test_default_user_from_env(monkeypatch):
@@ -235,11 +235,11 @@ def test_select_jobs_days_desc(monkeypatch):
 
 
 def test_fetch_parses_record(monkeypatch):
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
     line = "|".join(["100", "COMPLETED", "train", "01:00:00", "1",
                      "billing=2,cpu=2,gres/gpu=2,mem=16G",
                      "2020-01-01T00:00:00", "2020-01-01T01:00:00", "100", "odyssey",
-                     "alice", blob])
+                     "alice", summary])
     monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line + "\n")
     records = fetch(["100"], None)
     record = records["100"]
@@ -260,27 +260,27 @@ def test_fetch_aliases_array_base_id(monkeypatch):
     # to the bracketed id the caller asked for.
     line = "|".join(["18114115", "COMPLETED", "arr", "00:10:00", "1", "gres/gpu=1",
                      "2020-01-01T00:00:00", "2020-01-01T00:10:00", "18114115",
-                     "odyssey", "alice", make_blob(GPU_STATS)])
+                     "odyssey", "alice", make_jobstats(GPU_STATS)])
     monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line + "\n")
     records = fetch(["18114115_[0-719%64]"], None)
     assert "18114115_[0-719%64]" in records
     assert records["18114115_[0-719%64]"].state == "COMPLETED"
 
 
-def _record_line(jobid: str, blob: str, name: str = "train") -> str:
+def _record_line(jobid: str, summary: str, name: str = "train") -> str:
     return "|".join([jobid, "COMPLETED", name, "01:00:00", "1", "gres/gpu=1",
                      "2020-01-01T00:00:00", "2020-01-01T01:00:00", jobid,
-                     "odyssey", "alice", blob]) + "\n"
+                     "odyssey", "alice", summary]) + "\n"
 
 
-def _fake_fetch_run_capture(calls, blob):
+def _fake_fetch_run_capture(calls, summary):
     """A run_capture stub that answers any chunked -j query and records it."""
     def fake(cmd, timeout, what, soft=False):
         assert cmd[:2] == ["sacct", "-j"]
         assert len(cmd[2]) <= slurm.JOBID_ARG_LIMIT
         ids = cmd[2].split(",")
         calls.append(ids)
-        return "".join(_record_line(jid, blob) for jid in ids)
+        return "".join(_record_line(jid, summary) for jid in ids)
     return fake
 
 
@@ -316,9 +316,9 @@ def test_fetch_chunks_large_id_list(monkeypatch):
     # 4,000 8-digit ids join to ~36 KB -- over the 16 KB argv cap, so fetch
     # must split the -j query instead of building one oversized argv token.
     ids = [str(10_000_000 + i) for i in range(4_000)]
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
     calls = []
-    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, blob))
+    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, summary))
     records = fetch(ids, None)
     assert len(calls) >= 2
     assert [jid for chunk in calls for jid in chunk] == ids
@@ -331,12 +331,12 @@ def test_fetch_merges_records_across_chunks(monkeypatch):
     # limit 8 forces the two 8-byte ids into separate chunks; both parses must
     # merge into one dict rather than the second overwriting the first.
     monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         jid = cmd[2]
         assert "," not in jid
-        return _record_line(jid, blob, name="job-%s" % jid)
+        return _record_line(jid, summary, name="job-%s" % jid)
 
     monkeypatch.setattr(slurm, "run_capture", fake)
     records = fetch(["10000001", "10000002"], None)
@@ -348,10 +348,10 @@ def test_fetch_array_alias_survives_chunking(monkeypatch):
     # The bracketed id and the other id land in different chunks; the alias
     # back to the requested bracketed id must still resolve afterward.
     monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
-        return _record_line(cmd[2], blob)
+        return _record_line(cmd[2], summary)
 
     monkeypatch.setattr(slurm, "run_capture", fake)
     records = fetch(["18114115_[0-719%64]", "99999999"], None)
@@ -362,9 +362,9 @@ def test_fetch_array_alias_survives_chunking(monkeypatch):
 def test_fetch_small_list_single_call(monkeypatch, capsys):
     # The common case: everything fits in one chunk -- exactly one sacct call
     # and no progress chatter on stderr.
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
     calls = []
-    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, blob))
+    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, summary))
     records = fetch(["100", "101"], None)
     assert len(calls) == 1
     assert len(records) == 2
@@ -373,10 +373,10 @@ def test_fetch_small_list_single_call(monkeypatch, capsys):
 
 def test_fetch_progress_notes(monkeypatch, capsys):
     monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
-        return _record_line(cmd[2], blob)
+        return _record_line(cmd[2], summary)
 
     monkeypatch.setattr(slurm, "run_capture", fake)
     fetch(["10000001", "10000002"], None)
@@ -391,9 +391,9 @@ def test_fetch_chunks_empty():
 
 
 def test_fetch_chunks_single_chunk_no_notes(monkeypatch, capsys):
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
     calls = []
-    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, blob))
+    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, summary))
     chunks = list(slurm.fetch_chunks(["100", "101"], None))
     assert len(chunks) == 1
     ready, records = chunks[0]
@@ -405,11 +405,11 @@ def test_fetch_chunks_single_chunk_no_notes(monkeypatch, capsys):
 
 def test_fetch_chunks_yields_per_batch_in_order(monkeypatch):
     monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
         assert "," not in cmd[2]
-        return _record_line(cmd[2], blob)
+        return _record_line(cmd[2], summary)
 
     monkeypatch.setattr(slurm, "run_capture", fake)
     chunks = list(slurm.fetch_chunks(["10000001", "10000002"], None))
@@ -420,10 +420,10 @@ def test_fetch_chunks_yields_per_batch_in_order(monkeypatch):
 
 def test_fetch_chunks_alias_applied_at_yield(monkeypatch):
     monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
-        return _record_line(cmd[2], blob)
+        return _record_line(cmd[2], summary)
 
     monkeypatch.setattr(slurm, "run_capture", fake)
     chunks = list(slurm.fetch_chunks(["18114115_[0-719%64]", "99999999"], None))
@@ -437,10 +437,10 @@ def test_fetch_chunks_prefix_preserves_global_order(monkeypatch):
     # id's base is only queried in chunk 2 -- the third id must wait so that
     # the concatenated yields equal the input order.
     monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
-        return _record_line(cmd[2], blob)
+        return _record_line(cmd[2], summary)
 
     monkeypatch.setattr(slurm, "run_capture", fake)
     requested = ["18114115_[0-9]", "99999999", "18114115_[10-19]"]
@@ -451,10 +451,10 @@ def test_fetch_chunks_prefix_preserves_global_order(monkeypatch):
 
 def test_fetch_chunks_progress_notes(monkeypatch, capsys):
     monkeypatch.setattr(slurm, "JOBID_ARG_LIMIT", 8)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
-        return _record_line(cmd[2], blob)
+        return _record_line(cmd[2], summary)
 
     monkeypatch.setattr(slurm, "run_capture", fake)
     list(slurm.fetch_chunks(["10000001", "10000002"], None))
@@ -467,9 +467,9 @@ def test_fetch_chunks_progress_notes(monkeypatch, capsys):
 def test_fetch_chunks_uses_jobs_per_chunk(monkeypatch):
     # The count bound splits even when the byte limit is nowhere near binding.
     monkeypatch.setattr(slurm, "JOBS_PER_CHUNK", 2)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
     calls = []
-    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, blob))
+    monkeypatch.setattr(slurm, "run_capture", _fake_fetch_run_capture(calls, summary))
     list(slurm.fetch_chunks(["1", "2", "3", "4", "5"], None))
     assert [len(c) for c in calls] == [2, 2, 1]
 
@@ -477,10 +477,10 @@ def test_fetch_chunks_uses_jobs_per_chunk(monkeypatch):
 def test_fetch_chunks_notes_throttled(monkeypatch, capsys):
     monkeypatch.setattr(slurm, "JOBS_PER_CHUNK", 1)
     monkeypatch.setattr(slurm, "NOTE_EVERY", 2)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
-        return _record_line(cmd[2], blob)
+        return _record_line(cmd[2], summary)
 
     monkeypatch.setattr(slurm, "run_capture", fake)
     list(slurm.fetch_chunks(["1", "2", "3", "4"], None))
@@ -493,10 +493,10 @@ def test_fetch_chunks_notes_throttled(monkeypatch, capsys):
 
 def test_fetch_chunks_final_note_always_prints(monkeypatch, capsys):
     monkeypatch.setattr(slurm, "JOBS_PER_CHUNK", 1)
-    blob = make_blob(GPU_STATS)
+    summary = make_jobstats(GPU_STATS)
 
     def fake(cmd, timeout, what, soft=False):
-        return _record_line(cmd[2], blob)
+        return _record_line(cmd[2], summary)
 
     monkeypatch.setattr(slurm, "run_capture", fake)
     list(slurm.fetch_chunks(["1", "2", "3"], None))

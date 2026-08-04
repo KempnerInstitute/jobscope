@@ -30,6 +30,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+from . import config, source
+from . import dcgm as _dcgm
+from .cpu import host_stats_many
 from .dcgm import (
     ALL_SPECS,
     DEFAULT_SPECS,
@@ -39,11 +42,7 @@ from .dcgm import (
     columns_for,
     window_query,
 )
-from . import dcgm as _dcgm
-from . import source
-from . import config
 from .errors import JobscopeError
-from .cpu import host_stats_many
 from .job_ave_stats import stats_dict
 from .prometheus import PrometheusClient
 from .slurm import JobRecord, run_capture
@@ -141,7 +140,7 @@ class RunningSelection:
 #   GPU%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  GMEM_GB  GMEM%
 #
 # The summary and detail views omit GPU% and the GMEM columns from their DCGM set
-# because they render those from the blob instead; a running job has no blob, so
+# because they render those from the jobstats summary instead; a running job has no jobstats summary, so
 # here Prometheus is the only source and nothing is dropped.
 DEFAULT_RUNNING_SPECS: List[MetricSpec] = DEFAULT_SPECS
 # --all appends the extended catalog, minus delta-reduced counters (ENERGY_kWh):
@@ -594,8 +593,8 @@ def per_gpu_by_node_minor(metrics: RunningMetrics, gpus: Dict[str, Gpu],
     """Re-key per-GPU values to ``(node, minor)`` and headers, for ``--per-gpu``.
 
     The running collectors key by UUID, which is the only unique GPU identity; the
-    detail renderer keys by ``(node, minor)``, which is what the blob uses. MIG
-    siblings share a minor, so they collapse here exactly as they do in the blob --
+    detail renderer keys by ``(node, minor)``, which is what the jobstats summary uses. MIG
+    siblings share a minor, so they collapse here exactly as they do in the jobstats summary --
     the honest per-instance view is ``--ts``, which keys by UUID throughout.
     """
     derived = applicable_derived(specs)
@@ -618,10 +617,10 @@ def running_records(jobs: Dict[int, RunningJob], gpus: Dict[str, Gpu],
     """Turn squeue jobs into :class:`~jobscope.slurm.JobRecord`s, keyed by display ID.
 
     This is what lets the running view render through the same code as the historical
-    ones: once a running job looks like a record with a utilization blob, the summary
+    ones: once a running job looks like a record with a utilization summary, the summary
     renderer cannot tell the difference, and the two views cannot drift apart.
 
-    The blob's CPU and host-memory fields come from ``cgroup_*``; its GPU maps are
+    The summary's CPU and host-memory fields come from ``cgroup_*``; its GPU maps are
     built from the values already collected per GPU, so they honour the
     instant-versus-``--avg`` choice instead of silently re-querying a window.
     """
@@ -666,9 +665,9 @@ def running_records(jobs: Dict[int, RunningJob], gpus: Dict[str, Gpu],
 
 
 def _gpu_node_map(job_gpus: List[Gpu], by_uuid: Dict[str, dict]) -> Dict[str, dict]:
-    """The blob's per-node GPU maps, from values already collected per GPU.
+    """The summary's per-node GPU maps, from values already collected per GPU.
 
-    Looked up by *column* -- via :data:`jobscope.source.BLOB_COLUMNS`, the same table
+    Looked up by *column* -- via :data:`jobscope.source.JOBSTATS_COLUMNS`, the same table
     the finished view reads -- and then by the resolved provider's key, because which
     key serves GPU% depends on ``[gpu] source``. Keyed on the literal ``"duty"`` this
     silently stopped producing a GPU% the moment dcgm became the preferred exporter
@@ -678,20 +677,20 @@ def _gpu_node_map(job_gpus: List[Gpu], by_uuid: Dict[str, dict]) -> Dict[str, di
     nodes: Dict[str, dict] = {}
     for gpu in job_gpus:
         values = by_uuid.get(gpu.uuid, {})
-        for column, blob_field in source.BLOB_COLUMNS.items():
+        for column, jobstats_field in source.JOBSTATS_COLUMNS.items():
             spec = _dcgm.SPEC_BY_HEADER.get(column)
             if spec is None:
                 continue
             value = values.get(spec.key)
             if value is None:
                 continue
-            # Back to the exporter's own unit: the blob stores raw byte counts, and
-            # blob_metrics divides used by total, so the two must share a unit.
+            # Back to the exporter's own unit: the jobstats summary stores raw byte counts, and
+            # jobstats_metrics divides used by total, so the two must share a unit.
             # Undoing the spec's own scale rather than assuming GiB keeps this right
             # for a provider that publishes MiB.
             if spec.scale and spec.scale != 1:
                 value = value / spec.scale
-            nodes.setdefault(gpu.host, {}).setdefault(blob_field, {})[str(gpu.minor)] = value
+            nodes.setdefault(gpu.host, {}).setdefault(jobstats_field, {})[str(gpu.minor)] = value
     return nodes
 
 

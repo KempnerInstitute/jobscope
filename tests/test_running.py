@@ -1,10 +1,11 @@
-"""Tests for the live view: squeue parsing, GPU identity, and the blob synthesis."""
+"""Tests for the live view: squeue parsing, GPU identity, and the summary synthesis."""
 
 import io
 
 import pytest
 
-from jobscope.blob import GIB, blob_metrics
+from jobscope import timeseries as ts
+from jobscope.cpu import host_stats_many
 from jobscope.dcgm import (
     ALL_SPECS,
     DEFAULT_SPECS,
@@ -13,6 +14,14 @@ from jobscope.dcgm import (
     window_query,
 )
 from jobscope.errors import JobscopeError
+from jobscope.job_ave_stats import synthesize_stats
+from jobscope.jobstats import GIB, jobstats_metrics
+from jobscope.report import (
+    RenderOptions,
+    running_combined_timeseries,
+    running_cpu_timeseries,
+    running_timeseries,
+)
 from jobscope.running import (
     DEFAULT_RUNNING_SPECS,
     EXTENDED_RUNNING_SPECS,
@@ -32,15 +41,6 @@ from jobscope.running import (
     range_window,
     specs_for,
     timeseries_step,
-)
-from jobscope import timeseries as ts
-from jobscope.cpu import host_stats_many
-from jobscope.job_ave_stats import synthesize_stats
-from jobscope.report import (
-    RenderOptions,
-    running_combined_timeseries,
-    running_cpu_timeseries,
-    running_timeseries,
 )
 from jobscope.slurm import JobRecord
 
@@ -237,7 +237,7 @@ def test_live_catalog_column_order_and_membership():
 
 
 def test_gpu_utilization_is_always_present_in_the_live_view():
-    # A running job has no blob, so this is the only place GPU% comes from; there
+    # A running job has no jobstats summary, so this is the only place GPU% comes from; there
     # is deliberately no narrower catalog that could drop it.
     assert "GPU%" in [h for _k, h, _d in build_columns(DEFAULT_RUNNING_SPECS)]
     assert "GPU%" in [h for _k, h, _d in build_columns(EXTENDED_RUNNING_SPECS)]
@@ -346,9 +346,9 @@ def test_explicit_job_ids_keep_the_plain_description():
     assert sel.describe_filters() == "1 job ID(s)"
 
 
-# --- blob synthesis for running jobs ---------------------------------------
+# --- summary synthesis for running jobs ---------------------------------------
 
-class BlobClient:
+class JobstatsClient:
     """Prometheus stand-in returning canned cgroup_* and nvidia_gpu_* series."""
 
     def __init__(self, host="node01", minor="0", gpu_series=True):
@@ -389,32 +389,32 @@ def _running(**kw):
     return JobRecord(**base)
 
 
-def test_synthesize_stats_feeds_blob_metrics():
-    stats = synthesize_stats(_running(), BlobClient())
+def test_synthesize_stats_feeds_jobstats_metrics():
+    stats = synthesize_stats(_running(), JobstatsClient())
     # cpu = 100*150/(100*2) = 75, mem = 100*8/16 = 50, gpu = 70, gmem = 100*40/80 = 50.
-    assert blob_metrics(stats, gpus=1).known() == {"CPU%": 75, "MEM%": 50,
+    assert jobstats_metrics(stats, gpus=1).known() == {"CPU%": 75, "MEM%": 50,
                                                 "GPU%": 70, "GMEM%": 50}
 
 
 def test_synthesize_stats_queries_the_raw_job_id():
     # cgroup_* carries a real jobid label, but it holds the RAW per-element id:
     # array element 100_6 appears as jobid="12345". Using .jobid would find nothing.
-    client = BlobClient()
+    client = JobstatsClient()
     synthesize_stats(_running(), client)
     assert all("12345" in q for q in client.queries)
     assert not any("100_6" in q for q in client.queries)
 
 
 def test_synthesize_stats_shapes_gpu_maps_by_minor_string():
-    stats = synthesize_stats(_running(), BlobClient(minor="3"))
+    stats = synthesize_stats(_running(), JobstatsClient(minor="3"))
     node = stats["nodes"]["node01"]
     assert node["gpu_utilization"] == {"3": 70.0}
     assert node["gpu_used_memory"] == {"3": 40 * GIB}
 
 
-def test_synthesize_stats_rounds_like_the_stored_blob():
-    # blob_detail renders utilization with %g, which assumes stored precision.
-    stats = synthesize_stats(_running(), BlobClient())
+def test_synthesize_stats_rounds_like_the_stored_summary():
+    # jobstats_detail renders utilization with %g, which assumes stored precision.
+    stats = synthesize_stats(_running(), JobstatsClient())
     node = stats["nodes"]["node01"]
     assert isinstance(node["cpus"], int)
     assert isinstance(node["used_memory"], int)
@@ -422,16 +422,16 @@ def test_synthesize_stats_rounds_like_the_stored_blob():
 
 
 def test_synthesize_stats_skips_gpu_queries_for_a_cpu_only_job():
-    client = BlobClient()
+    client = JobstatsClient()
     stats = synthesize_stats(_running(gpus=0), client)
     assert not any("nvidia_gpu" in q for q in client.queries)
-    got = blob_metrics(stats, gpus=0)               # no gpu%, no gmem%
+    got = jobstats_metrics(stats, gpus=0)               # no gpu%, no gmem%
     assert got.value("GPU%") is None and got.value("GMEM%") is None
 
 
 def test_synthesize_stats_returns_empty_without_a_usable_window():
-    assert synthesize_stats(_running(duration=None), BlobClient()) == {}
-    assert synthesize_stats(_running(jobid_raw=""), BlobClient()) == {}
+    assert synthesize_stats(_running(duration=None), JobstatsClient()) == {}
+    assert synthesize_stats(_running(jobid_raw=""), JobstatsClient()) == {}
 
 
 def test_synthesize_stats_degrades_instead_of_raising():
@@ -448,14 +448,14 @@ def test_fill_running_leaves_a_finished_job_alone():
     from jobscope.job_ave_stats import fill_running
     stored = {"total_time": 1, "nodes": {}}
     records = {"1": _running(state="COMPLETED", stats=stored)}
-    assert fill_running(records, ["1"], BlobClient()) == 0
+    assert fill_running(records, ["1"], JobstatsClient()) == 0
     assert records["1"].stats is stored
 
 
-def test_fill_running_fills_only_unblobbed_running_jobs():
+def test_fill_running_fills_only_unsummarised_running_jobs():
     from jobscope.job_ave_stats import fill_running
     records = {"1": _running(), "2": _running(state="COMPLETED")}
-    assert fill_running(records, ["1", "2"], BlobClient()) == 1
+    assert fill_running(records, ["1", "2"], JobstatsClient()) == 1
     assert records["1"].stats and not records["2"].stats
 
 

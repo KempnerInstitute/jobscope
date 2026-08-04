@@ -16,17 +16,17 @@ memory series are gauges read directly. ``kind`` and ``denom`` carry exactly tho
 two differences.
 
 The denominators are resolved by the caller rather than here: a finished job already
-has them in its stored blob, a running job gets them from one batched
+has them in its stored summary, a running job gets them from one batched
 :func:`host_stats_many` call, and neither varies enough within a job's
-lifetime to be worth re-querying per sample. They arrive as the per-node blob dict
-itself, so ``denom`` names a blob field.
+lifetime to be worth re-querying per sample. They arrive as the per-node summary dict
+itself, so ``denom`` names a summary field.
 """
 
 from dataclasses import dataclass, replace
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from . import config, source
-from .blob import store_as
+from .jobstats import store_as
 from .prometheus import PrometheusClient, query_value
 
 # rate()/increase() need several raw samples to be reliable: a range vector sized to
@@ -43,14 +43,14 @@ class CgroupSpec:
     header: str     # the column header: CPU%, CPU_USER%, MEM%, CACHE%, ...
     metric: str     # the Prometheus series
     kind: str       # "rate" for a counter, "gauge" for a level read directly
-    denom: str      # the blob field that divides it: "cpus" or "total_memory"
+    denom: str      # the summary field that divides it: "cpus" or "total_memory"
     decimals: int   # display precision
     group: str      # "default" (always available) or "all" (opt-in via [metrics])
     # What the metric is *for*; read by jobscope.metrics rather than restated in
     # the header lists report.py used to keep. Same vocabulary as MetricSpec.roles.
     roles: FrozenSet[str] = frozenset()
     # As MetricSpec.family/provides. There is one host exporter rather than two, so
-    # every spec here is `cgroup` -- but the *blob* is the other candidate for CPU%
+    # every spec here is `cgroup` -- but *jobstats* is the other candidate for CPU%
     # and MEM%, and jobscope.source has to be able to ask this list which column each
     # spec is offering before it can decide between them.
     family: str = "cgroup"
@@ -88,7 +88,7 @@ class CgroupSpec:
 
 
 # CPU% and MEM% are `default` -- the two the summary and detail views have always
-# shown, and the only two a stored sacct blob can reconstruct. The rest are `all`:
+# shown, and the only two a stored summary can reconstruct. The rest are `all`:
 # they exist only in a --ts series (see the module docstring on why the summary
 # cannot have them), and being outside the default group also keeps them out of the
 # default --classify ballot, which they have no business deciding.
@@ -129,7 +129,7 @@ CGROUP_METRICS: List[CgroupSpec] = [
 # a column to it, which is what makes substituting Slurm's numbers acceptable at all:
 # extra_metric refuses to do it silently, and this is the not-silent version.
 #
-# Last in the default order, so it serves a column only where neither the blob nor the
+# Last in the default order, so it serves a column only where neither the jobstats summary nor the
 # cgroup exporter can. That matters for a site with no jobstats, where the alternative
 # to Slurm's figures is a blank column.
 SLURM_SPECS: List[CgroupSpec] = [
@@ -139,20 +139,20 @@ SLURM_SPECS: List[CgroupSpec] = [
                family="slurm", provides="MEM%", roles=frozenset({"memory"})),
 ]
 
-# Which source serves each host column. Only CPU% and MEM% have a choice -- the blob
+# Which source serves each host column. Only CPU% and MEM% have a choice -- the jobstats summary
 # records them, the cgroup exporter measures them, and Slurm accounts them -- so this
 # is a shorter question than the GPU one, but the same question, answered in the same
 # place. A cluster with no cgroup exporter (which is this one: probe's coverage line
-# reports 2 hosts of 439) resolves them to the blob, and the report now says so instead
+# reports 2 hosts of 439) resolves them to the jobstats summary, and the report now says so instead
 # of leaving it to be inferred from a dash.
 PREFERENCE: Tuple[str, ...] = source.DEFAULT_HOST_PREFERENCE
 # Every candidate for a host column, which is not the same list as the cgroup catalog:
 # slurm offers CPU%/MEM% without being a Prometheus family. Exposed because anything
-# re-resolving (the running view's provenance line, which asks "and without a blob?")
+# re-resolving (the running view's provenance line, which asks "and without a jobstats summary?")
 # has to weigh the same candidates or it will name a source that did not win.
 CANDIDATES: List[CgroupSpec] = list(CGROUP_METRICS) + SLURM_SPECS
 RESOLVED: source.Resolution = source.resolve(
-    CANDIDATES, PREFERENCE, source.BLOB_HOST_COLUMNS)
+    CANDIDATES, PREFERENCE, source.JOBSTATS_HOST_COLUMNS)
 
 SPEC_BY_KEY: Dict[str, CgroupSpec] = {spec.key: spec for spec in CGROUP_METRICS}
 DEFAULT_CGROUP_SPECS: List[CgroupSpec] = [s for s in CGROUP_METRICS
@@ -177,7 +177,7 @@ def _rebuild() -> None:
     global SPEC_BY_KEY, DEFAULT_CGROUP_SPECS, CGROUP_HEADERS, CGROUP_NAMES, _ORDER
     global RESOLVED, CANDIDATES
     CANDIDATES = list(CGROUP_METRICS) + SLURM_SPECS
-    RESOLVED = source.resolve(CANDIDATES, PREFERENCE, source.BLOB_HOST_COLUMNS)
+    RESOLVED = source.resolve(CANDIDATES, PREFERENCE, source.JOBSTATS_HOST_COLUMNS)
     SPEC_BY_KEY = {spec.key: spec for spec in CGROUP_METRICS}
     DEFAULT_CGROUP_SPECS = [s for s in CGROUP_METRICS if s.group == "default"]
     CGROUP_HEADERS = tuple(spec.header for spec in CGROUP_METRICS)
@@ -280,7 +280,7 @@ def host_series(raw_jobid: str, divisors: Dict[str, Dict[str, float]],
                 ) -> Dict[str, Dict[int, Dict[str, float]]]:
     """``{host: {epoch: {header: percent}}}`` over ``[start, end]`` at ``step``.
 
-    ``divisors`` is the per-node blob dict -- ``{host: {"cpus": n, "total_memory":
+    ``divisors`` is the per-node summary dict -- ``{host: {"cpus": n, "total_memory":
     b, ...}}`` -- which every caller already holds; each spec names the field that
     divides it. A host with no value for a given spec's ``denom`` is skipped for
     that spec rather than divided by zero, so a node reporting cores but not memory

@@ -54,13 +54,13 @@ def test_catalog_keys_and_headers_are_unique():
 
 
 def test_default_specs_are_the_two_the_summary_has_always_shown():
-    """CPU%/MEM% are the only cgroup metrics a stored blob can reconstruct, so they
+    """CPU%/MEM% are the only cgroup metrics a stored summary can reconstruct, so they
     are the only ones outside the opt-in `all` group."""
     assert [spec.header for spec in DEFAULT_CGROUP_SPECS] == ["CPU%", "MEM%"]
     assert all(spec.group == "default" for spec in DEFAULT_CGROUP_SPECS)
 
 
-def test_every_spec_names_a_denominator_that_is_a_blob_field():
+def test_every_spec_names_a_denominator_that_is_a_jobstats_summary_field():
     assert {spec.denom for spec in CGROUP_METRICS} == {"cpus", "total_memory"}
 
 

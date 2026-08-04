@@ -7,7 +7,7 @@ how a monitoring outage comes to look like a fleet of wasteful jobs:
 ``na``        *not applicable* -- the resource does not exist. A CPU-only job has
               no GPU%. A fact about the job; the verdict around it stays valid.
 ``unknown``   *should exist, could not be read* -- exporter down, job older than
-              Prometheus retention, query timed out, blob missing a denominator.
+              Prometheus retention, query timed out, summary missing a denominator.
               A fact about our collection, not about the job.
 
 Both render as ``-``, so nothing about the display changes. The difference is what
@@ -46,7 +46,7 @@ class Measure:
     def reading(cls, value: float) -> "Measure":
         """Store the value exactly as given -- no float() coercion.
 
-        The blob rounds to whole percents on purpose and the renderers ``str()``
+        jobstats rounds to whole percents on purpose and the renderers ``str()``
         them, so coercing would turn a displayed ``100`` into ``100.0`` in the CSV
         and in every table.
         """
@@ -85,7 +85,7 @@ class JobMetrics:
     over four literals, and ``DETAIL_COLUMNS``' row indices -- with no way to add a
     metric without touching all of them.
 
-    ``source`` names where the numbers came from, because with a blob fast path and
+    ``source`` names where the numbers came from, because with a jobstats summary fast path and
     a Prometheus path the same column can come from either and they do not always
     agree. A report that mixed them across jobs without saying so would make an
     apples-to-oranges comparison look like a finding.
@@ -114,8 +114,8 @@ class JobMetrics:
         """``ok``/``na``/``unknown`` for ``header``; ``unknown`` if never collected.
 
         Absent-from-this-source and read-but-unknown deliberately collapse: a DCGM
-        column is not something the blob *failed* to measure, it is something the
-        blob is not about, but no caller needs to tell those apart. What decides a
+        column is not something the jobstats summary *failed* to measure, it is something the
+        summary is not about, but no caller needs to tell those apart. What decides a
         `no-data` verdict is which columns the *series* carries -- see
         classifier.unceilinged -- and that is asked of the column set, not of one
         job's readings. Read ``by_header`` directly if you ever need the difference.
@@ -129,7 +129,7 @@ class JobMetrics:
                 if m.known and m.value is not None}
 
 
-# Measure.reason is still recorded, and blob.py sets it on every unmeasured value --
+# Measure.reason is still recorded, and jobstats.py sets it on every unmeasured value --
 # a JobMetrics knows *why* each gap is there. Nothing renders it yet: the planned
 # line was "GPU% unknown -- no samples in window; job ended 2026-01-03, retention
 # begins 2026-02-04", and the aggregator for it (dedupe the sentences, since one dead

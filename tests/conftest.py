@@ -8,11 +8,11 @@ import pytest
 
 from jobscope import config as config_module
 from jobscope import report
-from jobscope.blob import GIB
+from jobscope.jobstats import GIB
 from jobscope.slurm import JobRecord
 
 
-def make_blob(stats: dict) -> str:
+def make_jobstats(stats: dict) -> str:
     """Encode a stats dict as the JS1:<base64 gzip JSON> AdminComment form."""
     return "JS1:" + base64.b64encode(gzip.compress(json.dumps(stats).encode())).decode()
 

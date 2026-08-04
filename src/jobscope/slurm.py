@@ -24,8 +24,8 @@ from datetime import datetime, timedelta
 from typing import Dict, Iterator, List, Optional, Tuple
 
 from . import config
-from .blob import decode_admin_comment, gpus_from_tres
 from .errors import JobscopeError
+from .jobstats import decode_admin_comment, gpus_from_tres
 
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S"
 

@@ -8,9 +8,9 @@ import re
 import pytest
 
 from jobscope import plot, report
-from jobscope.blob import GIB
 from jobscope.dcgm import DEFAULT_SPECS, GPU_SUMMARY_SPECS
 from jobscope.errors import JobscopeError
+from jobscope.jobstats import GIB
 from jobscope.report import (
     SUMMARY_COLUMNS,
     RenderOptions,
@@ -184,12 +184,12 @@ def test_dcgm_report_is_one_row_per_job(gpu_record):
                        "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME"]
     assert len(rows) == 1                       # one row per job, not per GPU
     assert rows[0]["SM_ACT%"] == "60.0"
-    # Blob columns still come from the blob: cpu 75, mem 50, gpu 70, gmem 50.
+    # Those columns still come from the jobstats summary: cpu 75, mem 50, gpu 70, gmem 50.
     assert (rows[0]["CPU%"], rows[0]["GPU%"], rows[0]["GMEM%"]) == ("75", "70", "50")
 
 
 def test_dcgm_ext_only_widens_the_profiling_block(gpu_record):
-    """--ext must not become a different view: identity and blob columns are fixed."""
+    """--ext must not become a different view: identity and jobstats columns are fixed."""
     from jobscope.dcgm import ALL_SPECS
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
 
@@ -199,10 +199,10 @@ def test_dcgm_ext_only_widens_the_profiling_block(gpu_record):
         return plot.parse_csv(io.StringIO(text))[0]
 
     default, extended = headers(DEFAULT_SPECS), headers(ALL_SPECS)
-    assert default[:9] == extended[:9]              # identity + blob unchanged
+    assert default[:9] == extended[:9]              # identity + jobstats unchanged
     assert extended[-1] == default[-1] == "RUNTIME"
     assert len(extended) > len(default)
-    # Blob-backed metrics never appear twice, even in the extended catalog.
+    # jobstats-backed metrics never appear twice, even in the extended catalog.
     assert extended.count("GPU%") == 1 and extended.count("GMEM%") == 1
     assert "GMEM_TOTAL_GB" not in extended
 
@@ -261,7 +261,7 @@ class _CpuTimeseriesClient:
 
 
 def test_cpu_timeseries_csv(cpu_record):
-    """CPU%/MEM% over time, using the job's own stored blob for the divisors.
+    """CPU%/MEM% over time, using the job's own stored summary for the divisors.
 
     cpu_record (conftest.py) is a CPU-only job on node02, cpus=1, total_memory=8GiB:
     0.5/1.0 cores -> 50%/100% CPU, 2/4 GiB RSS out of 8 GiB -> 25%/50% MEM.
@@ -277,7 +277,7 @@ def test_cpu_timeseries_csv(cpu_record):
 
 
 def test_cpu_timeseries_falls_back_to_prometheus_for_a_still_running_job():
-    """An explicit -j ID can select a job whose blob is empty because it has not
+    """An explicit -j ID can select a job whose summary is empty because it has not
     finished yet -- the divisors then come from Prometheus, like the live view."""
     class _Client(_CpuTimeseriesClient):
         def query(self, query, at, timeout=None):
@@ -490,7 +490,7 @@ def test_a_single_row_gets_no_footers(gpu_record):
 # --- which jobs reach the pooled figure -------------------------------------
 
 def _gpu_job(jid, utils, allocated=None):
-    """A record whose blob reports `utils` (minor -> duty%) on one node."""
+    """A record whose summary reports `utils` (minor -> duty%) on one node."""
     node = {"total_time": 100, "cpus": 2, "used_memory": 8 * GIB, "total_memory": 16 * GIB}
     if utils is not None:
         node["gpu_utilization"] = utils
@@ -549,7 +549,7 @@ def test_a_jobs_own_gpu_mean_spans_its_gpus():
 def test_allocated_gpus_that_reported_nothing_are_not_assumed_idle():
     """Absence of samples is not evidence of 0% use.
 
-    A job can allocate 4 GPUs and have only 2 in the blob -- MIG reports no duty
+    A job can allocate 4 GPUs and have only 2 in the jobstats summary -- MIG reports no duty
     cycle at all, and a very short job may be missed by the scrape. Averaging the
     two that reported matches what jobstats stored; inventing zeros for the others
     would read as waste that was never measured. The Jobs footer is what makes the
@@ -917,7 +917,7 @@ def _finish(records, view="all", **kw):
 
 def test_single_job_classification_is_combined_when_cpu_and_gpu_both_present():
     """--all (the default) sees both CPU% and GPU% -- classify_combined()'s call."""
-    records = {"1": _gpu_job("1", {"0": 90.0})}   # GPU% 90 (good), CPU%/MEM% 50 (blob)
+    records = {"1": _gpu_job("1", {"0": 90.0})}   # GPU% 90 (good), CPU%/MEM% 50 (jobstats)
     text = _finish(records, view="all")
     assert "Classification: good (>40%)" in text
 
@@ -933,7 +933,7 @@ def test_single_job_classification_falls_back_to_plain_gpu_for_a_gpu_view():
 def test_single_job_classification_uses_cpu_alone_for_a_cpu_view():
     records = {"1": _gpu_job("1", None)}          # no GPU data at all: CPU-only job
     text = _finish(records, view="cpu")
-    assert "Classification: good (>40%)" in text   # CPU% 50 from the blob
+    assert "Classification: good (>40%)" in text   # CPU% 50 from the jobstats summary
 
 
 def test_single_job_classification_is_not_skewed_by_power_w_wattage():
@@ -992,7 +992,7 @@ def test_single_job_classification_description_for_a_cpu_view():
     assert "Classified by best of CPU%" in text
 
 
-def test_single_job_with_no_blob_gets_no_classification_line():
+def test_single_job_with_no_jobstats_gets_no_classification_line():
     record = JobRecord(jobid="1", state="COMPLETED", name="j", runtime="00:10:00",
                        nodes="1", gpus=0, stats={}, start=1000, end=1100, duration=100,
                        jobid_raw="1", cluster="c", user="alice")
@@ -1200,20 +1200,20 @@ def test_every_graded_column_gets_a_row_in_column_order():
     assert "OCC%" in wide and "OCC%" not in rows
 
 
-def test_a_job_with_no_stored_blob_votes_in_no_tally():
+def test_a_job_with_no_stored_summary_votes_in_no_tally():
     """Half-measured jobs made the denominators disagree.
 
     A finished job with no AdminComment has DCGM numbers but no CPU%/MEM%/GPU%/GMEM%.
     Feeding it to the DCGM tallies alone put SM_ACT% over 117 jobs while GPU% had 88
     on one partition, so the two Worst rows could not be compared. It is excluded
-    from every tally and counted as no-blob, staying in the listing as a real job.
+    from every tally and counted as no-summary, staying in the listing as a real job.
     """
     good = _gpu_job("good", {"0": 90.0})
     blank = dataclasses.replace(_gpu_job("blank", {"0": 5.0}), stats={})
     records = {"good": good, "blank": blank}
     dcgm = {j: ({"SM_ACT%": 5.0}, {}) for j in records}
     rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
-    # One denominator everywhere: only the blob-having job voted.
+    # One denominator everywhere: only the jobstats summary-having job voted.
     for metric in ("GPU%", "SM_ACT%"):
         red, yellow, green = (int(c) for c in rows[metric][1:])
         assert red + yellow + green == 1, (metric, rows[metric])
@@ -1225,11 +1225,11 @@ def test_a_job_with_no_stored_blob_votes_in_no_tally():
     renderer.add(list(records), records, dcgm)
     renderer.finish()
     text = out.getvalue()
-    assert "blank" in text and "no-blob=1" in text
+    assert "blank" in text and "no-jobstats=1" in text
 
 
-def test_a_blob_without_gpu_data_still_votes():
-    """The exclusion is for a *missing* blob, not a CPU-only one.
+def test_a_jobstats_summary_without_gpu_data_still_votes():
+    """The exclusion is for a *missing* summary, not a CPU-only one.
 
     A CPU-only job legitimately has no GPU% and must still count toward CPU%,
     otherwise the whole CPU side of a mixed partition would vanish.
@@ -1913,7 +1913,7 @@ def _render_detail(records, color=True, dcgm_data=None):
 
 
 def _multinode_job(jid="1"):
-    """A record whose blob spans two nodes, two GPUs each."""
+    """A record whose summary spans two nodes, two GPUs each."""
     def node(cpu_seconds, utils):
         return {"total_time": cpu_seconds, "cpus": 4,
                 "used_memory": 8 * GIB, "total_memory": 16 * GIB,
@@ -2955,7 +2955,7 @@ def test_the_summary_profiling_block_follows_the_configured_metrics():
     header = next(ln for ln in out.getvalue().splitlines() if ln.startswith("JOBID"))
     assert "SM_ACT%" in header and "POWER_W" in header
     assert "TENSOR%" not in header and "DRAM%" not in header
-    # GPU% and GMEM% keep their own fixed columns, from the blob.
+    # GPU% and GMEM% keep their own fixed columns, from the jobstats summary.
     assert "GPU%" in header and "GMEM%" in header
 
 

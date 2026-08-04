@@ -107,7 +107,7 @@ job that is running right now.
 leave usable (see below).
 
 Flags and JOBIDs may be given in any order. A `JOBID` works whether the job is
-running or finished: Slurm only stores the utilization blob when a job *ends*, so
+running or finished: Slurm only stores the utilization summary when a job *ends*, so
 for a running one jobscope reconstructs `CPU%`/`MEM%`/`GPU%`/`GMEM%` from the same
 Prometheus metrics jobstats falls back to. With no Prometheus endpoint configured
 those columns stay blank and say so.
@@ -193,7 +193,7 @@ Worst POWER (20/77): alice| 36337337:68W:8h(08:00:29), 36337338:70W:8h(08:00:26)
 Worst CPU (50/77):   alice| 36337338:1%:64.1h(08:00:26), 36337292:1%:64h(08:00:21)
 Worst both (19):     alice| 36337338:gpu0/cpu1(08:00:26), 36337292:gpu0/cpu1(08:00:21)
 Worst all (19):      alice| 36337338:gpu0/sm0/pw70W/cpu1(08:00:26)
-Jobs:                cpu-jobs=77  gpu-jobs=77  gpus=119  no-blob=13
+Jobs:                cpu-jobs=77  gpu-jobs=77  gpus=119  no-jobstats=13
 ```
 
 **There is no per-job mean**, on purpose. Utilization is bimodal -- jobs cluster
@@ -321,7 +321,7 @@ work: a CPU-only job has no `GPU%` to pool, so it is absent from the GPU figures
 rather than counted as zero. A GPU job that sat idle *is* counted, as 0%.
 `no-runtime=N` appears when a job had no elapsed time to weight by. A metric's own
 denominator is its table row, so the DCGM rows can legitimately cover more jobs
-than `gpu-jobs=` -- a job with no stored blob still has Prometheus data.
+than `gpu-jobs=` -- a job with no stored summary still has Prometheus data.
 `ENERGY_kWh` and `PWRmax_W` have no pooled form -- one is a per-job total and the
 other a peak -- so they fall back to the plain per-job figure.
 `jobscope plot` skips every footer rather than charting them as jobs.
@@ -472,7 +472,7 @@ jobscope -j JOBID --ts 30m --csv --gpuid 2
 
 On `--per-gpu` and `--ts` they filter rows, which carry a node and a card. The
 summary has no such row, so jobscope narrows the numbers it is computed *from* —
-the stored blob is per node and per GPU already, so CPU% becomes that node's
+the stored summary is per node and per GPU already, so CPU% becomes that node's
 CPU-seconds over its own cores, and GPU% the mean over the cards that remain. The
 `NODE` and `#GPU` columns shrink with them.
 
@@ -581,7 +581,7 @@ Order does not matter — columns always print in catalog order.
 Two things it deliberately does not reach. **`--per-gpu` keeps a fixed four**
 (`SM_ACT%`, `TENSOR%`, `DRAM%`, `POWER_W`): its rows are addressed by position, so
 its width is not free. And **the CPU side is fixed** at `CPU%`/`MEM%`, because there
-are exactly two cgroup queries and no catalog to choose from. Naming a blob-backed
+are exactly two cgroup queries and no catalog to choose from. Naming a jobstats-backed
 metric (`gpu`, `mem`) in `summary` is harmless — `GPU%` and `GMEM%` have their own
 columns already — and leaving one out is corrected rather than obeyed, since in the
 running view those columns come from Prometheus and would otherwise read `-`.

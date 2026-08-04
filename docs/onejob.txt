@@ -1,6 +1,6 @@
   User:      alice
   Select:    1 job ID(s)
-  Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- blob;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
+  Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- jobstats;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
 JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME
 ----------------------------------------------------------------------------------------------------------------------------
 36770231     alice        COMPLETED 2     6      28     8     28     70      6.0      3.3      2.6     149      01:29:10

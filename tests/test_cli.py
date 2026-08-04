@@ -355,7 +355,7 @@ class _RunningClient:
     """Prometheus stand-in for the squeue branch: one GPU on one job.
 
     Serves the NVML and cgroup series as well as a DCGM one, because the live path
-    reconstructs the utilization blob from them -- without those, a running job has
+    reconstructs the utilization summary from them -- without those, a running job has
     no per-GPU rows to show under --per-gpu.
     """
 
@@ -419,7 +419,7 @@ def test_running_is_the_default_mode(monkeypatch, capsys):
 
 
 def test_running_per_gpu(monkeypatch, capsys):
-    """The per-GPU granularity for a running job, off the reconstructed blob."""
+    """The per-GPU granularity for a running job, off the reconstructed summary."""
     _patch_squeue(monkeypatch)
     main(["running", "--per-gpu", "-j", "100_6"])
     out = capsys.readouterr().out
@@ -441,8 +441,8 @@ def test_running_no_matching_jobs(monkeypatch, capsys):
     assert "No running jobs match" in capsys.readouterr().err
 
 
-def test_running_blob_is_reconstructed(monkeypatch, capsys, gpu_record):
-    """A running job selected by ID has no blob, so it is rebuilt from Prometheus."""
+def test_running_jobstats_summary_is_reconstructed(monkeypatch, capsys, gpu_record):
+    """A running job selected by ID has no jobstats summary, so it is rebuilt from Prometheus."""
     running = dataclasses.replace(gpu_record, jobid="300", state="RUNNING", stats={})
     _patch_sacct(monkeypatch, {"300": running})
     monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: object())
@@ -455,7 +455,7 @@ def test_running_blob_is_reconstructed(monkeypatch, capsys, gpu_record):
     monkeypatch.setattr(select_mod, "fill_running", fake_fill)
     main(["300"])
     out = capsys.readouterr().out
-    assert "70" in out and "50" in out      # the blob fixture's gpu/gmem
+    assert "70" in out and "50" in out      # the jobstats summary fixture's gpu/gmem
 
 
 def test_offline_view_warns_when_no_endpoint_can_fill(monkeypatch, capsys, gpu_record):
@@ -471,13 +471,13 @@ def test_offline_view_warns_when_no_endpoint_can_fill(monkeypatch, capsys, gpu_r
     assert "no Prometheus" in err and "blank" in err
 
 
-def test_finished_job_blob_is_never_recomputed(monkeypatch, capsys, gpu_record):
+def test_a_finished_jobs_summary_is_never_recomputed(monkeypatch, capsys, gpu_record):
     _patch_sacct(monkeypatch, {"100": gpu_record})
     monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: object())
     monkeypatch.setattr(select_mod, "compute_dcgm", lambda *a, **k: {"100": ({}, {})})
 
     def boom(*a, **k):
-        raise AssertionError("a stored blob must not be refetched")
+        raise AssertionError("a stored summary must not be refetched")
 
     monkeypatch.setattr(select_mod, "fill_running", boom)
     main(["finished", "-D", "1", "-u", "alice"])

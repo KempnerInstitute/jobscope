@@ -1,6 +1,6 @@
 """jobscope: Slurm job efficiency and GPU utilization reporting.
 
-Reads the utilization blob Slurm stores in each job's sacct AdminComment,
+Reads the utilization summary Slurm stores in each job's sacct AdminComment,
 enriches it with DCGM GPU profiling metrics from Prometheus, and renders the
 result as tables, CSV, or terminal charts.
 """

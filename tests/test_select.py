@@ -10,17 +10,17 @@ from jobscope.dcgm import DEFAULT_SPECS
 from jobscope.errors import JobscopeError
 from jobscope.job_ave_stats import needs_fill
 from jobscope.report import RenderOptions
-from jobscope.slurm import TIMESTAMP_FORMAT, JobRecord
 from jobscope.select import (
-    BLOB_SPECS,
     FINISHED,
     JOBIDS,
+    JOBSTATS_SPECS,
     RUNNING,
     Request,
     emit_timeseries,
     resolve,
     sacct_selection,
 )
+from jobscope.slurm import TIMESTAMP_FORMAT, JobRecord
 
 GIB = 1024 ** 3
 
@@ -319,10 +319,10 @@ def test_running_yields_records_that_look_finished(monkeypatch):
     assert jobids == ["7"]
     record = records["7"]
     assert record.state == "RUNNING" and record.jobid_raw == "7"
-    # A reconstructed blob, so blob_metrics works exactly as for a stored one:
+    # A reconstructed summary, so jobstats_metrics works exactly as for a stored one:
     # cpu = 100*150/(100*2) = 75, mem = 100*8/16 = 50, gpu = 90, gmem = 40/80 = 50.
-    from jobscope.blob import blob_metrics
-    assert blob_metrics(record.stats, record.gpus).known() == {
+    from jobscope.jobstats import jobstats_metrics
+    assert jobstats_metrics(record.stats, record.gpus).known() == {
         "CPU%": 75, "MEM%": 50, "GPU%": 90, "GMEM%": 50}
     assert dcgm_data["7"][0]["SM_ACT%"] == 80.0
 
@@ -332,25 +332,25 @@ def test_running_provides_the_per_gpu_metrics(monkeypatch):
     selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS)
     (_ids, _records, dcgm_data), = list(selected.chunks)
     per_gpu = dcgm_data["7"][1]
-    # Keyed (node, minor) as the detail renderer and the blob both expect.
+    # Keyed (node, minor) as the detail renderer and the jobstats summary both expect.
     assert per_gpu[("node01", "2")]["SM_ACT%"] == 80.0
 
 
-def test_running_without_specs_still_builds_the_blob(monkeypatch):
-    """--cpu needs CPU%, which comes from the reconstructed blob."""
+def test_running_without_specs_still_builds_the_summary(monkeypatch):
+    """--cpu needs CPU%, which comes from the reconstructed summary."""
     client = _patch_running(monkeypatch)
     selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, None)
     (_ids, records, _d), = list(selected.chunks)
-    from jobscope.blob import blob_metrics
-    blob = blob_metrics(records["7"].stats, records["7"].gpus)
-    assert (blob.value("CPU%"), blob.value("MEM%")) == (75, 50)
+    from jobscope.jobstats import jobstats_metrics
+    summary = jobstats_metrics(records["7"].stats, records["7"].gpus)
+    assert (summary.value("CPU%"), summary.value("MEM%")) == (75, 50)
     # ... but it does not pay for the DCGM profiling queries it will not print. Tested
     # against the PROF catalog specifically, not "DCGM_FI" at large: GPU% may itself be
-    # served by DCGM_FI_DEV_GPU_UTIL, which is one of the three blob columns rather
+    # served by DCGM_FI_DEV_GPU_UTIL, which is one of the three jobstats columns rather
     # than a profiling metric this view declined to print.
     assert not any("DCGM_FI_PROF" in q for q in client.queries)
-    assert BLOB_SPECS and all(
-        s.column in ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB") for s in BLOB_SPECS)
+    assert JOBSTATS_SPECS and all(
+        s.column in ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB") for s in JOBSTATS_SPECS)
 
 
 def test_running_context_names_the_owner_for_explicit_ids(monkeypatch):
@@ -411,27 +411,27 @@ def test_both_branches_yield_the_same_chunk_shape(monkeypatch, gpu_record):
 
 
 def _record(state, stats, jobid="1"):
-    """A JobRecord in one line, for the needs_fill()/--no-blob checks."""
+    """A JobRecord in one line, for the needs_fill()/--no-jobstats checks."""
     return JobRecord(jobid=jobid, state=state, name="j", runtime="00:10:00",
                      nodes="1", gpus=1, stats=stats, start=0, end=600,
                      duration=600, jobid_raw=jobid, cluster="", user="u")
 
 
-def test_no_blob_forces_the_prometheus_path_for_finished_jobs():
-    """A finished job carries a stored blob, so needs_fill() normally leaves it
-    alone. --no-blob is what makes the two sources comparable on the same job."""
+def test_no_jobstats_forces_the_prometheus_path_for_finished_jobs():
+    """A finished job carries a stored summary, so needs_fill() normally leaves it
+    alone. --no-summary is what makes the two sources comparable on the same job."""
     finished = _record("COMPLETED", {"total_time": 600, "nodes": {}})
     assert needs_fill(finished) is False
     assert needs_fill(finished, force=True) is True
 
 
-def test_a_running_job_with_no_blob_is_filled_either_way():
+def test_a_running_job_with_no_jobstats_is_filled_either_way():
     running = _record("RUNNING", {})
     assert needs_fill(running) is True and needs_fill(running, force=True) is True
 
 
-def test_no_blob_without_an_endpoint_is_an_error_not_a_silent_table_of_dashes():
-    """Without --no-blob a missing endpoint degrades to the stored blob with a note.
+def test_no_jobstats_without_an_endpoint_is_an_error_not_a_silent_table_of_dashes():
+    """Without --no-jobstats a missing endpoint degrades to the stored summary with a note.
     With it there is nothing to fall back on, so going quiet would print a table of
     dashes and no explanation."""
     records = {"1": _record("COMPLETED", {"total_time": 1, "nodes": {}})}
@@ -439,7 +439,7 @@ def test_no_blob_without_an_endpoint_is_an_error_not_a_silent_table_of_dashes():
                                  site_jobstats_config_path="/nonexistent")
     with pytest.raises(JobscopeError) as exc:
         select_mod._fill_running(records, ["1"], broken, None, 1, None, force=True)
-    assert "--no-blob" in str(exc.value)
+    assert "--no-jobstats" in str(exc.value)
 
 
 # --- narrowing the summary: --nodename / --gpuid on a view with no row per unit ---
@@ -460,7 +460,7 @@ _TWO_NODE_STATS = {
 
 
 def _narrowed(nodename=None, gpu_ids=()):
-    from jobscope.blob import blob_metrics
+    from jobscope.jobstats import jobstats_metrics
     from jobscope.select import _narrow_records
 
     record = JobRecord(jobid="1", state="COMPLETED", name="j", runtime="00:01:40",
@@ -469,7 +469,7 @@ def _narrowed(nodename=None, gpu_ids=()):
     records = {"1": record}
     _narrow_records(records, ["1"], nodename, gpu_ids)
     got = records["1"]
-    return got, blob_metrics(got.stats, got.gpus)
+    return got, jobstats_metrics(got.stats, got.gpus)
 
 
 def test_narrowing_the_summary_to_one_node_changes_its_numbers():

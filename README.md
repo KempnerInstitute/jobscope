@@ -184,7 +184,7 @@ Prometheus, so it is the fastest wide query. `--gpu` prints the GPU side.
 Every column has its own source, and the header block names them:
 
 ```
-  Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- blob;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
+  Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- jobstats;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
 ```
 
 `CPU%`, `MEM%`, `GPU%` and GPU memory come from the jobstats record Slurm already
@@ -222,7 +222,7 @@ exporter reads. Set the defaults with `[gpu] source` and `[host] source` (see
 ## Contrib
 
 `contrib/jobstats_extended.py` is a site-specific prototype that folds DCGM metrics
-into the jobstats blob itself. It depends on an upstream jobstats install and is not
+into the jobstats summary itself. It depends on an upstream jobstats install and is not
 part of the package; see [contrib/README.md](contrib/README.md).
 
 ## References

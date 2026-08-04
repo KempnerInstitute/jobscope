@@ -3,7 +3,7 @@
 Jobs reach jobscope from either ``sacct`` (finished jobs, or specific IDs) or
 ``squeue`` (what is running now). Those paths share almost nothing: one streams
 batches and reduces each metric over a closed ``[start, end]`` window, the other
-reads a single instant and has to reconstruct the utilization blob Slurm has not
+reads a single instant and has to reconstruct the utilization summary Slurm has not
 written yet.
 
 Everything downstream is indifferent to that. This module is where the difference
@@ -18,9 +18,30 @@ import sys
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 
-from . import blob, config
-from .dcgm import BLOB_BACKED_KEYS, DEFAULT_SPECS, MetricSpec, compute_dcgm
+from . import config, cpu, jobstats, timeseries
+from .dcgm import DEFAULT_SPECS, JOBSTATS_BACKED_KEYS, MetricSpec, compute_dcgm
 from .errors import JobscopeError
+from .job_ave_stats import (
+    apply_slurm_host,
+    fill_running,
+    needs_fill,
+    note_missing_host_series,
+    note_offline_gap,
+)
+from .prometheus import PrometheusClient, client_from_config
+from .report import (
+    RenderOptions,
+    combined_timeseries,
+    context_pairs,
+    cpu_timeseries,
+    dcgm_timeseries,
+    narrowing_pairs,
+    no_such_node,
+    running_combined_timeseries,
+    running_cpu_timeseries,
+    running_timeseries,
+    source_pair,
+)
 from .running import (
     RunningSelection,
     aggregate_by_job,
@@ -30,31 +51,8 @@ from .running import (
     discover_gpus,
     fetch_jobs,
     job_sort_key,
-    running_records,
     per_gpu_by_node_minor,
-)
-from .job_ave_stats import (
-    apply_slurm_host,
-    fill_running,
-    needs_fill,
-    note_missing_host_series,
-    note_offline_gap,
-)
-from . import cpu
-from . import timeseries
-from .prometheus import PrometheusClient, client_from_config
-from .report import (
-    RenderOptions,
-    combined_timeseries,
-    source_pair,
-    context_pairs,
-    narrowing_pairs,
-    cpu_timeseries,
-    dcgm_timeseries,
-    running_combined_timeseries,
-    running_cpu_timeseries,
-    running_timeseries,
-    no_such_node,
+    running_records,
 )
 from .slurm import (
     JobRecord,
@@ -70,9 +68,9 @@ from .slurm import (
 DcgmData = Dict[str, Tuple[dict, dict]]
 Chunk = Tuple[List[str], Dict[str, JobRecord], DcgmData]
 
-# The metrics the reconstructed blob is built from; enough for CPU%/MEM%/GPU%/GMEM%
+# The metrics the reconstructed summary is built from; enough for CPU%/MEM%/GPU%/GMEM%
 # without the DCGM profiling block.
-BLOB_SPECS: List[MetricSpec] = [s for s in DEFAULT_SPECS if s.key in BLOB_BACKED_KEYS]
+JOBSTATS_SPECS: List[MetricSpec] = [s for s in DEFAULT_SPECS if s.key in JOBSTATS_BACKED_KEYS]
 
 RUNNING = "running"
 FINISHED = "finished"
@@ -101,12 +99,12 @@ class Request:
     # cli._min_elapsed()), and it used to disagree with it by an hour.
     min_elapsed: int = config.parse_duration(config.DEFAULT_MIN_ELAPSED)
     average: bool = False
-    # Ignore the stored jobstats blob and read every metric from Prometheus, for a
-    # finished job as well as a running one. The blob is a fast path -- one free
+    # Ignore the summary jobstats stored and read every metric from Prometheus, for a
+    # finished job as well as a running one. The summary is a fast path -- one free
     # sacct field against several range queries -- so it stays preferred by
     # default; this exists to compare the two, and to be what a site without
     # jobstats runs on. See jobscope.probe's --validate.
-    no_blob: bool = False
+    no_jobstats: bool = False
 
     @property
     def running(self) -> bool:
@@ -158,7 +156,7 @@ def _running_context(selection: RunningSelection, jobs: dict, gpus: dict,
     does for the historical modes.
 
     The provenance line matters more here than in the historical modes, not less: a
-    running job has no stored blob, so its GPU% is measured rather than read back, and
+    running job has no stored summary, so its GPU% is measured rather than read back, and
     which exporter measured it is the one thing the numbers cannot say themselves.
     """
     if selection.jobids:
@@ -171,7 +169,7 @@ def _running_context(selection: RunningSelection, jobs: dict, gpus: dict,
         pairs.append(("Partition", selection.partition))
     pairs.append(("Select", selection.describe()))
     pairs.append(("GPUs", "%d across %d job(s)" % (len(gpus), len(jobs))))
-    return pairs + source_pair(specs, have_blob=False, host_specs=host_specs)
+    return pairs + source_pair(specs, have_jobstats=False, host_specs=host_specs)
 
 
 def _report_no_running(selection) -> None:
@@ -194,7 +192,7 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
                      gpu_ids=(), host_specs=None) -> Optional[Resolved]:
     """One chunk from squeue plus Prometheus, shaped like a sacct chunk.
 
-    ``running_records`` synthesizes the blob Slurm has not written yet, so the records
+    ``running_records`` synthesizes the jobstats summary Slurm has not written yet, so the records
     are indistinguishable from finished ones to everything downstream.
     """
     selection = _running_selection(request)
@@ -210,14 +208,14 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
         print("No GPU data in Prometheus for these jobs (CPU-only, or not yet scraped).",
               file=sys.stderr)
 
-    # A --cpu report still needs the blob-backed GPU metrics, because running_records
-    # assembles the blob from them -- but only those, so it does not pay for the
+    # A --cpu report still needs the jobstats-backed GPU metrics, because running_records
+    # assembles the jobstats summary from them -- but only those, so it does not pay for the
     # DCGM profiling queries whose columns it will not print.
-    # What the *report* asked for, before the blob-shaped fallback below. --cpu passes
-    # None and still needs BLOB_SPECS queried to reconstruct the blob, but it prints no
+    # What the *report* asked for, before the summary-shaped fallback below. --cpu passes
+    # None and still needs JOBSTATS_SPECS queried to reconstruct the jobstats summary, but it prints no
     # GPU column -- so naming a source for one would describe a column that is not there.
     requested = specs
-    specs = specs or BLOB_SPECS
+    specs = specs or JOBSTATS_SPECS
     metrics = (collect_averaged(client, jobs, gpus, specs, timeout, workers)
                if request.average else collect_instant(client, gpus, specs, timeout))
     records = running_records(jobs, gpus, metrics, specs, client, timeout)
@@ -229,7 +227,7 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
     jobids = sorted((job["jobid"] for job in jobs.values()),
                     key=lambda jid: job_sort_key({"jobid": jid}))
     # The same two steps the sacct path takes in _enrich, and they belong here more than
-    # there: a running job is the case with no stored blob to fall back on, so it is
+    # there: a running job is the case with no stored summary to fall back on, so it is
     # where a named slurm source has something to add and where a missing cgroup
     # exporter is the difference between a CPU% and a dash.
     if "slurm" in cpu.PREFERENCE:
@@ -293,27 +291,27 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
         chunks = fetch_chunks(jobids, timeout)
 
     return Resolved(context, _enrich(chunks, cfg, timeout, workers, specs,
-                                     no_blob=request.no_blob,
+                                     no_jobstats=request.no_jobstats,
                                      nodename=nodename, gpu_ids=gpu_ids,
                                      host_specs=host_specs))
 
 
 def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
-            specs: Optional[List[MetricSpec]], no_blob: bool = False,
+            specs: Optional[List[MetricSpec]], no_jobstats: bool = False,
             nodename: Optional[str] = None, gpu_ids=(),
             host_specs=None) -> Iterator[Chunk]:
-    """Attach DCGM metrics and fill running jobs' blobs, chunk by chunk.
+    """Attach DCGM metrics and fill running jobs' summaries, chunk by chunk.
 
     The client is built lazily and at most once: a selection with no GPU jobs, or a
     --cpu report over finished ones, never contacts Prometheus.
 
-    ``nodename``/``gpu_ids`` narrow both halves to the same cards -- the blob the
+    ``nodename``/``gpu_ids`` narrow both halves to the same cards -- the jobstats summary the
     summary's CPU%/MEM%/GPU%/GMEM% come from, and the DCGM queries. Both, or the row
     would mix one node's GPU% with every node's SM_ACT%.
     """
     client: Optional[PrometheusClient] = None
     for chunk_ids, records in chunks:
-        # Before the blob is read and before the queries: narrowing the record is what
+        # Before the jobstats summary is read and before the queries: narrowing the record is what
         # makes every downstream figure -- row, per-metric table, bars, verdict --
         # describe the subset without any of them knowing a filter was applied.
         if nodename or gpu_ids:
@@ -325,9 +323,9 @@ def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
             dcgm_data = compute_dcgm(records, chunk_ids, specs, client, timeout, workers,
                                      nodename=nodename, gpu_ids=gpu_ids)
         client = _fill_running(records, chunk_ids, cfg, timeout, workers, client,
-                               force=no_blob)
+                               force=no_jobstats)
         # Last, and only for what is still missing: Slurm's own accounting, where the
-        # site has named it as a host source. After the blob and Prometheus because it
+        # site has named it as a host source. After jobstats and Prometheus because it
         # is the coarsest of the three -- job totals rather than per-node series -- so
         # it should never displace a measurement that arrived.
         if "slurm" in cpu.PREFERENCE:
@@ -358,19 +356,19 @@ def _narrow_records(records, jobids, nodename: Optional[str], gpu_ids) -> None:
         record = records.get(jid)
         if record is None:
             continue
-        seen_nodes |= blob.nodes_in(record.stats)
-        seen_gpus |= blob.gpu_ids_in(record.stats)
-        stats = blob.narrow_stats(record.stats, nodename, gpu_ids)
+        seen_nodes |= jobstats.nodes_in(record.stats)
+        seen_gpus |= jobstats.gpu_ids_in(record.stats)
+        stats = jobstats.narrow_stats(record.stats, nodename, gpu_ids)
         if stats:
             matched_node = True
-        hit_gpus |= blob.gpu_ids_in(stats)
+        hit_gpus |= jobstats.gpu_ids_in(stats)
         records[jid] = replace(
             record, stats=stats,
-            nodes=str(len(blob.nodes_in(stats))) if stats else "0",
+            nodes=str(len(jobstats.nodes_in(stats))) if stats else "0",
             # #GPU drives the GPU% denominator's "was this job allocated cards" and
             # the GPU-hours weighting, so it has to shrink with the cards -- counted
             # per card rather than per distinct minor, since nodes number from 0.
-            gpus=blob.gpu_count(stats) if record.gpus else record.gpus)
+            gpus=jobstats.gpu_count(stats) if record.gpus else record.gpus)
     if nodename and not matched_node:
         raise JobscopeError("no data for node %r in this selection; it ran on: %s"
                             % (nodename, ", ".join(sorted(seen_nodes)) or "(none)"))
@@ -386,15 +384,15 @@ def _narrow_records(records, jobids, nodename: Optional[str], gpu_ids) -> None:
 
 
 def _fill_running(records, jobids, cfg, timeout, workers, client, force=False):
-    """Rebuild the utilization blob for the jobs in this chunk that need one.
+    """Rebuild the utilization summary for the jobs in this chunk that need one.
 
-    A running job has no stored blob, so CPU%/MEM%/GPU%/GMEM% would all be empty.
+    A running job has no stored summary, so CPU%/MEM%/GPU%/GMEM% would all be empty.
     Every input is in Prometheus, so fill them from there. With ``force``
-    (``--no-blob``) finished jobs are rebuilt too, ignoring what Slurm stored.
+    (``--no-jobstats``) finished jobs are rebuilt too, ignoring what Slurm stored.
 
     An install with no endpoint configured stays fully offline: the fill is skipped
     with a note rather than an error -- except under ``force``, where there is no
-    stored blob to fall back on and going quiet would print a table of dashes with
+    stored summary to fall back on and going quiet would print a table of dashes with
     no explanation.
     """
     if not any(j in records and needs_fill(records[j], force) for j in jobids):
@@ -405,8 +403,8 @@ def _fill_running(records, jobids, cfg, timeout, workers, client, force=False):
         except JobscopeError:
             if force:
                 raise JobscopeError(
-                    "--no-blob reads every metric from Prometheus, and no endpoint is\n"
-                    "configured. Drop --no-blob to use the stored jobstats blob, or see\n"
+                    "--no-jobstats reads every metric from Prometheus, and no endpoint is\n"
+                    "configured. Drop --no-jobstats to use the summary jobstats stored, or see\n"
                     "'jobscope probe' for how to configure one.")
             note_offline_gap(records, jobids)
             return None

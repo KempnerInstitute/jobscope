@@ -19,7 +19,7 @@
 
 [prometheus]
 # The endpoint serving the DCGM (DCGM_FI_*) and nvidia_gpu_* series. Required for the
-# GPU and DCGM views; the CPU-only and offline (blob) views never contact it.
+# GPU and DCGM views; the CPU-only and offline (jobstats) views never contact it.
 #
 # SECURITY: this URL often embeds a credential. Prefer $JOBSCOPE_PROM_URL so the
 # secret never lands in a file -- a value here is used only when that is unset.
@@ -92,7 +92,7 @@ long_running = "3h"
 # one source: every column resolves independently to its own best available provider,
 # so naming dcgm cannot take away a column only the nvidia exporter publishes.
 #
-#   blob   free -- already in the sacct output, so no Prometheus query at all. Serves
+#   jobstats  free -- already in the sacct output, so no Prometheus query at all. Serves
 #          GPU% and the GPU memory pair, and nothing else.
 #   dcgm   complete -- the whole profiling catalog, and the only source for SM
 #          activity, tensor pipes and DRAM.
@@ -106,15 +106,15 @@ long_running = "3h"
 # join, clipping the window to the samples where the job actually held the card, and a
 # DCGM_* series cannot (different labels -- PromQL's `and` never matches). Preferring
 # dcgm for GPU% therefore bounds it by the job's window, as SM_ACT% already is.
-source = ["blob", "dcgm", "nvml"]
+source = ["jobstats", "dcgm", "nvml"]
 
 [host]
 # The same question for CPU% and MEM%, which have their own three candidates:
 #
-#   blob     free, and what a finished job reports -- jobstats recorded the CPU time
+#   jobstats free, and what a finished job reports -- jobstats recorded the CPU time
 #            and peak RSS Slurm accounted.
 #   cgroup   the cgroup_* series, and the only Prometheus source for a *running*
-#            job, since Slurm writes the blob at job end.
+#            job, since Slurm writes the jobstats summary at job end.
 #   slurm    sacct's own TotalCPU / MaxRSS. For a site with no jobstats and no cgroup
 #            exporter, where the alternative is a blank column. Job totals rather
 #            than per-node series, so --nodename has nothing to narrow on one.
@@ -123,12 +123,12 @@ source = ["blob", "dcgm", "nvml"]
 # dcgm-exporter and no cgroup exporter ('jobscope probe' says so on its coverage
 # line), which is why running jobs show CPU% as "-".
 #
-# Naming a source means the numbers come from it, so it replaces the blob rather than
-# filling its gaps -- otherwise the header would credit slurm for blob figures. Where
+# Naming a source means the numbers come from it, so it replaces the jobstats summary rather than
+# filling its gaps -- otherwise the header would credit slurm for jobstats figures. Where
 # the named source has nothing the column reads "-", which for slurm is every running
 # job on a cluster whose jobacct_gather reports TotalCPU only at job end. A zero there
 # is read as "not gathered", never as an idle job.
-source = ["blob", "cgroup", "slurm"]
+source = ["jobstats", "cgroup", "slurm"]
 
 [metrics]
 # Which GPU/DCGM metrics each view collects and shows. GPU-side only: the CPU side is
@@ -148,8 +148,8 @@ source = ["blob", "cgroup", "slurm"]
 #
 # NOT covered: --per-gpu keeps a fixed four (SM_ACT%, TENSOR%, DRAM%, POWER_W) -- its
 # rows are addressed by position, so its width is not free to change. And naming a
-# blob-backed metric (gpu, mem, memtot) in `summary` has no effect: GPU%/GMEM% already
-# have their own columns there, from the sacct blob.
+# jobstats-backed metric (gpu, mem, memtot) in `summary` has no effect: GPU%/GMEM% already
+# have their own columns there, from the jobstats summary in sacct.
 summary    = ["sm_act", "tensor", "dram", "power"]
 timeseries = ["gpu", "sm_act", "tensor", "dram", "power"]
 extended   = "all"

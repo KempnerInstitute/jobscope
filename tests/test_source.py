@@ -1,7 +1,7 @@
 """Per-column source resolution.
 
-The policy these assert used to be three literals in ``dcgm.BLOB_BACKED_KEYS`` plus a
-hardcoded preference for the blob inside ``_prefer_stored``. It is now data, so the
+The policy these assert used to be three literals in ``dcgm.JOBSTATS_BACKED_KEYS`` plus a
+hardcoded preference for the jobstats summary inside ``_prefer_stored``. It is now data, so the
 thing worth testing is that the data reproduces the old behaviour by default and
 changes only what a stated preference asks it to.
 """
@@ -24,18 +24,18 @@ def restore_preference():
 def test_naming_one_source_promotes_it_and_keeps_the_rest():
     """A preference is a reordering, not a filter: a column whose only candidate is an
     unnamed source still has to be served, or naming dcgm would silently drop GMEM%."""
-    assert source.parse_preference("dcgm") == ("dcgm", "blob", "nvml")
-    assert source.parse_preference("nvml") == ("nvml", "blob", "dcgm")
+    assert source.parse_preference("dcgm") == ("dcgm", "jobstats", "nvml")
+    assert source.parse_preference("nvml") == ("nvml", "jobstats", "dcgm")
     assert set(source.parse_preference("dcgm")) == set(source.SOURCES)
 
 
 def test_an_order_may_be_given_in_full_or_comma_separated():
-    assert source.parse_preference("blob,nvml") == ("blob", "nvml", "dcgm")
-    assert source.parse_preference(["nvml", "dcgm"]) == ("nvml", "dcgm", "blob")
+    assert source.parse_preference("jobstats,nvml") == ("jobstats", "nvml", "dcgm")
+    assert source.parse_preference(["nvml", "dcgm"]) == ("nvml", "dcgm", "jobstats")
 
 
 def test_a_repeated_name_is_not_repeated_in_the_order():
-    assert source.parse_preference("dcgm,dcgm,blob") == ("dcgm", "blob", "nvml")
+    assert source.parse_preference("dcgm,dcgm,jobstats") == ("dcgm", "jobstats", "nvml")
 
 
 @pytest.mark.parametrize("bad", ["dgcm", "prometheus", "", [], 7, "dcgm,nvml,oops"])
@@ -48,10 +48,10 @@ def test_an_unknown_source_is_named_not_ignored(bad):
 
 # --- resolution -------------------------------------------------------------
 
-def test_the_default_order_reproduces_the_old_hardcoded_blob_list():
-    """What BLOB_BACKED_KEYS = ("duty", "mem", "memtot") used to say, by column."""
+def test_the_default_order_reproduces_the_old_hardcoded_jobstats_list():
+    """What JOBSTATS_BACKED_KEYS = ("duty", "mem", "memtot") used to say, by column."""
     dcgm.set_preference(source.DEFAULT_PREFERENCE)
-    assert dcgm.RESOLVED.from_blob == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB"}
+    assert dcgm.RESOLVED.from_jobstats == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB"}
     assert dcgm.DCGM_HEADERS == ["SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
 
 
@@ -60,11 +60,11 @@ def test_exactly_one_provider_wins_each_column():
         assert len([s for s in dcgm.ALL_SPECS if s.column == spec.column]) == 1
 
 
-def test_naming_an_exporter_takes_the_column_off_the_blob():
+def test_naming_an_exporter_takes_the_column_off_jobstats():
     """The point of the flag: on a finished job it has to actually change where GPU%
     comes from, rather than being quietly overridden by the stored value."""
     dcgm.set_preference(source.parse_preference("dcgm"))
-    assert "GPU%" not in dcgm.RESOLVED.from_blob
+    assert "GPU%" not in dcgm.RESOLVED.from_jobstats
     assert dcgm.RESOLVED.source_of("GPU%") == "dcgm"
 
 
@@ -76,19 +76,19 @@ def test_a_column_only_one_source_publishes_is_unaffected_by_the_order():
     assert dcgm.RESOLVED.source_of("SM_ACT%") == "dcgm"
 
 
-def test_without_a_blob_the_column_falls_through_to_an_exporter():
+def test_without_a_jobstats_summary_the_column_falls_through_to_an_exporter():
     """A running job, or a finished one with no JS1:, must get the exporter answer
     rather than a no-data column."""
-    resolution = source.resolve(dcgm.METRICS, source.DEFAULT_PREFERENCE, blob_columns=())
-    assert resolution.from_blob == frozenset()
+    resolution = source.resolve(dcgm.METRICS, source.DEFAULT_PREFERENCE, jobstats_columns=())
+    assert resolution.from_jobstats == frozenset()
     assert resolution.source_of("GPU%") in ("dcgm", "nvml")
 
 
-def test_the_leading_exporter_skips_the_blob():
-    """Per-source default views are per *exporter*: the blob has no catalog to take a
+def test_the_leading_exporter_skips_jobstats():
+    """Per-source default views are per *exporter*: the jobstats summary has no catalog to take a
     default set from, serving three columns and nothing else."""
-    assert source.resolve(dcgm.METRICS, ("blob", "dcgm", "nvml")).leading_exporter() == "dcgm"
-    assert source.resolve(dcgm.METRICS, ("blob", "nvml", "dcgm")).leading_exporter() == "nvml"
+    assert source.resolve(dcgm.METRICS, ("jobstats", "dcgm", "nvml")).leading_exporter() == "dcgm"
+    assert source.resolve(dcgm.METRICS, ("jobstats", "nvml", "dcgm")).leading_exporter() == "nvml"
 
 
 # --- per-source default views ----------------------------------------------
@@ -117,21 +117,21 @@ def test_all_metrics_is_scoped_to_the_active_source():
 def test_provenance_groups_columns_by_source_in_preference_order():
     dcgm.set_preference(source.DEFAULT_PREFERENCE)
     groups = dcgm.RESOLVED.by_source()
-    assert [name for name, _ in groups] == ["blob", "dcgm"]
-    blob_columns = dict(groups)["blob"]
-    # Catalog order, not set order -- from_blob is a frozenset.
-    assert blob_columns == ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB")
+    assert [name for name, _ in groups] == ["jobstats", "dcgm"]
+    jobstats_columns = dict(groups)["jobstats"]
+    # Catalog order, not set order -- from_jobstats is a frozenset.
+    assert jobstats_columns == ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB")
 
 
-def test_the_running_view_does_not_credit_a_blob_it_cannot_have():
-    """Slurm writes the blob at job *end*, so a running job's GPU% was measured by an
-    exporter whatever the preference says. Naming the blob there would credit a source
+def test_the_running_view_does_not_credit_a_jobstats_summary_it_cannot_have():
+    """Slurm writes the jobstats summary at job *end*, so a running job's GPU% was measured by an
+    exporter whatever the preference says. Naming the jobstats summary there would credit a source
     that had nothing to give -- the same error as claiming a window not scanned."""
     from jobscope.report import gpu_source_line
     dcgm.set_preference(source.DEFAULT_PREFERENCE)
     specs = dcgm.DEFAULT_SPECS
-    assert "blob" in gpu_source_line(specs, have_blob=True)
-    assert "blob" not in gpu_source_line(specs, have_blob=False)
+    assert "jobstats" in gpu_source_line(specs, have_jobstats=True)
+    assert "jobstats" not in gpu_source_line(specs, have_jobstats=False)
 
 
 def test_no_gpu_specs_means_no_provenance_line():
@@ -144,22 +144,22 @@ def test_no_gpu_specs_means_no_provenance_line():
 # --- the host axis ----------------------------------------------------------
 
 def test_host_columns_have_their_own_axis():
-    """CPU%/MEM% choose between the blob and the cgroup exporter, not between dcgm and
+    """CPU%/MEM% choose between the summary and the cgroup exporter, not between dcgm and
     nvml -- so naming a GPU source for them is an error rather than a no-op."""
     from jobscope import cpu
     assert source.parse_preference("cgroup", "[host] source",
-                                   source.HOST_SOURCES) == ("cgroup", "blob", "slurm")
+                                   source.HOST_SOURCES) == ("cgroup", "jobstats", "slurm")
     with pytest.raises(JobscopeError):
         source.parse_preference("dcgm", "[host] source", source.HOST_SOURCES)
-    assert cpu.RESOLVED.source_of("CPU%") == "blob"
+    assert cpu.RESOLVED.source_of("CPU%") == "jobstats"
 
 
 def test_the_host_preference_moves_cpu_and_mem():
     from jobscope import cpu
-    cpu.set_preference(("cgroup", "blob"))
+    cpu.set_preference(("cgroup", "jobstats"))
     try:
         assert cpu.RESOLVED.source_of("CPU%") == "cgroup"
-        assert cpu.RESOLVED.from_blob == frozenset()
+        assert cpu.RESOLVED.from_jobstats == frozenset()
     finally:
         cpu.set_preference(source.DEFAULT_HOST_PREFERENCE)
 
@@ -206,7 +206,7 @@ def test_zero_cpu_seconds_is_not_gathered_rather_than_idle(state):
     """A process that ran at all burns some CPU, so a literal zero means jobacct is not
     recording it. Rendering 0% would say "idle", which is the one thing jobscope must
     never say about a number it does not have. Measured on this cluster: TotalCPU=0 on a
-    finished 128-core job whose blob reports CPU% 6."""
+    finished 128-core job whose summary reports CPU% 6."""
     from jobscope.job_ave_stats import accounted
     assert accounted(_slurm_metrics(0.0), _slurm_record(state)) is False
     assert accounted(_slurm_metrics(30000.0), _slurm_record(state)) is True
@@ -216,25 +216,25 @@ def test_slurm_figures_are_job_totals_under_one_entry():
     """sacct accounts CPU-seconds and memory per *job*, so there is no per-node split to
     reproduce -- and the entry is not named after a host, because labelling job totals
     with a hostname would claim a measurement Slurm did not make."""
-    from jobscope.blob import blob_metrics
     from jobscope.job_ave_stats import SLURM_NODE, slurm_host_map
+    from jobscope.jobstats import jobstats_metrics
     nodes = slurm_host_map(_slurm_metrics(30000.0), 3480)
     assert list(nodes) == [SLURM_NODE]
     # 30000 cpu-seconds over 3480s x 16 cores = 53.9%, and 8/16 GiB = 50%.
-    assert blob_metrics({"total_time": 3480, "nodes": nodes}, 1).known() == {
+    assert jobstats_metrics({"total_time": 3480, "nodes": nodes}, 1).known() == {
         "CPU%": 54, "MEM%": 50}
 
 
-def test_naming_slurm_replaces_the_blob_rather_than_filling_gaps():
+def test_naming_slurm_replaces_the_jobstats_summary_rather_than_filling_gaps():
     """Naming a source has to mean the numbers come from it, as --gpu-source dcgm does.
-    Falling back to the blob would leave the header crediting slurm for blob figures."""
+    Falling back to the jobstats summary would leave the header crediting slurm for jobstats figures."""
     from jobscope.job_ave_stats import apply_slurm_host
     record = _slurm_record("COMPLETED")
     record.stats = {"total_time": 3480,
                     "nodes": {"node01": {"total_time": 999.0, "cpus": 8,
                                          "used_memory": 1e9, "total_memory": 2e9,
                                          "gpu_utilization": {"0": 90}}}}
-    # Slurm has nothing to give: the blob's host fields go anyway, and the GPU map stays.
+    # Slurm has nothing to give: the summary's host fields go anyway, and the GPU map stays.
     apply_slurm_host({"1": record}, ["1"], None, override=True)
     node = record.stats["nodes"]["node01"]
     assert "total_time" not in node and "cpus" not in node
@@ -243,13 +243,13 @@ def test_naming_slurm_replaces_the_blob_rather_than_filling_gaps():
 
 def test_a_blank_running_cpu_says_why(capsys):
     """The failure this was reported as: GPU columns full, CPU columns dashes, and
-    nothing connecting that to an exporter. A running job has no blob to fall back on,
+    nothing connecting that to an exporter. A running job has no jobstats summary to fall back on,
     so the note names the one source that could have served it."""
     from jobscope.job_ave_stats import note_missing_host_series
     running, finished = _slurm_record("RUNNING"), _slurm_record("COMPLETED")
     note_missing_host_series({"1": running}, ["1"])
     assert "no cgroup_* series covers them" in capsys.readouterr().err
-    # Not for a finished job -- its blob supplies them -- nor when the fields arrived.
+    # Not for a finished job -- its jobstats summary supplies them -- nor when the fields arrived.
     note_missing_host_series({"1": finished}, ["1"])
     running.stats = {"total_time": 60, "nodes": {"n1": {"total_time": 30.0, "cpus": 1}}}
     note_missing_host_series({"1": running}, ["1"])

@@ -58,7 +58,7 @@ RETENTION_LADDER_DAYS = (730, 365, 180, 90, 60, 30, 14, 7, 1)
 
 # The window the capability sample covers. Two hours of one cluster is a few
 # thousand jobs and returns in ~0.2s, where two days is 114k rows and 5s -- and
-# every question here ("are blobs being written", "find me a GPU job") is answered
+# every question here ("are summaries being written", "find me a GPU job") is answered
 # just as well by a recent sample as by an exhaustive one. Widened once when a
 # quiet cluster returns nothing.
 SAMPLE_WINDOWS = ("now-2hours", "now-2days")
@@ -241,7 +241,7 @@ def check_slurm(out, timeout: Optional[float]) -> Dict[str, bool]:
 def sample_jobs(timeout: Optional[float]) -> Optional[List[Tuple[str, str, str]]]:
     """A recent sample of finished jobs as ``(raw jobid, AllocTRES, AdminComment)``.
 
-    One sacct call answers every job-shaped question probe has -- whether blobs
+    One sacct call answers every job-shaped question probe has -- whether summaries
     are being written, and which job to probe the metric catalog with -- so it runs
     once and is passed around rather than each check paying for its own scan.
     ``None`` when sacct could not be run at all, which the caller reports
@@ -264,25 +264,25 @@ def sample_jobs(timeout: Optional[float]) -> Optional[List[Tuple[str, str, str]]
     return []
 
 
-def check_blob(out, sample: Optional[List[Tuple[str, str, str]]]) -> bool:
-    """Whether sacct is carrying jobstats ``JS1:`` blobs -- the optional fast path.
+def check_jobstats(out, sample: Optional[List[Tuple[str, str, str]]]) -> bool:
+    """Whether sacct is carrying jobstats ``JS1:`` summaries -- the optional fast path.
 
     Absent is not a failure: it costs the offline CPU view and the second oracle,
     and everything else comes from Prometheus regardless. Said plainly here because
     a site that could turn jobstats on may want to know it is missing out.
     """
     if sample is None:
-        _line(out, "blob", "%s could not query sacct for AdminComment" % WARN)
+        _line(out, "jobstats", "%s could not query sacct for AdminComment" % WARN)
         return False
     if not sample:
-        _line(out, "blob", "%s no finished jobs in the sample window to check" % WARN)
+        _line(out, "jobstats", "%s no finished jobs in the sample window to check" % WARN)
         return False
-    blobs = sum(1 for _jid, _tres, comment in sample if comment.startswith("JS1:"))
-    if blobs:
-        _line(out, "blob", "JS1: on %d of %d recent jobs -> offline --cpu view and a "
-                           "jobstats cross-check are available" % (blobs, len(sample)))
+    summaries = sum(1 for _jid, _tres, comment in sample if comment.startswith("JS1:"))
+    if summaries:
+        _line(out, "jobstats", "JS1: on %d of %d recent jobs -> offline --cpu view and a "
+                           "jobstats cross-check are available" % (summaries, len(sample)))
         return True
-    _line(out, "blob", "%s no JS1: blobs in AdminComment -- every metric comes from "
+    _line(out, "jobstats", "%s no JS1: summaries in AdminComment -- every metric comes from "
                        "Prometheus (no offline view)" % ABSENT)
     return False
 
@@ -518,7 +518,7 @@ def _report_coverage(out, client, timeout: Optional[float]) -> None:
         if widest and count * 10 < widest:
             _cont(out, "%s is thin (%d of %d): %s will read \"-\"%s"
                        % (family, count, widest, what,
-                          " -- the JS1: blob covers finished jobs"
+                          " -- the JS1: summary covers finished jobs"
                           if family == "cgroup" else ""))
 
 
@@ -829,7 +829,7 @@ def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
     notes = sys.stderr if (toml or init) else out
     check_slurm(notes, timeout)
     sample = sample_jobs(timeout)
-    check_blob(notes, sample)
+    check_jobstats(notes, sample)
     check_config(notes, config_path)
     client = check_prometheus(notes, cfg, timeout)
     if client is None:
@@ -1216,7 +1216,7 @@ def _emit_other_sources(out) -> None:
 # -------- slurm and jobstats: names only, not definable here
 #
 # These come from sacct rather than Prometheus -- Slurm's own accounting and the
-# jobstats blob -- so a `query = "..."` table cannot describe one. Shown because they
+# jobstats summary -- so a `query = "..."` table cannot describe one. Shown because they
 # are part of the mapping, and they are what 'jobscope probe --validate' compares
 # against. Adding to this set is a code change, not a config one.
 #

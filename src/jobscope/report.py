@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from . import metrics
-from .blob import GIB, blob_capacity, blob_detail, blob_metrics
 from .config import (
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
@@ -24,25 +23,12 @@ from .config import (
     Thresholds,
     parse_duration,
 )
+from .jobstats import GIB, jobstats_capacity, jobstats_detail, jobstats_metrics
 
 # A job running longer than this, and still on a Wasteful row, is the expensive
 # kind of waste: a short bad job costs little, whereas hours of idle hardware do
 # not come back. Its entry is highlighted. [defaults] long_running overrides it.
 LONG_RUNNING = parse_duration(DEFAULT_LONG_RUNNING)
-from .cpu import CgroupSpec, chosen_specs
-from .dcgm import (
-    ALL_SPECS,
-    DCGM_BLOB_HEADERS,
-    DCGM_HEADERS,
-    DESCRIPTIONS,
-    MODEL_KEY,
-    MetricSpec,
-    applicable_derived,
-    columns_for,
-    format_by_header,
-    format_number,
-    gpu_minor_key,
-)
 from .classifier import (
     CATEGORIES,
     NO_DATA,
@@ -52,6 +38,20 @@ from .classifier import (
     tier_criteria,
     tier_range,
     unceilinged,
+)
+from .cpu import CgroupSpec, chosen_specs
+from .dcgm import (
+    ALL_SPECS,
+    DCGM_HEADERS,
+    DCGM_JOBSTATS_HEADERS,
+    DESCRIPTIONS,
+    MODEL_KEY,
+    MetricSpec,
+    applicable_derived,
+    columns_for,
+    format_by_header,
+    format_number,
+    gpu_minor_key,
 )
 from .errors import JobscopeError
 from .running import Gpu, RunningJob, build_columns, job_sort_key
@@ -74,7 +74,7 @@ class Column:
 #   JOBID USER STATE NODE CPU% MEM% #GPU GPU% GMEM% SM_ACT% TENSOR% DRAM% POWER_W RUNTIME
 #
 # NODE is the node count (a name would truncate on a multi-node job and the row is
-# already per-job, not per-node); #GPU is the allocated GPU count. The blob group
+# already per-job, not per-node); #GPU is the allocated GPU count. The jobstats group
 # is shown by every view, since CPU% next to SM_ACT% is the comparison that tells
 # you whether a GPU job is actually CPU-bound -- previously no single view had both.
 # OCC% moved to the "all" group (dcgm.py's METRICS) -- --all-metrics only, not the
@@ -83,7 +83,7 @@ SUMMARY_COLUMNS: List[Column] = [
     Column("JOBID", "{:<12}", "id"),
     Column("USER", "{:<12}", "id"),
     Column("STATE", "{:<9}", "id"),
-    Column("NODE", "{:<5}", "blob"),
+    Column("NODE", "{:<5}", "jobstats"),
     Column("CPU%", "{:<6}", "cpu"),
     Column("MEM%", "{:<6}", "cpu"),
     Column("#GPU", "{:<5}", "gpu"),
@@ -100,16 +100,16 @@ SUMMARY_COLUMNS: List[Column] = [
 def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
     """:data:`SUMMARY_COLUMNS` with its DCGM block taken from ``specs``.
 
-    The identity and blob columns are fixed; only the profiling block varies, which
+    The identity and jobstats columns are fixed; only the profiling block varies, which
     is what lets `--all-metrics` widen the table without becoming a different view.
-    Blob-backed metrics are dropped from the block -- GPU% and the GMEM columns are
-    already rendered from the blob, and one number deserves one column.
+    jobstats-backed metrics are dropped from the block -- GPU% and the GMEM columns are
+    already rendered from the jobstats summary, and one number deserves one column.
     """
     if specs is None:
         return list(SUMMARY_COLUMNS)
     block = [Column(header, "{:<%d}" % max(7, len(header) + 1), "dcgm")
              for _key, header, _dec in columns_for(specs)
-             if header not in DCGM_BLOB_HEADERS]
+             if header not in DCGM_JOBSTATS_HEADERS]
     out = []
     for col in SUMMARY_COLUMNS:
         if col.group == "dcgm":
@@ -145,15 +145,15 @@ DETAIL_HEADER: Tuple[str, ...] = (
     "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W")
 
 SUMMARY_DESCRIPTIONS: List[Tuple[str, str, str]] = [
-    ("CPU%", "blob (cgroup CPU-seconds)",
+    ("CPU%", "summary (cgroup CPU-seconds)",
      "Average CPU-core utilization: 100 x CPU-seconds used / (elapsed x allocated cores). "
      "100% means every allocated core was busy for the whole job."),
-    ("MEM%", "blob (cgroup RSS)",
+    ("MEM%", "summary (cgroup RSS)",
      "Peak host (CPU) memory used / memory allocated, as a percent."),
-    ("GPU%", "blob (nvidia_gpu_duty_cycle)",
+    ("GPU%", "summary (nvidia_gpu_duty_cycle)",
      "GPU duty cycle averaged over the job's GPUs: fraction of time at least one kernel ran. "
      "Coarse: says the GPU was occupied in time, not how hard. Use SM_ACT%/OCC% (gpu view) for that."),
-    ("GMEM%", "blob (nvidia_gpu_memory_used)",
+    ("GMEM%", "summary (nvidia_gpu_memory_used)",
      "Peak GPU memory used / total, summed over the job's GPUs. A high-water mark, not a time-average."),
     ("SM_ACT%", "DCGM_FI_PROF_SM_ACTIVE (gpu view)",
      "Fraction of time at least one warp was resident on an SM, averaged across all SMs. Low while "
@@ -203,7 +203,7 @@ class RenderOptions:
     header: bool = True
     # Weight the mean by allocated resource-time (GPU-hours, core-hours) instead
     # of by GPU count. Valid only where each job's value already covers its whole
-    # runtime -- a finished job's blob, or running --avg. On an instantaneous
+    # runtime -- a finished job's summary, or running --avg. On an instantaneous
     # running snapshot every value is the same moment, so scaling one by two days
     # of elapsed time would claim that instant represents those two days.
     time_weighted: bool = False
@@ -431,14 +431,14 @@ def cols_for(columns: List[Column], view: str, dcgm: bool = False) -> List[Colum
     """The columns to show for the chosen view.
 
     ``all`` (the default) shows everything; ``--cpu`` and ``--gpu`` narrow it to one
-    resource. ``id``/``blob`` columns identify the row and appear in every view. The
+    resource. ``id``/``jobstats`` columns identify the row and appear in every view. The
     DCGM block needs Prometheus, so it belongs to the views that carry GPU columns.
     """
     gpu_views = ("all", "gpu")
     out = []
     for col in columns:
         group = col.group
-        if (group in ("id", "blob")
+        if (group in ("id", "jobstats")
                 or (group == "cpu" and view in ("all", "cpu"))
                 or (group == "gpu" and view in gpu_views)
                 or (group == "dcgm" and dcgm and view in gpu_views)):
@@ -494,14 +494,14 @@ def context_pairs(selection: Selection, desc: str,
     return pairs + source_pair(specs, host_specs=host_specs)
 
 
-def gpu_source_line(specs: Optional[List] = None, have_blob: bool = True,
+def gpu_source_line(specs: Optional[List] = None, have_jobstats: bool = True,
                     host_specs: Optional[List] = None) -> str:
     """Which source served which column, for the header block.
 
     The header already restates the window it actually scanned, so a report cannot
     claim a range it did not read; this is the same promise about *provenance*. It
     matters because the default GPU block is genuinely mixed -- GPU% and the memory
-    pair out of the jobstats blob, the activity columns out of dcgm-exporter -- and
+    pair out of the jobstats summary, the activity columns out of dcgm-exporter -- and
     a reader comparing two clusters, or two runs either side of a `--gpu-source`,
     has no other way to tell which numbers moved because the source did.
 
@@ -509,13 +509,13 @@ def gpu_source_line(specs: Optional[List] = None, have_blob: bool = True,
     :mod:`jobscope.extra_metric` refuses to substitute silently: a mixed set
     described as "dcgm" would be wrong about half its own columns.
 
-    ``have_blob=False`` for the running view, where the claim would otherwise be
-    false in the other direction: Slurm writes the blob at job *end*, so a running
+    ``have_jobstats=False`` for the running view, where the claim would otherwise be
+    false in the other direction: Slurm writes the jobstats summary at job *end*, so a running
     job's GPU% is measured by an exporter no matter what the preference says, and
-    naming the blob there would credit a source that had nothing to give.
+    naming the jobstats summary there would credit a source that had nothing to give.
 
     Covers the host columns as well, since CPU%/MEM% have the same choice between the
-    stored blob and an exporter and the reader has no more way to tell for those than
+    stored summary and an exporter and the reader has no more way to tell for those than
     for GPU%. Host columns first, matching the order they print in.
 
     States which source each column *resolved to*, not which one returned data -- a
@@ -524,15 +524,16 @@ def gpu_source_line(specs: Optional[List] = None, have_blob: bool = True,
     name, because "we queried an exporter this cluster does not run" is exactly the
     diagnostic a port needs, and the alternative hides it.
     """
-    from . import cpu, dcgm, source as source_module
+    from . import cpu, dcgm
+    from . import source as source_module
     if not specs and not host_specs:
         # --cpu with no host list either: nothing collected, so nothing to attribute.
         return ""
     per_source: Dict[str, List[str]] = {}
     for resolution, wanted in (
-            (cpu.RESOLVED if have_blob else source_module.resolve(
+            (cpu.RESOLVED if have_jobstats else source_module.resolve(
                 cpu.CANDIDATES, cpu.PREFERENCE), host_specs),
-            (dcgm.RESOLVED if have_blob else source_module.resolve(
+            (dcgm.RESOLVED if have_jobstats else source_module.resolve(
                 dcgm.METRICS, dcgm.PREFERENCE), specs)):
         if not wanted:
             continue
@@ -545,15 +546,15 @@ def gpu_source_line(specs: Optional[List] = None, have_blob: bool = True,
                       for name, columns in per_source.items())
 
 
-def source_pair(specs, have_blob: bool = True,
+def source_pair(specs, have_jobstats: bool = True,
                 host_specs: Optional[List] = None) -> List[Tuple[str, str]]:
     """The Source context line, or nothing when the view collected nothing."""
-    line = gpu_source_line(specs, have_blob, host_specs)
+    line = gpu_source_line(specs, have_jobstats, host_specs)
     return [("Source", line)] if line else []
 
 
 def extend_detail_row(row, per_gpu):
-    """Append the DCGM cells to a blob_detail row."""
+    """Append the DCGM cells to a jobstats_detail row."""
     values = per_gpu.get((row[0], str(row[1])), {})
     return tuple(row) + tuple(format_by_header(h, values.get(h)) for h in DCGM_HEADERS)
 
@@ -618,18 +619,18 @@ def _worst_slug(header: str) -> str:
     return metrics.label(header)
 
 
-# The four columns the stats blob carries, paired with the internal keys the
+# The four columns the stored summary carries, paired with the internal keys the
 # running totals are accumulated under. One pairing in one place, replacing three
 # zips over parallel literal tuples that had to stay in the same order.
-BLOB_KEYS: Tuple[Tuple[str, str], ...] = (
+JOBSTATS_KEYS: Tuple[Tuple[str, str], ...] = (
     ("cpu", "CPU%"), ("mem", "MEM%"), ("gpu", "GPU%"), ("gmem", "GMEM%"))
-BLOB_HEADERS: Tuple[str, ...] = tuple(header for _key, header in BLOB_KEYS)
+JOBSTATS_HEADERS: Tuple[str, ...] = tuple(header for _key, header in JOBSTATS_KEYS)
 
 
-def _blob_value(job_metrics, header: str) -> Optional[float]:
+def _jobstats_value(job_metrics, header: str) -> Optional[float]:
     """``header``'s value from a :class:`~jobscope.models.JobMetrics`, or None.
 
-    None both for a header the blob does not carry (a DCGM column) and for one it
+    None both for a header the jobstats summary does not carry (a DCGM column) and for one it
     carries without a measurement, which the caller treats the same way: look to
     Prometheus, then give up rather than invent a zero.
     """
@@ -783,7 +784,7 @@ class EfficiencyTally:
     def graded(self) -> int:
         """Jobs this metric measured -- the denominator behind its Worst row.
 
-        Differs per metric because coverage does: a finished job with no stored blob
+        Differs per metric because coverage does: a finished job with no stored summary
         has no GPU% but still has DCGM data, so SM_ACT% can cover more jobs than
         GPU% over the same selection.
         """
@@ -920,7 +921,7 @@ class SummaryRenderer:
         self.durations = set()      # distinct runtimes, likewise
         self.gpu_total = 0          # GPUs across the selection, for the Jobs footer
         self.unweighted = 0         # jobs left out of the weighting for want of a runtime
-        self.no_blob = 0            # jobs with no stored blob, excluded from every tally
+        self.no_jobstats = 0            # jobs with no stored summary, excluded from every tally
         # {jobid: ({header: wasted}, user, {headers it is red in})} for jobs red in
         # at least one graded
         # metric, which is what the combined rankings need: a share cannot be taken
@@ -1016,7 +1017,7 @@ class SummaryRenderer:
         """
         if record is None:
             return {"cpu": 0.0, "mem": 0.0, "gpu": 0.0, "gmem": 0.0}
-        cores, memory = blob_capacity(record.stats)
+        cores, memory = jobstats_capacity(record.stats)
         if not self.options.time_weighted:
             return {"cpu": float(cores), "mem": float(memory),
                     "gpu": float(gpus), "gmem": float(gpus)}
@@ -1131,12 +1132,12 @@ class SummaryRenderer:
             }
             gpus = record.gpus if record else 0
             weights = self._weights(record, gpus)
-            job_metrics = blob_metrics(record.stats if record else None, gpus)
+            job_metrics = jobstats_metrics(record.stats if record else None, gpus)
             if not job_metrics.by_header:
-                for col in BLOB_HEADERS:
+                for col in JOBSTATS_HEADERS:
                     row[col] = "-"
             else:
-                for key, col in BLOB_KEYS:
+                for key, col in JOBSTATS_KEYS:
                     value = job_metrics.value(col)
                     row[col] = "-" if value is None else str(value)
                     if value is not None:
@@ -1161,23 +1162,23 @@ class SummaryRenderer:
                         if weights["gpu"] and header in self.weightable:
                             self.weighted_dcgm[header][0] += value * weights["gpu"]
                             self.weighted_dcgm[header][1] += weights["gpu"]
-            # Every graded column at once, now that both the blob and the DCGM
+            # Every graded column at once, now that both the summary and the DCGM
             # values are in hand. Each tally knows which resource weights it.
-            # One value map for every graded metric, built once both the blob and
+            # One value map for every graded metric, built once both the jobstats summary and
             # the DCGM values are in hand, and shared by the tallies and the waste
             # bookkeeping so the two cannot disagree about what a job scored.
             if not job_metrics.by_header:
-                # No stored blob, so the job is only half measured: it has DCGM
+                # No stored summary, so the job is only half measured: it has DCGM
                 # numbers but no CPU%/MEM%/GPU%/GMEM%. Feeding it to the DCGM tallies
-                # alone made their denominators disagree with the blob ones -- 117
+                # alone made their denominators disagree with the jobstats summary ones -- 117
                 # against 88 on one partition -- and a job cannot be compared with
                 # the rest on a metric it has no value for. It stays in the listing,
                 # since it is a real job; it just does not vote.
-                self.no_blob += 1
+                self.no_jobstats += 1
             else:
                 values = {}
                 for header in self.tallies:
-                    value = _blob_value(job_metrics, header)
+                    value = _jobstats_value(job_metrics, header)
                     if value is None and header in self.dcgm_headers and do_dcgm:
                         value = dcgm_data.get(jid, ({}, {}))[0].get(header)
                     if value is not None:
@@ -1273,8 +1274,8 @@ class SummaryRenderer:
                 counts.append("gpus=%d" % self.gpu_total)
         if self.unweighted:
             counts.append("no-runtime=%d" % self.unweighted)
-        if self.no_blob:
-            counts.append("no-blob=%d" % self.no_blob)
+        if self.no_jobstats:
+            counts.append("no-jobstats=%d" % self.no_jobstats)
 
         def padded(label, cells):
             """A footer row padded to the header width, so the CSV stays rectangular.
@@ -1622,7 +1623,7 @@ class DetailRenderer:
 
     def _rows_for(self, jid: str, record: Optional[JobRecord],
                   dcgm_data: Dict[str, Tuple[dict, dict]]):
-        rows = blob_detail(record.stats if record else None)
+        rows = jobstats_detail(record.stats if record else None)
         if self.options.show_dcgm:
             per_gpu = dcgm_data.get(jid, ({}, {}))[1]
             rows = [extend_detail_row(r, per_gpu) for r in rows]
@@ -1721,7 +1722,7 @@ class DetailRenderer:
 def summarize(jobids: List[str], records: Dict[str, JobRecord],
               dcgm_data: Dict[str, Tuple[dict, dict]], context: List[Tuple[str, str]],
               options: RenderOptions, out=None) -> None:
-    """One row per job: blob metrics and, under --dcgm, the profiling columns."""
+    """One row per job: the stored metrics and, under --all-metrics, the profiling columns."""
     renderer = SummaryRenderer(context, options, out)
     renderer.add(jobids, records, dcgm_data)
     renderer.finish()
@@ -1940,7 +1941,8 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
                         out=None, level: str = "job", show_all: bool = False) -> None:
     """Group the units into efficiency categories, worst first.
 
-    The verdict for each is :func:`classify`; what this adds is the reading order. A partition sweep exists to be acted on
+    The verdict for each is :func:`classify`; what this adds is the reading order.
+    A partition sweep exists to be acted on
     from the top, and on a healthy one most jobs are fine -- so ``good`` collapses
     to a count unless ``show_all``, which is the difference between a page and a
     hundred of them.
@@ -2282,7 +2284,8 @@ def running_combined_timeseries(jobs: Dict[int, RunningJob],
 def describe(out=None) -> None:
     """Print a plain-English description of each summary column."""
     out = out or sys.stdout
-    print("jobscope columns. CPU/MEM/GPU/GMEM come from the sacct blob (no network);", file=out)
+    print("jobscope columns. CPU/MEM/GPU/GMEM come from the jobstats summary"
+          " in sacct (no network);", file=out)
     print("the DCGM columns (gpu view) come from Prometheus. For the full per-GPU", file=out)
     print("GPU catalog, run 'jobscope describe --metrics' (or --all-metrics for all %d).\n"
           % len(ALL_SPECS), file=out)

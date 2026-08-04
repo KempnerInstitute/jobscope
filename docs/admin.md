@@ -20,11 +20,11 @@ Users need none of this. The [README](../README.md) is the day-to-day guide, and
 ## What the cluster must provide
 
 - Python 3.9+
-- Slurm with `sacct`, where the jobstats-style AdminComment blob is populated
+- Slurm with `sacct`, where the jobstats-style AdminComment summary is populated
   (needed by every view).
 - A Prometheus endpoint serving the DCGM (`DCGM_FI_*`), `nvidia_gpu_*` and
   `cgroup_*` series that jobstats scrapes. Needed for the GPU columns, and for any
-  running job (whose blob does not exist yet). `finished --cpu` never contacts it.
+  running job (whose summary does not exist yet). `finished --cpu` never contacts it.
 
 `jobscope probe` checks every one of these against the live cluster, which is where to
 start rather than reading the list.
@@ -78,7 +78,7 @@ jobscope probe --metrics    # every metric this server carries for a real job
 `probe` reads nothing but your cluster, and apart from `--init` writes nothing. Each check
 fails independently -- so it is useful precisely when jobscope does *not* yet
 work. It reports which Slurm accounting sources are populated, whether jobstats
-blobs are being written, how far back Prometheus actually holds data, and whether
+summaries are being written, how far back Prometheus actually holds data, and whether
 the join labels are the ones the collectors assume.
 
 `--metrics` is the one to run before editing `[metrics]` or `[thresholds]`: it
@@ -114,15 +114,15 @@ divided by an allocation, and a count has none, so a percentage of total bytes w
 be a number with no meaning. And an unfamiliar GPU metric gets `scale = 1` with a
 `# CHECK` note, because a wrong scale reads as a plausible value.
 
-`jobscope --no-blob` is the other half of that: it reads CPU%/MEM%/GPU%/GMEM% from
-Prometheus even for finished jobs, instead of the blob Slurm stored. Slower -- the
-blob is one free sacct field where this is several range queries per job -- but it
+`jobscope --no-jobstats` is the other half of that: it reads CPU%/MEM%/GPU%/GMEM% from
+Prometheus even for finished jobs, instead of the jobstats summary Slurm stored. Slower -- the
+the summary is one free sacct field where this is several range queries per job -- but it
 is what a site without jobstats runs on, and it is how you check the two agree.
 Across 51 finished jobs spanning CPU-only, single-GPU, multi-GPU and multi-node
 shapes, they agree here to within one point (memory columns exactly).
 
 `--validate` puts one job's utilization side by side as each source measures it:
-Prometheus, the jobstats blob, and Slurm's own `jobacct_gather` /
+Prometheus, the jobstats summary, and Slurm's own `jobacct_gather` /
 `AccountingStorageTRES` accounting, which needs neither of the other two.
 
 Expect Slurm to read a little **higher**, and do not treat that as an error. Across

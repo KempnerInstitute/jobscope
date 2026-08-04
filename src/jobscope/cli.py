@@ -22,11 +22,9 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
-from . import __version__, config, plot, probe
+from . import __version__, config, plot, probe, report
 from .dcgm import DCGM_HEADERS
 from .errors import JobscopeError
-from .running import format_duration, parse_duration
-from . import report
 from .report import (
     DetailRenderer,
     RenderOptions,
@@ -36,8 +34,9 @@ from .report import (
     timeseries_classify,
     timeseries_stats,
 )
-from .slurm import DEFAULT_STATE, default_user
+from .running import format_duration, parse_duration
 from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
+from .slurm import DEFAULT_STATE, default_user
 
 MODES = (RUNNING, FINISHED)
 UTILITIES = ("plot", "describe", "config", "probe")
@@ -80,6 +79,10 @@ RETIRED = {
 RETIRED_FLAGS = {
     "--dcgm": "--all-metrics (or --gpu-source dcgm to pick the source)",
     "--ext": "--all-metrics",
+    # "blob" said only that the thing was opaque. It is jobstats' per-job summary,
+    # stored in sacct's AdminComment -- so the flag, the [gpu]/[host] source value and
+    # the module all say jobstats now. See source.RETIRED_SOURCES for the config side.
+    "--no-blob": "--no-jobstats",
 }
 
 
@@ -228,11 +231,11 @@ def build_parser():
                        help="GPU columns only")
     shape.add_argument("--gpu-source", "--gpu_source", dest="gpu_source", default=None,
                        metavar="SOURCE",
-                       help="where the GPU numbers come from: dcgm, nvml or blob, "
+                       help="where the GPU numbers come from: dcgm, nvml or summary, "
                             "comma-separated for an order (default from [gpu] source). "
                             "Each column takes its own best available source, so naming "
                             "one promotes it rather than dropping what it cannot serve. "
-                            "Naming it here also outranks the stored jobstats blob")
+                            "Naming it here also outranks the summary jobstats stored")
     shape.add_argument("--all-metrics", "--all_metrics", dest="all_metrics",
                        action="store_true",
                        help="every metric the chosen source publishes, not just the "
@@ -242,10 +245,14 @@ def build_parser():
     shape.add_argument("--avg", action="store_true",
                        help="running: fold each metric over the job's runtime, making the "
                             "values comparable to jobstats (default: the newest scrape)")
-    shape.add_argument("--no-blob", dest="no_blob", action="store_true",
+    shape.add_argument("--no-jobstats", "--no_jobstats", dest="no_jobstats",
+                       action="store_true",
                        help="read CPU%%/MEM%%/GPU%%/GMEM%% from Prometheus even for finished "
-                            "jobs, instead of the stored jobstats blob (slower; use to "
-                            "compare the two, or where jobstats is not deployed)")
+                            "jobs, instead of the summary jobstats stored in sacct's "
+                            "AdminComment (slower; use to compare the two, or where "
+                            "jobstats is not deployed)")
+    shape.add_argument("--no-blob", dest="no_blob", action=_Retired, nargs=0,
+                       help=argparse.SUPPRESS)
     shape.add_argument("--no-plot", dest="no_plot", action="store_true",
                        help="omit the efficiency-bars section (shown by default)")
 
@@ -320,7 +327,7 @@ def build_parser():
                          help="with --init, append every remaining knob, commented")
     p_probe.add_argument("--validate", nargs="?", const="", metavar="JOBID",
                           help="compare one job's utilization across Prometheus, the "
-                               "jobstats blob and Slurm's own accounting")
+                               "jobstats summary and Slurm's own accounting")
     p_probe.set_defaults(func=handle_probe)
 
     return parser, subparsers
@@ -600,7 +607,7 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
         state=args.state or cfg.defaults.state, user=user, all_users=args.all_users,
         account=args.account, partition=args.partition,
         min_elapsed=_min_elapsed(args, cfg), average=args.avg,
-        no_blob=getattr(args, "no_blob", False),
+        no_jobstats=getattr(args, "no_jobstats", False),
     )
 
 
@@ -815,7 +822,7 @@ def handle_report(args) -> None:
     # Which metrics each view collects, from [metrics] -- the built-in lists when a
     # site has not said otherwise. --per-gpu is the exception and keeps its fixed
     # four profiling columns: DETAIL_COLUMNS carries row indices that have to agree
-    # with the blob tuple and with DCGM_HEADERS' order, so its width is not free.
+    # with the summary tuple and with DCGM_HEADERS' order, so its width is not free.
     specs = list(cfg.metrics.extended if args.all_metrics else cfg.metrics.summary)
     # --ts's own view resolution: combined (GPU + CPU%/MEM% together) is the
     # default -- bare --ts behaves as --cpu --all-metrics --ts would. --cpu alone (no
@@ -830,7 +837,7 @@ def handle_report(args) -> None:
     ts_specs = specs if ts_cpu_only else list(
         cfg.metrics.extended if args.all_metrics else cfg.metrics.timeseries)
     # Weight the mean by resource-time wherever the values already span whole
-    # runtimes: a finished job's blob does, an explicit job ID's reconstruction
+    # runtimes: a finished job's summary does, an explicit job ID's reconstruction
     # does, and running --avg does. The bare running view is a snapshot of one
     # moment, which no amount of elapsed time makes representative.
     time_weighted = request.mode != RUNNING or request.average

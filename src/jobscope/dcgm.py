@@ -1,6 +1,6 @@
 """DCGM profiling metric catalog and the Prometheus join that populates it.
 
-These metrics are not in the sacct blob; they come from the same Prometheus that
+These metrics are not in the jobstats summary in sacct; they come from the same Prometheus that
 jobstats uses. Each value is the time-average (or max/delta) over the job's
 ``[start, end]`` window. GPUs are joined to the job by UUID via the
 ``nvidia_gpu_jobId`` companion series, because the DCGM ``gpu`` index and Slurm
@@ -148,7 +148,7 @@ METRICS: List[MetricSpec] = [
     MetricSpec("dec", "DEC%", "DCGM_FI_DEV_DEC_UTIL", 1, 0, "all"),
     # NVML GPU memory, the pair jobstats reports as "GPU memory usage per node -
     # maximum used/total". Peaked, not averaged, so it is comparable to jobstats.
-    # Named GMEM_* to match the blob-derived GMEM% of the summary and detail views:
+    # Named GMEM_* to match the jobstats-derived GMEM% of the summary and detail views:
     # a bare MEM% means HOST memory there, and reusing it for GPU memory both reads
     # as the wrong quantity and grades against the host threshold in plots.
     MetricSpec("mem", "GMEM_GB", "nvidia_gpu_memory_used_bytes", 1 / 1024 ** 3, 1, "default",
@@ -223,7 +223,7 @@ def values_by_key(specs: List[MetricSpec], by_header: Dict[str, float]
 # resolved view -- one winner per column under the active preference -- and that is
 # what has unique headers and what every consumer reads. See jobscope.source.
 PREFERENCE: Tuple[str, ...] = source.DEFAULT_PREFERENCE
-RESOLVED: source.Resolution = source.resolve(METRICS, PREFERENCE, source.BLOB_COLUMNS)
+RESOLVED: source.Resolution = source.resolve(METRICS, PREFERENCE, source.JOBSTATS_COLUMNS)
 
 SPEC_BY_HEADER: Dict[str, MetricSpec] = {spec.header: spec for spec in RESOLVED.specs}
 DEFAULT_SPECS: List[MetricSpec] = [s for s in RESOLVED.specs if s.group == "default"]
@@ -236,25 +236,25 @@ ALL_SPECS: List[MetricSpec] = list(RESOLVED.specs)
 _KEY_SPEC_COLUMNS = ("GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W")
 KEY_SPECS: List[MetricSpec] = [s for s in DEFAULT_SPECS if s.column in _KEY_SPEC_COLUMNS]
 
-# Quantities the sacct blob already supplies, which the summary and detail views
+# Quantities the jobstats summary in sacct already supplies, which the summary and detail views
 # render from it directly (GPU%, GMEM%, and GPU-MEM). Excluded from those views'
 # DCGM columns so a job does not get two columns for one number -- and for a
 # finished job they would be the very same number, see _prefer_stored.
 #
 # Derived from the resolution rather than written out, so that naming an exporter
-# ahead of the blob genuinely moves these: under the default preference this is
+# ahead of the jobstats summary genuinely moves these: under the default preference this is
 # exactly the ("duty", "mem", "memtot") it used to be spelled as.
-BLOB_BACKED_KEYS: Tuple[str, ...] = tuple(
-    s.key for s in RESOLVED.specs if s.column in RESOLVED.from_blob)
+JOBSTATS_BACKED_KEYS: Tuple[str, ...] = tuple(
+    s.key for s in RESOLVED.specs if s.column in RESOLVED.from_jobstats)
 GPU_SUMMARY_SPECS: List[MetricSpec] = [s for s in DEFAULT_SPECS
-                                       if s.column not in RESOLVED.from_blob]
+                                       if s.column not in RESOLVED.from_jobstats]
 DCGM_HEADERS: List[str] = [spec.header for spec in GPU_SUMMARY_SPECS]
 
 # The column headers those keys produce, including the derived GMEM%. Renderers use
-# this to keep a blob-backed quantity out of the profiling block.
-DCGM_BLOB_HEADERS: Tuple[str, ...] = tuple(
-    sorted(RESOLVED.from_blob, key=lambda h: [s.column for s in RESOLVED.specs].index(h))
-    + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(BLOB_BACKED_KEYS)])
+# this to keep a jobstats-backed quantity out of the profiling block.
+DCGM_JOBSTATS_HEADERS: Tuple[str, ...] = tuple(
+    sorted(RESOLVED.from_jobstats, key=lambda h: [s.column for s in RESOLVED.specs].index(h))
+    + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(JOBSTATS_BACKED_KEYS)])
 
 # Position in METRICS, so a resolved selection can be put back into catalog order.
 _CATALOG_ORDER: Dict[str, int] = {spec.key: i for i, spec in enumerate(METRICS)}
@@ -323,21 +323,21 @@ def _rebuild() -> None:
     the point of naming one.
     """
     global SPEC_BY_HEADER, ALL_SPECS, SPEC_ALIASES, METRIC_NAMES, _CATALOG_ORDER
-    global RESOLVED, DEFAULT_SPECS, KEY_SPECS, BLOB_BACKED_KEYS, GPU_SUMMARY_SPECS
-    global DCGM_HEADERS, DCGM_BLOB_HEADERS
-    RESOLVED = source.resolve(METRICS, PREFERENCE, source.BLOB_COLUMNS)
+    global RESOLVED, DEFAULT_SPECS, KEY_SPECS, JOBSTATS_BACKED_KEYS, GPU_SUMMARY_SPECS
+    global DCGM_HEADERS, DCGM_JOBSTATS_HEADERS
+    RESOLVED = source.resolve(METRICS, PREFERENCE, source.JOBSTATS_COLUMNS)
     order = [s.column for s in RESOLVED.specs]
     SPEC_BY_HEADER = {spec.header: spec for spec in RESOLVED.specs}
     ALL_SPECS = list(RESOLVED.specs)
     DEFAULT_SPECS = [s for s in RESOLVED.specs if s.group == "default"]
     KEY_SPECS = [s for s in DEFAULT_SPECS if s.column in _KEY_SPEC_COLUMNS]
-    BLOB_BACKED_KEYS = tuple(s.key for s in RESOLVED.specs
-                             if s.column in RESOLVED.from_blob)
-    GPU_SUMMARY_SPECS = [s for s in DEFAULT_SPECS if s.column not in RESOLVED.from_blob]
+    JOBSTATS_BACKED_KEYS = tuple(s.key for s in RESOLVED.specs
+                             if s.column in RESOLVED.from_jobstats)
+    GPU_SUMMARY_SPECS = [s for s in DEFAULT_SPECS if s.column not in RESOLVED.from_jobstats]
     DCGM_HEADERS = [spec.header for spec in GPU_SUMMARY_SPECS]
-    DCGM_BLOB_HEADERS = tuple(
-        sorted(RESOLVED.from_blob, key=order.index)
-        + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(BLOB_BACKED_KEYS)])
+    DCGM_JOBSTATS_HEADERS = tuple(
+        sorted(RESOLVED.from_jobstats, key=order.index)
+        + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(JOBSTATS_BACKED_KEYS)])
     SPEC_ALIASES = _alias_table()
     METRIC_NAMES = tuple(
         spec.header.lower()[:-1] if spec.header.endswith("%") else spec.key
@@ -427,7 +427,7 @@ def specs_named(names, running: bool = False) -> List[MetricSpec]:
     rely on to tell "default" from "extended".
 
     ``running`` drops metrics whose reducer is ``delta`` (ENERGY_kWh): the running view
-    synthesizes a jobstats-shaped blob and a counter difference has no meaning over
+    synthesizes a jobstats-shaped summary and a counter difference has no meaning over
     a window that has not finished. Unknown names are the caller's to validate --
     :func:`spec_named` returns None and this skips them.
 
@@ -449,7 +449,7 @@ DESCRIPTIONS: Dict[str, str] = {
     "GPU%": "NVML's duty cycle: the fraction of the run during which at least one kernel was "
             "executing on the GPU, the same number jobstats reports. Says the GPU was occupied "
             "in time, NOT how intensely: a 1-thread kernel and a full-GPU kernel both read ~100%. "
-            "For a finished job this comes from the stored blob, so every view agrees. NVML stops "
+            "For a finished job this comes from the stored summary, so every view agrees. NVML stops "
             "reporting it once MIG is enabled, so it is \"-\" on a MIG node.",
     "SM_ACT%": "Fraction of time at least one warp was resident on an SM, averaged across all "
                "SMs. Distinguishes 'one SM busy' from 'all SMs busy'; low while GPU% is high "
@@ -508,7 +508,7 @@ DESCRIPTIONS: Dict[str, str] = {
     "DEC%": "Mean hardware video-decoder (NVDEC) utilization. Usually 0 unless decoding video.",
     "GMEM_GB": "GPU framebuffer memory in use, in GiB, from the NVML exporter. Peaked rather than "
                "averaged, so it is jobstats' \"GPU memory usage per node - maximum used/total\". "
-               "For a finished job this comes from the stored blob, so every view agrees.",
+               "For a finished job this comes from the stored summary, so every view agrees.",
     "GMEM_TOTAL_GB": "Total framebuffer memory on the GPU, in GiB. Fetched only to derive GMEM%; on "
                      "a MIG instance this is the slice's share, not the physical card's.",
     "GMEM%": "GMEM_GB as a percent of that GPU's total memory, the per-GPU form of the summary "
@@ -787,27 +787,27 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
     return overall, per_gpu
 
 
-# Blob field -> the *column* it supersedes, and how a job-level figure is formed
-# from the per-GPU values. GMEM_GB sums because the blob's GMEM% is the ratio of
+# Summary field -> the *column* it supersedes, and how a job-level figure is formed
+# from the per-GPU values. GMEM_GB sums because the summary's GMEM% is the ratio of
 # summed used to summed total across the job's GPUs.
 #
 # By column rather than by metric key, because which key serves a column depends on
 # the source preference: keyed on "duty" this silently stopped applying the moment
 # dcgm became the preferred exporter for GPU%, since the resolved spec is then
 # `duty_dcgm`. The column is the stable identity -- and it is what
-# source.BLOB_COLUMNS states the blob can serve.
-# The blob field of each comes from source.BLOB_COLUMNS, which is the one statement
+# source.JOBSTATS_COLUMNS states the jobstats summary can serve.
+# The summary field of each comes from source.JOBSTATS_COLUMNS, which is the one statement
 # of what jobstats stored; only the aggregation is this view's business.
 _STORED_AGG: Dict[str, str] = {"GPU%": "mean", "GMEM_GB": "sum", "GMEM_TOTAL_GB": "sum"}
 _STORED_FIELDS: Tuple[Tuple[str, str, str], ...] = tuple(
     (field, column, _STORED_AGG[column])
-    for column, field in source.BLOB_COLUMNS.items())
+    for column, field in source.JOBSTATS_COLUMNS.items())
 
 
 def stored_per_gpu(record: JobRecord, field: str) -> Dict[Tuple[str, str], float]:
-    """One per-GPU map from the job's stored blob, keyed ``(node, minor)``.
+    """One per-GPU map from the job's stored summary, keyed ``(node, minor)``.
 
-    Empty when the job has no blob, which is every running job -- Slurm writes it
+    Empty when the job has no jobstats summary, which is every running job -- Slurm writes it
     at job end.
     """
     found: Dict[Tuple[str, str], float] = {}
@@ -821,17 +821,17 @@ def stored_per_gpu(record: JobRecord, field: str) -> Dict[Tuple[str, str], float
 
 
 def stored_utilization(record: JobRecord) -> Dict[Tuple[str, str], float]:
-    """Per-GPU utilization from the job's stored blob, keyed ``(node, minor)``."""
+    """Per-GPU utilization from the job's stored summary, keyed ``(node, minor)``."""
     return stored_per_gpu(record, "gpu_utilization")
 
 
 def _prefer_stored(record: JobRecord, specs: List[MetricSpec],
                    per_gpu: Dict[Tuple[str, str], dict],
                    overall: Dict[str, float]) -> None:
-    """Overwrite GPU% and GPU memory with the blob's values where it has them.
+    """Overwrite GPU% and GPU memory with the summary's values where it has them.
 
     These come from the same ``nvidia_gpu_*`` series under the same reducers, so
-    they measure the same thing -- but the blob is what jobstats computed at job
+    they measure the same thing -- but the jobstats summary is what jobstats computed at job
     end, while recomputing here has to reconstruct the window from sacct's Start
     and End. On a short job that boundary is worth several points (a 570s job at a
     60s scrape interval has ~10 samples, so one sample in or out moves the mean by
@@ -840,19 +840,19 @@ def _prefer_stored(record: JobRecord, specs: List[MetricSpec],
 
     Rather than tune the window to imitate an instant we cannot recover, defer to
     the stored value: a finished job then reports exactly what Slurm recorded, in
-    every view. Running jobs have no blob, so they keep the Prometheus value --
-    reconstructed by :mod:`jobscope.job_ave_stats` for the blob columns, so those agree
+    every view. Running jobs have no jobstats summary, so they keep the Prometheus value --
+    reconstructed by :mod:`jobscope.job_ave_stats` for the jobstats columns, so those agree
     with each other by construction.
 
-    Only for the columns the blob actually *wins*. Naming an exporter ahead of it --
-    ``--gpu-source dcgm`` -- takes those columns out of ``RESOLVED.from_blob``, and
+    Only for the columns the jobstats summary actually *wins*. Naming an exporter ahead of it --
+    ``--gpu-source dcgm`` -- takes those columns out of ``RESOLVED.from_jobstats``, and
     then the queried value is the answer and must not be overwritten by a stored one
     measured somewhere else. That is what makes the flag do what it says on a
     finished job rather than being quietly ignored.
     """
     by_column = {spec.column: spec for spec in specs}
     for field, column, agg in _STORED_FIELDS:
-        if column not in RESOLVED.from_blob:
+        if column not in RESOLVED.from_jobstats:
             continue
         spec = by_column.get(column)
         if spec is None:

@@ -733,7 +733,7 @@ class Metrics:
         # Deferred so config stays importable without dcgm (which reaches
         # prometheus, and so back to config) -- see _known_percent_headers.
         from . import cpu as cpu_module
-        from .dcgm import ALL_SPECS, BLOB_BACKED_KEYS, default_view, specs_named
+        from .dcgm import ALL_SPECS, JOBSTATS_BACKED_KEYS, default_view, specs_named
         # Per leading source, not one list for both: see dcgm.default_view. The
         # nvidia exporter publishes no profiling metrics, so leading with it must not
         # leave a summary asking for four columns it will render as "-".
@@ -743,17 +743,17 @@ class Metrics:
             host = "host_" + name
             if not getattr(self, host):
                 object.__setattr__(self, host, tuple(cpu_module.default_view(name)))
-        # The blob-backed metrics feed GPU% and GMEM%, which are *fixed* columns of
+        # The jobstats-backed metrics feed GPU% and GMEM%, which are *fixed* columns of
         # the summary and detail tables rather than part of the configurable
         # profiling block. A config that leaves them out is not asking for narrower
         # output, it is asking for two of its own columns to read "-" -- and only in
-        # the running view, where they come from Prometheus rather than the blob. So
+        # the running view, where they come from Prometheus rather than the jobstats summary. So
         # they are added back rather than obeyed. Not to `timeseries`: its CSV has no
         # fixed columns, so there a narrower list means exactly what it says.
         # Compared by column rather than by key: a list that named the other
         # provider of GPU% already has that column, and adding this one too would
         # print it twice from two exporters.
-        required = [spec for spec in ALL_SPECS if spec.key in BLOB_BACKED_KEYS]
+        required = [spec for spec in ALL_SPECS if spec.key in JOBSTATS_BACKED_KEYS]
         for name in ("summary", "extended"):
             listed = getattr(self, name)
             missing = [s for s in required if s.column not in {x.column for x in listed}]
@@ -845,7 +845,7 @@ class Config:
 class Gpu:
     """Where each GPU column's numbers come from.
 
-    ``source`` is a preference order over ``blob``, ``dcgm`` and ``nvml``, not a
+    ``source`` is a preference order over ``jobstats``, ``dcgm`` and ``nvml``, not a
     choice of one: every column resolves to its own best available provider, so
     naming dcgm cannot take away a column only the nvidia exporter publishes. See
     :mod:`jobscope.source` for the resolution, and why the default puts the free

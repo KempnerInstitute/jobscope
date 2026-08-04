@@ -25,11 +25,11 @@ Everything jobscope prints comes from one of two places.
 
 | | source | reached by | covers |
 |---|---|---|---|
-| **The blob** | `sacct` `AdminComment` | one bulk `sacct` call, no network | CPU%, MEM%, GPU%, GMEM% |
+| **The jobstats summary** | `sacct` `AdminComment` | one bulk `sacct` call, no network | CPU%, MEM%, GPU%, GMEM% |
 | **Prometheus** | DCGM + NVML exporters | HTTP query API | everything else, and all live data |
 
-**The blob** is what jobstats stores when a job *ends*: `JS1:` followed by
-base64-encoded gzipped JSON. Decoded (`jobscope/blob.py`) it holds, per node,
+**The jobstats summary** is what jobstats stores when a job *ends*: `JS1:` followed by
+base64-encoded gzipped JSON. Decoded (`jobscope/jobstats.py`) it holds, per node,
 `total_time` (CPU-seconds), `cpus`, `used_memory`, `total_memory`, and the per-GPU
 maps `gpu_utilization` / `gpu_used_memory` / `gpu_total_memory`, plus a top-level
 `total_time` (elapsed wall seconds).
@@ -52,9 +52,9 @@ The rule is one source of truth per number, chosen by job state:
 
 | job state | CPU% / MEM% / GPU% / GMEM% / GMEM_GB | other DCGM columns |
 |---|---|---|
-| finished, blob present | **the blob**, always | Prometheus |
-| finished, blob absent or `JS1:Short` | blank | Prometheus |
-| running | **Prometheus, shaped as a blob** (§5) | Prometheus |
+| finished, summary present | **the jobstats summary**, always | Prometheus |
+| finished, summary absent or `JS1:Short` | blank | Prometheus |
+| running | **Prometheus, shaped as a summary** (§5) | Prometheus |
 
 ### One column set, one renderer
 
@@ -74,7 +74,7 @@ cannot drift apart.
 `(jobids, records, dcgm_data)` chunks from either source, so no renderer knows
 which it got. Two details let the squeue side pass for the sacct side:
 
-- `running.running_records` synthesizes the blob Slurm has not written yet (§5), so a
+- `running.running_records` synthesizes the summary Slurm has not written yet (§5), so a
   running job looks like a record with stored stats.
 - `cpu.host_stats_many` batches the `cgroup_*` queries across every selected
   job -- four queries in total rather than four per job. Those series are per-job
@@ -96,14 +96,14 @@ node is the pooled figure; `CPU%` is already a per-node number repeated on each 
 so averaging returns it unchanged. `--nodename=NODE` narrows the rows to one node,
 in both views -- for `--ts` before the range queries are issued, so the skipped
 nodes are never fetched. `--ts` keys by UUID throughout, so it is the accurate view on a MIG node;
-`--per-gpu` keys by `(node, minor)` like the blob does, which MIG siblings share.
+`--per-gpu` keys by `(node, minor)` like the summary does, which MIG siblings share.
 
 `GMEM%` is derived (`GMEM_GB / GMEM_TOTAL_GB`) rather than queried, and
 `GMEM_TOTAL_GB` is fetched only to feed it, so it is not a column of its own. The
 summary and detail views omit `GPU%` and the `GMEM` columns from their *DCGM* set
-because they already render those from the blob -- one number, one column.
+because they already render those from the summary -- one number, one column.
 
-A finished job's utilization is never recomputed. That is deliberate: the blob is
+A finished job's utilization is never recomputed. That is deliberate: the summary is
 what Slurm recorded, so every view reports the same number, and re-deriving it
 would reintroduce the disagreement described in §6.
 
@@ -245,7 +245,7 @@ cannot be clipped (§2) and are bounded by the window alone.
 
 Two levels of averaging apply, and they answer different questions.
 
-**Within a job**, `GPU%` is the mean over the GPUs the blob reports for it, so a
+**Within a job**, `GPU%` is the mean over the GPUs the summary reports for it, so a
 4-GPU job with one idle card reads 75%. `GMEM%` instead divides summed used by
 summed total, which is capacity-weighted -- the difference only shows on cards of
 unequal size.
@@ -439,13 +439,13 @@ that metric's pooled grade. Colour is dropped for `--csv`, a non-tty and
 `$NO_COLOR`, and the plain output is the tinted output minus the escapes -- the
 final column is left unpadded so that stays exactly true.
 
-A job with **no stored blob** is excluded from every tally and counted as
-`no-blob=N`. Slurm writes the blob at job end, so without it a job has Prometheus
+A job with **no stored summary** is excluded from every tally and counted as
+`no-jobstats=N`. Slurm writes the summary at job end, so without it a job has Prometheus
 numbers but no `CPU%`/`MEM%`/`GPU%`/`GMEM%`; letting it vote in the DCGM tallies
 alone put 117 jobs behind `SM_ACT%` against 88 behind `GPU%` on one partition, and a
 job cannot be ranked against the rest on a metric it has no value for. It stays in
 the listing regardless -- it ran, and its DCGM numbers are shown on its own row.
-Note this is a *missing* blob, not a CPU-only one: a CPU-only job's blob exists and
+Note this is a *missing* summary, not a CPU-only one: a CPU-only job's summary exists and
 simply carries no GPU data, so it still votes on `CPU%` and `MEM%`.
 
 The `Worst` rows name the top few jobs by resource-time **wasted**,
@@ -487,8 +487,8 @@ busy on `GPU%` and draws idle watts. Measured over one day on kempner_eng the tw
 did agree -- the four lowest-power jobs sat at 73-74 W with `GPU% 0` and
 `SM_ACT% 0.0`, and the top three of every ranking were the same jobs -- but power
 is not a restatement of them: r(POWER, GPU%) = 0.69 and r(POWER, SM_ACT%) = 0.64,
-against r(GPU%, SM_ACT%) = 0.76. It also covers 35 jobs the blob metrics miss (no
-stored blob), though those held only 0.6 of 349.2 GPU-hours.
+against r(GPU%, SM_ACT%) = 0.76. It also covers 35 jobs the jobstats metrics miss (no
+stored summary), though those held only 0.6 of 349.2 GPU-hours.
 
 `POWER_W` does get a stats-table row. "Used watts" has no meaning as a total, but the
 resource-time that drew *more* than the floor does, and that is what its `USED` counts
@@ -571,14 +571,14 @@ jobstats. `running --avg` applies the reductions above and does match.
 
 ---
 
-## 5. Reconstructing the blob for a running job
+## 5. Reconstructing the summary for a running job
 
-Slurm writes the blob at job end, so a running job has none and its utilization
+Slurm writes the summary at job end, so a running job has none and its utilization
 columns would be empty. `jobscope/job_ave_stats.py` rebuilds one from Prometheus, in
-the blob's own shape, so `blob_metrics` / `blob_detail` and therefore the summary
+the summary's own shape, so `jobstats_metrics` / `jobstats_detail` and therefore the summary
 and detail views, `--csv` and `plot` all work unchanged.
 
-| blob field | query | reducer |
+| summary field | query | reducer |
 |---|---|---|
 | `cpus` | `cgroup_cpus{jobid='<raw>',step='',task=''}` | max |
 | `total_time` (per node) | `cgroup_cpu_total_seconds{...}` | max |
@@ -594,8 +594,8 @@ Details that matter:
 - `step=''` / `task=''` select the job-level cgroup rather than a per-step one. An
   `=''` matcher also matches the label being absent, which is the case on
   exporters that do not emit it, so the matcher is safe either way.
-- Values are rounded to the precision the stored blob uses — byte counts to
-  integers, utilization to one decimal — because `blob_detail` renders utilization
+- Values are rounded to the precision the stored summary uses — byte counts to
+  integers, utilization to one decimal — because `jobstats_detail` renders utilization
   with `%g` and unrounded floats print as `93.1386%`.
 - Failure degrades to `{}`, i.e. the columns simply stay blank. If no Prometheus
   endpoint is configured at all, the views say so rather than printing dashes that
@@ -610,9 +610,9 @@ job's `GPU%` equals the mean of its `running --avg` values by construction.
 
 Worth understanding before trusting any recomputed utilization figure.
 
-`GPU%` from the blob and `GPU%` recomputed from Prometheus are the same metric
+`GPU%` from the summary and `GPU%` recomputed from Prometheus are the same metric
 under the same reducer, yet can differ by several points on a **short** job. The
-cause is the window boundary: the blob is what jobstats computed at job end, while
+cause is the window boundary: the summary is what jobstats computed at job end, while
 a recomputation has to reconstruct the window from sacct's `Start` and `End`.
 
 Measured on a 570 s job with one GPU (60 s scrape interval, so ~10 samples):
@@ -620,7 +620,7 @@ Measured on a 570 s job with one GPU (60 s scrape interval, so ~10 samples):
 ```
 raw samples inside [start,end]:  100, 0, 94, 93, 89, 92, 79, 86, 86, 80
 mean of those                    79.9
-stored blob                      77.9
+stored summary                      77.9
 recomputed at sacct's End        72.5
 recomputed 30 s earlier          77.7
 ```
@@ -703,7 +703,7 @@ What follows:
   reports none.
 - **The historical views still collapse MIG rows.** `dcgm` and `detail` key per-GPU
   data by `(node, minor)`, which siblings share, so a four-instance job renders
-  three rows. The blob has the same limitation, since it is keyed by minor number.
+  three rows. The summary has the same limitation, since it is keyed by minor number.
   `--ts` is the accurate view for MIG.
 
 ---
@@ -749,7 +749,7 @@ paste into a ticket.
 ## 10. Known limits
 
 - Recomputed utilization is boundary-sensitive on short jobs (§6). The preference
-  order in §1 avoids it for finished jobs; there is no blob to prefer for running
+  order in §1 avoids it for finished jobs; there is no summary to prefer for running
   ones, where the window is `[start, now]` and the tail is still being written.
 - DCGM columns cannot be clipped to GPU ownership (§4), so on a GPU that changed
   hands mid-window they may include a neighbouring job's samples. `nvidia_*`

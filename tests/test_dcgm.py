@@ -5,13 +5,12 @@ import re
 
 import pytest
 
-from jobscope.blob import blob_metrics
 from jobscope.dcgm import (
     ALL_SPECS,
-    BLOB_BACKED_KEYS,
     DCGM_HEADERS,
     DEFAULT_SPECS,
     GPU_SUMMARY_SPECS,
+    JOBSTATS_BACKED_KEYS,
     KEY_SPECS,
     METRICS,
     MODEL_KEY,
@@ -19,7 +18,6 @@ from jobscope.dcgm import (
     SPEC_BY_HEADER,
     columns_for,
     compute_dcgm,
-    spec_named,
     dcgm_for_job,
     discover_gpus,
     format_by_header,
@@ -27,9 +25,11 @@ from jobscope.dcgm import (
     gpu_minor_key,
     group_key,
     grouped_window_query,
+    spec_named,
     stored_utilization,
     window_query,
 )
+from jobscope.jobstats import jobstats_metrics
 
 
 class FakeClient:
@@ -94,7 +94,7 @@ def test_catalog_shape():
     assert len(ALL_SPECS) == 30
     assert len(DEFAULT_SPECS) == 7          # 5 profiling + the GPU memory pair
     assert len(GPU_SUMMARY_SPECS) == 4
-    # The summary/detail DCGM columns exclude what the blob already supplies, so
+    # The summary/detail DCGM columns exclude what the jobstats summary already supplies, so
     # neither GPU% nor the GMEM columns appear twice in those views. OCC% moved to
     # the "all" group -- --all-metrics only -- so it is not part of the default set.
     assert DCGM_HEADERS == ["SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
@@ -114,7 +114,7 @@ def test_key_specs_is_the_curated_ts_default():
     assert [spec.header for spec in KEY_SPECS] == \
         ["GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
     assert set(KEY_SPECS) <= set(DEFAULT_SPECS)
-    assert all(spec.key not in BLOB_BACKED_KEYS for spec in GPU_SUMMARY_SPECS)
+    assert all(spec.key not in JOBSTATS_BACKED_KEYS for spec in GPU_SUMMARY_SPECS)
 
 
 def test_dcgm_and_live_columns_are_identical():
@@ -130,16 +130,16 @@ def test_hidden_total_memory_is_queried_but_not_a_column():
     assert "GMEM_TOTAL_GB" not in [h for _k, h, _d in columns_for(DEFAULT_SPECS)]
 
 
-def test_gpu_memory_comes_from_the_blob_for_a_finished_job(gpu_record):
+def test_gpu_memory_comes_from_the_jobstats_summary_for_a_finished_job(gpu_record):
     """As with GPU%, a stored value is never recomputed -- see _prefer_stored."""
     overall, per_gpu = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
-    # The blob holds 48 GiB used of 80 total on GPU 0, 32 of 80 on GPU 1.
+    # The summary holds 48 GiB used of 80 total on GPU 0, 32 of 80 on GPU 1.
     assert per_gpu[("node01", "0")]["GMEM_GB"] == 48.0
     assert per_gpu[("node01", "0")]["GMEM%"] == 60.0
     assert per_gpu[("node01", "1")]["GMEM%"] == 40.0
-    # Job-level GMEM% sums used over sums total, exactly as blob_metrics does.
+    # Job-level GMEM% sums used over sums total, exactly as jobstats_metrics does.
     assert overall["GMEM%"] == 50.0
-    assert overall["GMEM%"] == blob_metrics(gpu_record.stats, gpu_record.gpus).value("GMEM%")
+    assert overall["GMEM%"] == jobstats_metrics(gpu_record.stats, gpu_record.gpus).value("GMEM%")
 
 
 def test_format_value():
@@ -185,22 +185,22 @@ def test_dcgm_for_job_scales_and_aggregates(gpu_record):
     assert per_gpu[("node01", "1")]["POWER_W"] == 500.0
 
 
-def test_utilization_comes_from_the_blob_not_a_recomputation(gpu_record):
+def test_utilization_comes_from_the_jobstats_summary_not_a_recomputation(gpu_record):
     """A finished job must report the utilization Slurm stored, in every view.
 
     The fake client serves no duty samples at all, so this value can only have
-    come from the blob -- and it is the same number blob_metrics gives the summary
+    come from the jobstats summary -- and it is the same number jobstats_metrics gives the summary
     view, which is the point: the two cannot drift apart.
     """
     overall, per_gpu = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
-    assert per_gpu[("node01", "0")]["GPU%"] == 90.0   # the blob's own per-GPU values
+    assert per_gpu[("node01", "0")]["GPU%"] == 90.0   # the summary's own per-GPU values
     assert per_gpu[("node01", "1")]["GPU%"] == 50.0
     assert overall["GPU%"] == 70.0                   # mean(90, 50)
-    assert overall["GPU%"] == blob_metrics(gpu_record.stats, gpu_record.gpus).value("GPU%")
+    assert overall["GPU%"] == jobstats_metrics(gpu_record.stats, gpu_record.gpus).value("GPU%")
 
 
 def test_running_job_keeps_the_prometheus_utilization(gpu_record):
-    """With no blob there is nothing to defer to, so the query stands."""
+    """With no jobstats summary there is nothing to defer to, so the query stands."""
     running = dataclasses.replace(gpu_record, state="RUNNING", stats={})
     overall, per_gpu = dcgm_for_job(running, DEFAULT_SPECS, _client(), None)
     # _client() serves no duty samples, so the column is simply absent rather
@@ -213,7 +213,7 @@ def test_stored_utilization_is_keyed_by_node_and_minor_string(gpu_record):
     assert stored_utilization(gpu_record) == {("node01", "0"): 90.0, ("node01", "1"): 50.0}
 
 
-def test_stored_utilization_empty_without_a_blob(gpu_record):
+def test_stored_utilization_empty_without_a_summary(gpu_record):
     assert stored_utilization(dataclasses.replace(gpu_record, stats={})) == {}
 
 
@@ -268,8 +268,8 @@ def test_dcgm_for_job_no_uuids(gpu_record):
 def test_dcgm_for_job_metric_error_keeps_gpu(gpu_record):
     overall, per_gpu = dcgm_for_job(gpu_record, DEFAULT_SPECS, _DiscoveryOnlyClient(), None)
     # Every metric query fails, so nothing Prometheus-derived survives; the GPU row
-    # itself is kept, carrying only what the stored blob already knew.
-    # GPU% and the GMEM columns survive because the blob supplies them.
+    # itself is kept, carrying only what the stored summary already knew.
+    # GPU% and the GMEM columns survive because the jobstats summary supplies them.
     assert set(overall) == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "GMEM%"}
     assert set(per_gpu) == {("node01", "0")}
     assert set(per_gpu[("node01", "0")]) == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "GMEM%",
@@ -332,7 +332,7 @@ def test_specs_named_skips_unknown_names():
 
 def test_the_live_view_drops_counter_deltas():
     """ENERGY_kWh is a difference over a finished window; the running view builds a
-    blob from a window that has not finished, so the number would mean nothing."""
+    summary from a window that has not finished, so the number would mean nothing."""
     from jobscope.dcgm import specs_named
     assert [s.header for s in specs_named(["gpu", "energy"])] == ["GPU%", "ENERGY_kWh"]
     assert [s.header for s in specs_named(["gpu", "energy"], running=True)] == ["GPU%"]

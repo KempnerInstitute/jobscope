@@ -11,7 +11,7 @@ Layers, bottom up:
     config, metrics, classifier,   policy -- read settings, return decisions
       source
     prometheus                     the client
-    blob, cpu, nvml, dcgm,         collectors -- turn a source into numbers
+    summary, cpu, nvml, dcgm,         collectors -- turn a source into numbers
       slurm, running, timeseries,
       extra_metric, job_ave_stats
     report, plot                   render -- turn numbers into text
@@ -31,7 +31,7 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "jobscope"
 
 LEAVES = {"errors", "models"}
 POLICY = {"config", "metrics", "classifier", "source"}
-COLLECTORS = {"blob", "cpu", "nvml", "dcgm", "slurm", "running", "timeseries",
+COLLECTORS = {"jobstats", "cpu", "nvml", "dcgm", "slurm", "running", "timeseries",
               "extra_metric", "job_ave_stats"}
 RENDER = {"report", "plot"}
 
@@ -70,7 +70,7 @@ def test_no_collector_imports_the_render_layer(stem):
     """A collector that formats is a collector that cannot be reused.
 
     This is the rule live_blob.py broke: it existed to build a jobstats-shaped dict
-    purely so the blob renderers would accept it, which is why the shape of one
+    purely so the summary renderers would accept it, which is why the shape of one
     site's accounting blob became the whole package's data model.
     """
     assert not imports_of(stem) & RENDER

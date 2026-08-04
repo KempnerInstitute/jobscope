@@ -386,7 +386,7 @@ def test_an_unknown_metric_key_is_dropped_with_a_note(tmp_path, capsys):
     assert dict(cfg.thresholds.by_metric) == {"CPU%": {"wasteful": 5.0}}
 
 
-def test_the_blob_backed_metrics_are_known(tmp_path, capsys):
+def test_the_jobstats_summary_backed_metrics_are_known(tmp_path, capsys):
     """CPU% and MEM% are not in the DCGM catalog the validator is built from, and
     cpu is the single likeliest key a site sets."""
     path = tmp_path / "c.toml"
@@ -460,7 +460,7 @@ def test_extended_takes_all_or_a_list(tmp_path):
     path.write_text('[metrics]\nextended = "all"\n')
     assert len(load_config(str(path)).metrics.extended) == len(ALL_SPECS)
     path.write_text('[metrics]\nextended = ["gpu", "temp"]\n')
-    # The blob-backed trio is added back (see below), so TEMP_C is what to check.
+    # The jobstats-backed trio is added back (see below), so TEMP_C is what to check.
     assert "TEMP_C" in [s.header for s in load_config(str(path)).metrics.extended]
 
 
@@ -473,7 +473,7 @@ def test_an_unnamed_view_keeps_its_built_in_list(tmp_path):
     assert [s.header for s in cfg.metrics.timeseries] != [s.header for s in KEY_SPECS]
 
 
-def test_the_blob_backed_metrics_cannot_be_dropped_from_the_summary(tmp_path):
+def test_the_jobstats_summary_backed_metrics_cannot_be_dropped_from_the_summary(tmp_path):
     """GPU% and GMEM% are fixed columns of the summary and detail tables, not part
     of the configurable profiling block, and in the *running* view they come from
     Prometheus. Omitting them does not narrow the output, it blanks two columns --

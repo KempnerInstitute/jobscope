@@ -1,7 +1,7 @@
-"""Decode and summarize the utilization blob Slurm stores in sacct AdminComment.
+"""Decode and summarize the utilization summary Slurm stores in sacct AdminComment.
 
 jobstats serializes per-job resource usage into the AdminComment field as
-``JS1:<base64 gzip JSON>``. jobscope decodes exactly that blob, so for completed
+``JS1:<base64 gzip JSON>``. jobscope decodes exactly that summary, so for completed
 jobs its CPU/MEM/GPU/GMEM numbers match jobstats. The JSON carries, per node,
 ``total_time`` (cpu-seconds), ``cpus``, ``used_memory``, ``total_memory`` and the
 per-GPU ``gpu_utilization`` / ``gpu_used_memory`` / ``gpu_total_memory`` maps,
@@ -19,13 +19,13 @@ from .models import JobMetrics, Measure
 GIB = 1024 ** 3
 
 # What a JobMetrics from here is labelled with, so a mixed report can say which
-# column came from where -- the blob and Prometheus do not always agree.
-SOURCE = "blob"
+# column came from where -- jobstats and Prometheus do not always agree.
+SOURCE = "jobstats"
 
 DetailRow = Tuple[str, str, str, str, str, str, str]
 
 # The precision each field is stored at. jobstats writes byte counts as integers and
-# utilization to one decimal, and :func:`blob_detail` renders utilization with %g on
+# utilization to one decimal, and :func:`jobstats_detail` renders utilization with %g on
 # that assumption -- so a figure reconstructed from Prometheus is rounded here to the
 # same precision, or a synthesized row prints "93.1386%" beside stored rows printing
 # "93.1". Reconstruction lives in :mod:`jobscope.job_ave_stats`; the precision lives
@@ -35,13 +35,13 @@ _ROUNDING = {"cpus": 0, "total_time": 1, "used_memory": 0, "total_memory": 0,
 
 
 def store_as(field: str, value: float):
-    """Round ``value`` to the precision the stored blob uses for ``field``."""
+    """Round ``value`` to the precision the stored summary uses for ``field``."""
     decimals = _ROUNDING.get(field, 1)
     return int(round(value)) if decimals == 0 else round(value, decimals)
 
 
 def decode_admin_comment(admin_comment) -> dict:
-    """Return the decoded jobstats JSON, or {} when the blob is absent/short/bad."""
+    """Return the decoded jobstats JSON, or {} when the jobstats summary is absent/short/bad."""
     text = str(admin_comment)
     if not admin_comment or text in ("JS1:Short", "JS1:None") or not text.startswith("JS1:"):
         return {}
@@ -62,14 +62,14 @@ def bytes_to_gb(num_bytes: float) -> str:
     return "{:.1f}".format(num_bytes / GIB).rstrip("0").rstrip(".") + "GB"
 
 
-def blob_capacity(stats: dict) -> Tuple[int, int]:
+def jobstats_capacity(stats: dict) -> Tuple[int, int]:
     """Allocated ``(cores, memory_bytes)`` summed over a job's nodes.
 
     The *size* of the allocation, independent of how much of it was used. Paired
     with elapsed time this gives the core-hours and GB-hours a job was charged,
     which is what weights a utilization average by how much hardware it held and
     for how long -- see :meth:`jobscope.report.SummaryRenderer.finish`. Returns
-    zeros for an empty blob, so a caller that multiplies by them contributes
+    zeros for an empty summary, so a caller that multiplies by them contributes
     nothing rather than crashing.
     """
     if not stats or "nodes" not in stats:
@@ -91,7 +91,7 @@ def narrow_stats(stats: dict, nodename: Optional[str] = None, gpu_ids=()) -> dic
     every figure downstream -- the row, the per-metric table, the bars, the verdict --
     follows without knowing a filter happened.
 
-    The arithmetic stays correct under narrowing because every figure in the blob is
+    The arithmetic stays correct under narrowing because every figure in the jobstats summary is
     per node or per GPU already: CPU% is one node's CPU-seconds over its own cores x
     elapsed, and GPU% is the mean over whichever cards remain. Nothing here is a
     whole-job total that a subset would misrepresent.
@@ -141,7 +141,7 @@ def nodes_in(stats: dict) -> set:
     return set((stats or {}).get("nodes", {}))
 
 
-def blob_metrics(stats: dict, gpus: Optional[int] = None) -> JobMetrics:
+def jobstats_metrics(stats: dict, gpus: Optional[int] = None) -> JobMetrics:
     """A job's overall CPU%/MEM%/GPU%/GMEM% from its stats dict.
 
     Matches jobstats' overall bars. Every absence is labelled rather than blanked,
@@ -149,7 +149,7 @@ def blob_metrics(stats: dict, gpus: Optional[int] = None) -> JobMetrics:
     answerable: without it a missing GPU reading could mean either "CPU-only job"
     or "the exporter was down", and those must not be the same value.
 
-    Two of these used to be ``else 0``. A blob carrying nodes but no core count
+    Two of these used to be ``else 0``. A summary carrying nodes but no core count
     reported **CPU% 0**, indistinguishable from a genuinely idle job -- and worse
     than a bare absence, because a fabricated zero passes every "is it measured"
     guard downstream and lands in the summary averages as a real reading.
@@ -167,14 +167,14 @@ def blob_metrics(stats: dict, gpus: Optional[int] = None) -> JobMetrics:
         found["CPU%"] = Measure.reading(round(100 * cpu_time / (runtime * cpus)))
     else:
         found["CPU%"] = Measure.unmeasured(
-            "the stored blob has no %s" % ("elapsed time" if not runtime else "core count"))
+            "the stored summary has no %s" % ("elapsed time" if not runtime else "core count"))
 
     used_mem = sum(n.get("used_memory", 0) for n in nodes)
     total_mem = sum(n.get("total_memory", 0) for n in nodes)
     if total_mem:
         found["MEM%"] = Measure.reading(round(100 * used_mem / total_mem))
     else:
-        found["MEM%"] = Measure.unmeasured("the stored blob has no memory allocation")
+        found["MEM%"] = Measure.unmeasured("the stored summary has no memory allocation")
 
     utils = [v for n in nodes for v in n.get("gpu_utilization", {}).values()]
     gpu_used = sum(v for n in nodes for v in n.get("gpu_used_memory", {}).values())
@@ -187,7 +187,7 @@ def blob_metrics(stats: dict, gpus: Optional[int] = None) -> JobMetrics:
         found["GPU%"], found["GMEM%"] = absent, absent
         return JobMetrics(found, source=SOURCE)
 
-    no_gpu_data = Measure.unmeasured("no GPU samples in the stored blob")
+    no_gpu_data = Measure.unmeasured("no GPU samples in the stored summary")
     found["GPU%"] = (Measure.reading(round(sum(utils) / len(utils)))
                      if utils else no_gpu_data)
     found["GMEM%"] = (Measure.reading(round(100 * gpu_used / gpu_total))
@@ -195,7 +195,7 @@ def blob_metrics(stats: dict, gpus: Optional[int] = None) -> JobMetrics:
     return JobMetrics(found, source=SOURCE)
 
 
-def blob_detail(stats: dict) -> List[DetailRow]:
+def jobstats_detail(stats: dict) -> List[DetailRow]:
     """Per-node / per-GPU rows matching jobstats' Detailed Utilization layout.
 
     Each row is ``(node, gpu, cpu%, cpu-mem, gpu%, gpu-mem, gmem%)``.

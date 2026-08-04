@@ -119,7 +119,7 @@ class UnitFilter:
 def cgroup_hosts(nodes: dict, nodename: Optional[str]):
     """``(divisors, row hosts)`` for a cgroup series over ``nodes``.
 
-    ``divisors`` is the per-node blob dict itself -- each spec names the field that
+    ``divisors`` is the per-node summary dict itself -- each spec names the field that
     divides it -- and the row set is the hosts that resolved a *core* count. That
     second part is deliberate and unchanged: it is also the "did anything resolve"
     guard, so a node reporting memory but no cores yields no rows, exactly as it did
@@ -184,12 +184,12 @@ def _apply_derived(specs: List[MetricSpec], series: Dict[str, Dict[int, dict]]) 
 
 def _divisors(record: JobRecord, client: PrometheusClient,
               timeout: Optional[float]) -> dict:
-    """A finished job's per-node cpus/total_memory, from its blob or from Prometheus.
+    """A finished job's per-node cpus/total_memory, from its jobstats summary or from Prometheus.
 
-    A record here is usually a finished job with its blob already decoded, but an
+    A record here is usually a finished job with its jobstats summary already decoded, but an
     explicit ``-j ID`` can also return a job that is still RUNNING and has none yet --
     rebuild just the divisors, the same way job_ave_stats.synthesize_stats() rebuilds
-    the whole blob for the running view. The CPU-seconds and RSS themselves still come
+    the whole summary for the running view. The CPU-seconds and RSS themselves still come
     from the range query, which this does not give at per-timestamp granularity.
     """
     nodes = (record.stats or {}).get("nodes") if record else None

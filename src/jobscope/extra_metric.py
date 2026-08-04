@@ -1,6 +1,6 @@
 """What Slurm's own accounting knows about a job -- an independent cross-check.
 
-jobscope reads utilization from Prometheus, and optionally from the jobstats blob.
+jobscope reads utilization from Prometheus, and optionally from the jobstats summary.
 Slurm is a third source that needs neither: ``jobacct_gather`` records CPU time and
 peak RSS for every job, and where ``AccountingStorageTRES`` includes
 ``gres/gpuutil`` it records GPU utilization too. Nothing here is required for a
@@ -299,13 +299,13 @@ def validate(out, jobid: str, client, timeout: Optional[float]) -> int:
     """Print one job's utilization as each available source measures it.
 
     Three sources, none of which is definitive: Prometheus (what jobscope will
-    report), the jobstats blob (what it reports today), and Slurm's own accounting.
+    report), the jobstats summary (what it reports today), and Slurm's own accounting.
     Where they disagree the point is to *see* the disagreement -- they measure
     subtly different things, and a gap is a fact about the instrumentation rather
     than a bug to be averaged away.
     """
-    from .blob import blob_metrics
     from .job_ave_stats import synthesize_stats
+    from .jobstats import jobstats_metrics
     from .slurm import fetch
 
     records = fetch([jobid], timeout)
@@ -313,13 +313,13 @@ def validate(out, jobid: str, client, timeout: Optional[float]) -> int:
     if record is None:
         raise JobscopeError("no such job: %s" % jobid)
 
-    stored = blob_metrics(record.stats)
-    fresh = blob_metrics(synthesize_stats(record, client, timeout)) if client else None
+    stored = jobstats_metrics(record.stats)
+    fresh = jobstats_metrics(synthesize_stats(record, client, timeout)) if client else None
     slurm = for_job(record.jobid, timeout)
 
     print("\njob %s  %s  %d GPU(s)  ran %s"
           % (record.jobid, record.state, record.gpus, record.runtime), file=out)
-    print("  prometheus = queried now over the job's window;  blob = what sacct stored;"
+    print("  prometheus = queried now over the job's window;  jobstats = what sacct stored;"
           "\n  slurm      = jobacct_gather + AccountingStorageTRES, independent of both",
           file=out)
 
@@ -336,10 +336,10 @@ def validate(out, jobid: str, client, timeout: Optional[float]) -> int:
         ("GMEM%", fresh[3] if fresh else None, stored[3] if stored else None, None),
     )
     print("\n  %-7s %10s %10s %10s   %s"
-          % ("metric", "prometheus", "blob", "slurm", "prom vs slurm"), file=out)
-    for name, prom, blob, sl in rows:
+          % ("metric", "prometheus", "jobstats", "slurm", "prom vs slurm"), file=out)
+    for name, prom, summary, sl in rows:
         print("  %-7s %10s %10s %10s   %s"
-              % (name, _pct(prom), _pct(blob), _pct(sl), _delta(prom, sl)), file=out)
+              % (name, _pct(prom), _pct(summary), _pct(sl), _delta(prom, sl)), file=out)
 
     if slurm:
         print("\n  slurm detail: TotalCPU %s of CPUTime %s"

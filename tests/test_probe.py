@@ -183,24 +183,24 @@ def test_recent_gpu_job_is_none_when_the_sample_has_no_gpu_jobs():
     assert probe._recent_gpu_job(None) is None
 
 
-def test_check_blob_counts_the_blobs_present():
+def test_check_jobstats_counts_the_summaries_present():
     out = io.StringIO()
-    assert probe.check_blob(out, SAMPLE) is True
+    assert probe.check_jobstats(out, SAMPLE) is True
     assert "2 of 3" in out.getvalue()
 
 
-def test_check_blob_says_so_when_a_site_has_no_jobstats():
+def test_check_jobstats_says_so_when_a_site_has_none():
     """Not a failure -- it costs the offline view and one oracle, nothing else."""
     out = io.StringIO()
-    assert probe.check_blob(out, [("101", "cpu=8", "")]) is False
+    assert probe.check_jobstats(out, [("101", "cpu=8", "")]) is False
     text = out.getvalue()
     assert probe.ABSENT in text and "Prometheus" in text
 
 
-def test_check_blob_distinguishes_sacct_failing_from_a_quiet_cluster():
+def test_check_jobstats_distinguishes_sacct_failing_from_a_quiet_cluster():
     unavailable, quiet = io.StringIO(), io.StringIO()
-    probe.check_blob(unavailable, None)
-    probe.check_blob(quiet, [])
+    probe.check_jobstats(unavailable, None)
+    probe.check_jobstats(quiet, [])
     assert "could not query sacct" in unavailable.getvalue()
     assert "no finished jobs" in quiet.getvalue()
 

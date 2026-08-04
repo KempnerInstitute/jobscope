@@ -15,7 +15,7 @@ builder that consumes it.
 from typing import Dict, Optional, Tuple
 
 from . import config
-from .blob import store_as
+from .jobstats import store_as
 from .prometheus import PrometheusClient, query_value
 
 # Per-GPU fields, keyed by minor_number as a string. Utilization is a mean and memory
@@ -44,9 +44,9 @@ def per_gpu_stats(raw_jobid: str, duration: int, at, client: PrometheusClient,
                   timeout: Optional[float] = None) -> Dict[str, dict]:
     """``{node: {field: {minor: value}}}`` reduced over the job's runtime.
 
-    Keyed by minor number because that is what the stored blob uses. MIG instances
+    Keyed by minor number because that is what the stored summary uses. MIG instances
     share one, so a partitioned card collapses to a single entry -- the same
-    limitation jobstats' blob has. The running view keys by UUID and does not.
+    limitation jobstats' summary has. The running view keys by UUID and does not.
     """
     nodes: Dict[str, dict] = {}
     for field, metric, reducer in FIELDS:
