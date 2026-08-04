@@ -76,6 +76,11 @@ RETIRED = {
 # (--gpu-source dcgm) and cannot also mean "the whole catalog": leaving it accepted
 # would have made an existing flag quietly mean something else, which is worse than
 # an error.
+#
+# The table is meant to be temporary: drop it whole at the next minor version bump, by
+# when "unrecognized arguments" is the right answer because the spellings will have been
+# gone for a release. The reason to drop it is help and API surface, not cost -- each
+# entry measures ~3.5us against a startup dominated by importing requests.
 RETIRED_FLAGS = {
     "--dcgm": "--all-metrics (or --gpu-source dcgm to pick the source)",
     "--ext": "--all-metrics",
@@ -87,26 +92,28 @@ RETIRED_FLAGS = {
     "--stats-per-node": "--stats node",
     "--stats-per-job": "--stats job",
     "--all-categories": "--eff all",
-    # Named for the mechanism rather than the question. See config.py's [classify]
-    # note for the same rename on the config side, which matters more: a stale
-    # section there is silently ignored, where a stale flag here errors.
+    # Named for the mechanism rather than the question. config.LEGACY_SECTIONS carries
+    # the same rename on the config side, where it matters more -- a stale section is
+    # ignored, where a stale flag here errors.
     "--classify": "--eff",
 }
 
-# These seven exist only to name their replacement, and they are not free forever: each is
-# an argparse action the parser builds on every invocation, and the list only grows.
-# Drop the whole table at the next minor version bump -- by then "unrecognized arguments"
-# is the right answer, because the spellings will have been gone for a release.
-RETIRED_FLAGS_DROP_AT = "the next minor release"
+# Not a real destination. Every retired spelling shares one, so a dead flag can never
+# occupy the dest of a live one: `--classify` would otherwise land on `classify`, the
+# exact name --eff replaced, and leave args.classify readable as None -- turning a
+# missed call site from an AttributeError into a silent no-op.
+_RETIRED_DEST = "_retired"
 
 
 class _Retired(argparse.Action):
     """Fail with the replacement named, the way :data:`RETIRED` does for subcommands."""
 
     def __call__(self, parser, namespace, values, option_string=None):
+        # Indexed, not .get(): every spelling registered with this action is a key, and
+        # a default would answer a future entry with an unrelated replacement.
         raise JobscopeError(
             "%s is no longer a flag; use %s"
-            % (option_string, RETIRED_FLAGS.get(option_string, "--all-metrics")))
+            % (option_string, RETIRED_FLAGS[option_string]))
 
 # Flags that select a past window; their presence means sacct rather than squeue.
 _WINDOW_FLAGS = ("-D", "--days", "-N", "--lastn", "-S", "--starttime",
@@ -231,7 +238,7 @@ def build_parser():
     # Folded into the two flags above, or renamed. Defined rather than deleted so the
     # message names the replacement; see RETIRED_FLAGS.
     for old in ("--stats-per-node", "--stats-per-job", "--all-categories", "--classify"):
-        shape.add_argument(old, dest=old.strip("-").replace("-", "_"),
+        shape.add_argument(old, dest=_RETIRED_DEST,
                            action=_Retired, nargs=0, help=argparse.SUPPRESS)
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
@@ -257,7 +264,7 @@ def build_parser():
                        action="store_true",
                        help="every metric the chosen source publishes, not just the "
                             "default columns (clocks, temps, PCIe, NVLink, ...)")
-    shape.add_argument("--dcgm", "--ext", dest="dcgm", action=_Retired,
+    shape.add_argument("--dcgm", "--ext", dest=_RETIRED_DEST, action=_Retired,
                        nargs=0, help=argparse.SUPPRESS)
     shape.add_argument("--avg", action="store_true",
                        help="running: fold each metric over the job's runtime, making the "
@@ -268,7 +275,7 @@ def build_parser():
                             "jobs, instead of the summary jobstats stored in sacct's "
                             "AdminComment (slower; use to compare the two, or where "
                             "jobstats is not deployed)")
-    shape.add_argument("--no-blob", dest="no_blob", action=_Retired, nargs=0,
+    shape.add_argument("--no-blob", dest=_RETIRED_DEST, action=_Retired, nargs=0,
                        help=argparse.SUPPRESS)
     shape.add_argument("--no-plot", dest="no_plot", action="store_true",
                        help="omit the efficiency-bars section (shown by default)")
@@ -316,7 +323,7 @@ def build_parser():
     p_describe.add_argument("--all-metrics", dest="all_metrics",
                             action="store_true",
                             help="the full catalog (implies --metrics)")
-    p_describe.add_argument("--dcgm", "--ext", dest="dcgm", action=_Retired,
+    p_describe.add_argument("--dcgm", "--ext", dest=_RETIRED_DEST, action=_Retired,
                             nargs=0, help=argparse.SUPPRESS)
     p_describe.set_defaults(func=handle_describe)
 

@@ -334,37 +334,53 @@ def test_power_w_is_not_flagged_as_stale(tmp_path, capsys):
     assert "no longer apply" not in capsys.readouterr().err
 
 
-def test_a_config_still_using_the_old_classify_section_is_told(tmp_path, capsys):
-    """[classify] is [eff] now, and an unknown top-level section is ignored in
-    silence -- so without this note a site's floors would stop applying and its jobs
-    would be graded by the built-in rule with nothing on screen to say so. Worse than
-    the [thresholds] case above, because 'probe --init' wrote this section itself.
+@pytest.mark.parametrize("old,new", sorted(config_module.LEGACY_SECTIONS.items()))
+def test_a_renamed_section_is_named_not_silently_ignored(old, new, tmp_path, capsys):
+    """Parametrized over the table, so a future rename inherits this coverage instead
+    of needing its own test -- the property that makes RETIRED_FLAGS pay for itself.
 
-    The note has to be TRUE: the assertion on floor_of is what proves the old section
-    really is inert rather than the note being a reassuring no-op.
+    The note has to be TRUE, which is what the floor_of assertion is for: the old
+    section really is inert, rather than the note being a reassuring no-op.
     """
     path = tmp_path / "c.toml"
-    path.write_text('[classify.floor.power]\ndefault = 250\n'
-                    '[classify.ceiling]\ncpu = "average"\n')
+    path.write_text("[%s.floor.power]\ndefault = 250\n" % old)
     cfg = load_config(str(path))
     err = capsys.readouterr().err
-    assert "[classify] is now [eff]" in err
-    assert "NOT being applied" in err
+    assert "[%s] is now [%s]" % (old, new) in err
     assert cfg.thresholds.floor_of("POWER_W") == 100        # the built-in, not 250
-    assert cfg.thresholds.vote_ceiling("CPU%") == "inefficient"   # not "average"
 
 
-def test_the_new_eff_section_is_the_one_that_applies(tmp_path, capsys):
-    """The other half of the pair above: the same file under the new name works, and
-    says nothing. If this ever fails together with that one, the section is simply
-    broken rather than renamed."""
+def test_the_new_section_name_applies_and_says_nothing(tmp_path, capsys):
+    """The other half of the pair above. That [eff] resolves at all is pinned by the
+    [eff.floor]/[eff.ceiling] tests further down; what is only checked here is that
+    the supported spelling draws no note."""
     path = tmp_path / "c.toml"
-    path.write_text('[eff.floor.power]\ndefault = 250\n'
-                    '[eff.ceiling]\ncpu = "average"\n')
+    path.write_text("[eff.floor.power]\ndefault = 250\n")
+    assert load_config(str(path)).thresholds.floor_of("POWER_W") == 250
+    assert "is now" not in capsys.readouterr().err
+
+
+def test_an_unknown_section_is_named_rather_than_ignored(tmp_path, capsys):
+    """The hole the rename exposed: every inner table rejects a name it does not know,
+    while the top level took anything in silence -- so a typo'd [promtheus] cost a site
+    every setting under it with nothing on screen. A note, not an error: the section is
+    inert and the rest of the file still resolves."""
+    path = tmp_path / "c.toml"
+    path.write_text("[promtheus]\nurl = 'http://x'\n[defaults]\ndays = 3\n")
     cfg = load_config(str(path))
-    assert "[classify]" not in capsys.readouterr().err
-    assert cfg.thresholds.floor_of("POWER_W") == 250
-    assert cfg.thresholds.vote_ceiling("CPU%") == "average"
+    err = capsys.readouterr().err
+    assert "[promtheus] is not a section or key jobscope reads" in err
+    assert cfg.defaults.days == 3          # the rest of the file still applied
+
+
+def test_the_shipped_configs_draw_no_section_note(tmp_path, capsys):
+    """KNOWN_SECTIONS has to stay in step with what load_config reads, or the note
+    fires on a legitimate config -- the one way this check could be worse than the
+    silence it replaces. The example config is the broadest one we ship."""
+    path = tmp_path / "c.toml"
+    path.write_text(example_config_text())
+    load_config(str(path))
+    assert "is not a section" not in capsys.readouterr().err
 
 
 # --- rejecting a config that cannot mean what it says ------------------------

@@ -129,6 +129,22 @@ BAND_VIEWS = ("summary", "timeslice")
 LEGACY_THRESHOLD_KEYS = ("gpu", "gmem", "mem", "default", "red", "cpu",
                          "wasteful", "inefficient", "improvement", "average")
 
+# Every top-level name load_config consumes. Its purpose is the inverse of the tables
+# above: those name what *was* legal, this names what is, so that anything else can be
+# reported instead of ignored. Every inner table already rejects a name it does not know
+# ([eff] and [report] and [plot] all raise); the top level was the one surface where a
+# typo'd header meant the whole section silently did nothing.
+KNOWN_SECTIONS = frozenset({
+    "prometheus", "thresholds", "defaults", "metrics", "gpu", "host", "eff",
+    "colors", "site", "report", "plot",
+})
+
+# Renamed sections, old -> new. The counterpart of cli.RETIRED_FLAGS and
+# source.RETIRED_SOURCES for the one surface that had no validation to hang a rename
+# off: a section jobscope stopped reading takes its site's settings with it, and
+# `probe --init` wrote [classify.floor.power] into every config it generated.
+LEGACY_SECTIONS = {"classify": "eff"}
+
 # The colour each tier is painted, and the one role that is not a tier: an entry on
 # a Wasteful row whose job ran longer than [defaults] long_running. Two tiers
 # sharing a colour is the default, not a requirement -- a site wanting five distinct
@@ -520,8 +536,9 @@ def _eff(table: Mapping, power_w: float,
             "[eff.floor.%s]" % name, body, power_w)
             for name, body in floor_table.items()}
 
+    ceiling_table = table.get("ceiling") or {}
     ceilings = dict(DEFAULT_VOTE_CEILING)
-    for name, tier in (table.get("ceiling") or {}).items():
+    for name, tier in ceiling_table.items():
         if str(tier) not in TIER_NAMES:
             raise JobscopeError(
                 "[eff.ceiling] %s = %r is not a tier; the tiers are %s"
@@ -538,8 +555,34 @@ def _eff(table: Mapping, power_w: float,
     _check_eff_names("[eff] vote", resolved)
     _check_eff_names("[eff] floor", tuple(floors) if floor_table else None)
     _check_eff_names("[eff.ceiling]",
-                     tuple(metric_header(n) for n in (table.get("ceiling") or {})))
+                     tuple(metric_header(n) for n in ceiling_table))
     return resolved, floors, ceilings
+
+
+def _check_sections(data: Mapping) -> None:
+    """Report a top-level name jobscope does not read, renamed ones by their new name.
+
+    A note rather than an error, unlike every inner table's unknown-key check. The
+    asymmetry is deliberate: a section jobscope does not read is inert, and the rest of
+    the file still resolves, so raising would take a site's whole CLI down over one dead
+    paragraph. But silence is worse than either -- ``[promtheus]`` or a stale
+    ``[classify]`` costs a site every setting under it with nothing on screen to say so,
+    which is the same failure the ``[thresholds]`` note exists to prevent one level down.
+
+    "section or key" because a scalar written above the first header lands here too, and
+    telling someone to check a section they cannot find is a worse hint than none.
+    """
+    unknown = sorted(set(data) - KNOWN_SECTIONS)
+    for name in unknown:
+        replacement = LEGACY_SECTIONS.get(name)
+        if replacement:
+            print("note: [%s] is now [%s]; nothing under it is being applied. Rename "
+                  "the section (see jobscope config --example)." % (name, replacement),
+                  file=sys.stderr)
+        else:
+            print("note: [%s] is not a section or key jobscope reads, so it is being "
+                  "ignored. 'jobscope config --example' lists the sections."
+                  % name, file=sys.stderr)
 
 
 def _check_eff_names(where: str, headers: Optional[Tuple[str, ...]]) -> None:
@@ -915,6 +958,12 @@ def load_config(path: Optional[str] = None,
         chosen = default_config_path(env)
     data = _read_toml(chosen) if chosen.exists() else {}
 
+    # First, before any section's *contents* are validated: everything below can raise
+    # (a bad source name, a typo'd metric), and a file carrying a retired section
+    # usually carries a retired value too -- so a note deferred until after those
+    # checks is a note the one config that needs it never sees.
+    _check_sections(data)
+
     prom = data.get("prometheus") or {}
     thr = data.get("thresholds") or {}
     dfl = data.get("defaults") or {}
@@ -963,16 +1012,6 @@ def load_config(path: Optional[str] = None,
               " them). 'jobscope config' prints both."
               % (named[0], other, other,
                  "the [thresholds] edges" if edges else "the built-in edges"),
-              file=sys.stderr)
-    if "classify" in data:
-        # Same reason as the [thresholds] note above, and a worse failure without it:
-        # an unknown top-level section is silently ignored, so a site's floors and
-        # ceilings would quietly stop applying and its jobs would be graded by the
-        # built-in rule instead -- a changed verdict with nothing on screen to
-        # explain it. 'jobscope probe --init' wrote this section, so this is not a
-        # hypothetical config.
-        print("note: [classify] is now [eff]; its vote, floor and ceiling settings are"
-              " NOT being applied. Rename the section (see jobscope config --example).",
               file=sys.stderr)
     vote, floors, ceilings = _eff(data.get("eff") or {}, power_w, by_model)
     bands = {view: _band_table(thr.get(view) or {}, view, floors, vote, ceilings,
