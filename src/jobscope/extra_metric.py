@@ -323,17 +323,22 @@ def validate(out, jobid: str, client, timeout: Optional[float]) -> int:
           "\n  slurm      = jobacct_gather + AccountingStorageTRES, independent of both",
           file=out)
 
+    # By header, not by index. These read `fresh[0]`..`fresh[3]` until now, which is the
+    # positional (cpu, mem, gpu, gmem) contract JobMetrics replaced -- models.py names
+    # the three places that had to agree on it, and this was a fourth that was missed.
+    # `probe --validate` has raised "'JobMetrics' object is not subscriptable" ever since.
+    def pair(header):
+        return (fresh.value(header) if fresh else None,
+                stored.value(header) if stored else None)
+
     rows = (
-        ("CPU%", fresh[0] if fresh else None, stored[0] if stored else None,
-         slurm.cpu_pct if slurm else None),
-        ("MEM%", fresh[1] if fresh else None, stored[1] if stored else None,
-         slurm.mem_pct if slurm else None),
-        ("GPU%", fresh[2] if fresh else None, stored[2] if stored else None,
-         slurm.gpu_pct if slurm else None),
+        ("CPU%",) + pair("CPU%") + (slurm.cpu_pct if slurm else None,),
+        ("MEM%",) + pair("MEM%") + (slurm.mem_pct if slurm else None,),
+        ("GPU%",) + pair("GPU%") + (slurm.gpu_pct if slurm else None,),
         # No slurm column for GMEM%: gres/gpumem is bytes used, and Slurm never
         # records the card's capacity, so there is no denominator to make a
         # percentage from. The absolute figure is printed in the detail below.
-        ("GMEM%", fresh[3] if fresh else None, stored[3] if stored else None, None),
+        ("GMEM%",) + pair("GMEM%") + (None,),
     )
     print("\n  %-7s %10s %10s %10s   %s"
           % ("metric", "prometheus", "jobstats", "slurm", "prom vs slurm"), file=out)
