@@ -102,6 +102,80 @@ def test_select_jobs_skips_jobs_that_have_not_finished(monkeypatch):
     assert desc == "now-30days .. now, completed"
 
 
+def _rows(n, first=100):
+    """``n`` COMPLETED selection rows, the shape _query_ids parses."""
+    return "".join("%d|COMPLETED\n" % (first + i) for i in range(n))
+
+
+def test_an_ordinary_selection_draws_no_breadth_note(monkeypatch, capsys):
+    """The note is worth nothing if it fires on normal use. A busy GPU partition here
+    runs ~100 jobs a day, so the common case must stay silent."""
+    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: _rows(200))
+    ids, _ = select_jobs(Selection(user="alice", partition="kempner", days=1), None)
+    assert len(ids) == 200
+    assert capsys.readouterr().err == ""
+
+
+def test_a_broad_selection_is_named_before_the_batches_start(monkeypatch, capsys):
+    """Said at selection time, not fetch time: the count cannot be known any earlier,
+    and saying it early is what leaves room to abort before the batches run."""
+    monkeypatch.setattr(slurm, "run_capture",
+                        lambda *a, **k: _rows(slurm.LARGE_SELECTION))
+    # -a unsets user; the CLI rejects the two together, so do not model both.
+    ids, _ = select_jobs(Selection(user=None, all_users=True), None)
+    err = capsys.readouterr().err
+    assert len(ids) == slurm.LARGE_SELECTION
+    assert "%d jobs is a broad selection" % slurm.LARGE_SELECTION in err
+    assert "stay in memory" in err
+    # On the default 30-day window, so the flag that shortens it is worth naming.
+    assert "-D 1 for a single day" in err
+    # It advises, it does not cap: the ids all come back.
+    assert ids[0] == "100"
+
+
+def test_the_breadth_note_offers_only_narrowings_not_already_in_use(monkeypatch, capsys):
+    """Repeating a flag back to someone who just typed it reads as though it did not
+    take effect, so -p is not offered to a selection that already named one."""
+    monkeypatch.setattr(slurm, "run_capture",
+                        lambda *a, **k: _rows(slurm.LARGE_SELECTION))
+    select_jobs(Selection(user="alice", partition="kempner", days=1, lastn=None), None)
+    err = capsys.readouterr().err
+    assert "-p PARTITION" not in err        # already scoped to one
+    assert "-D 1" not in err                # already a one-day window
+    assert "-N to take only the newest N" in err   # the one thing left to suggest
+
+
+def test_the_breadth_note_offers_only_a_smaller_n_under_lastn(monkeypatch, capsys):
+    """Two traps here, both found by running it.
+
+    _query_lastn writes the span it walked back onto `selection`, so asking about the
+    window *after* the query offered a shorter one the user never chose -- the offers
+    are therefore taken before the queries run.
+
+    And under -N the count is pinned at exactly lastn, so a partition or a shorter
+    window would change which jobs come back, not how many. Only a smaller -N helps.
+    """
+    monkeypatch.setattr(slurm, "run_capture",
+                        lambda *a, **k: _rows(slurm.LARGE_SELECTION))
+    select_jobs(Selection(user="alice", lastn=slurm.LARGE_SELECTION), None)
+    err = capsys.readouterr().err
+    assert "a smaller -N" in err
+    assert "window" not in err and "-p PARTITION" not in err
+
+
+def test_the_breadth_note_does_not_respell_an_explicit_window(monkeypatch, capsys):
+    """Caught by running it: -S/-E was offered back to a selection that had just used
+    -S/-E. A window the user chose can still be too wide, so the advice stays -- but it
+    asks for a shorter one instead of naming the flags they typed."""
+    monkeypatch.setattr(slurm, "run_capture",
+                        lambda *a, **k: _rows(slurm.LARGE_SELECTION))
+    select_jobs(Selection(user=None, all_users=True, starttime="now-1hours",
+                          endtime="now"), None)
+    err = capsys.readouterr().err
+    assert "-S/-E" not in err and "-D 1" not in err
+    assert "a shorter window" in err
+
+
 def test_select_jobs_lastn(monkeypatch):
     monkeypatch.setattr(slurm, "run_capture",
                         lambda *a, **k: "100|COMPLETED\n101|COMPLETED\n")

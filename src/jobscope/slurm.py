@@ -91,6 +91,16 @@ JOBID_ARG_LIMIT = 16384
 JOBS_PER_CHUNK = 200
 NOTE_EVERY = 4096
 
+# When to say the selection is broad enough to be worth narrowing. There is no
+# job-count cap and this does not introduce one -- the run proceeds -- but past a few
+# thousand jobs the cost stops being invisible: records accumulate for the whole run
+# (~1 KB each, measured), so it is worth naming before the batches start rather than
+# after someone has waited. Chosen well above any real per-partition day (a busy GPU
+# partition here runs ~100 jobs/day) and well below a cluster-wide sweep, which returned
+# 315,702 jobs for a single day when this was measured -- so it fires on the selections
+# that are broad by accident, not on ordinary ones.
+LARGE_SELECTION = 5000
+
 
 @dataclass
 class Selection:
@@ -370,6 +380,11 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
     if selection.jobids:
         return list(selection.jobids), "%d job ID(s)" % len(selection.jobids)
 
+    # Snapshot the narrowings before the queries run: _query_lastn writes the span it
+    # walked back onto `selection`, so asking afterwards would offer a window the user
+    # never chose.
+    narrowings = _narrowings(selection)
+
     # Only when no window was named at all: with -S or -E given, the user has said
     # where to look and the day-walk would quietly ignore it.
     if selection.lastn is not None and not selection.starttime and not selection.endtime:
@@ -388,7 +403,54 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
         desc = format_window(start, end)
     if selection.state != "all":
         desc += ", %s" % selection.state
+    _note_if_broad(ids, narrowings)
     return ids, desc
+
+
+def _narrowings(selection: Selection) -> List[str]:
+    """The narrowings ``selection`` is not already using, worded for what it did ask.
+
+    Repeating a flag back to someone who just typed it reads as though it did not take
+    effect, so a selection that named a window is asked for a shorter one rather than
+    having -D/-S/-E spelled at it again.
+    """
+    if selection.lastn is not None:
+        # -N pins the count at exactly lastn, so neither a partition nor a shorter
+        # window reduces it -- those change which jobs come back, not how many.
+        return ["a smaller -N"]
+    offers = []
+    if not selection.partition:
+        offers.append("-p PARTITION")
+    if selection.days is None and not (selection.starttime or selection.endtime):
+        offers.append("-D 1 for a single day")     # still on the default 30-day window
+    elif (selection.days or 0) > 1 or selection.starttime or selection.endtime:
+        offers.append("a shorter window")          # -D 1 is already the floor
+    offers.append("-N to take only the newest N")
+    return offers
+
+
+def _note_if_broad(ids: List[str], narrowings: List[str]) -> None:
+    """Say when a selection is broad enough to be worth narrowing, and how.
+
+    Here rather than in :func:`fetch_chunks` so it lands *before* the batches start:
+    the count is only knowable after the selection query, so this is the earliest it
+    can be said, and saying it early is the whole point -- it leaves room to abort.
+    """
+    if len(ids) < LARGE_SELECTION:
+        return
+    # Opens on the count rather than repeating "N jobs selected", which the batching
+    # note on the very next line already says.
+    print("note: %d jobs is a broad selection -- all of them stay in memory until the"
+          " run ends, so this will be slow.%s"
+          % (len(ids), " Narrow it with %s." % _joined(narrowings) if narrowings else ""),
+          file=sys.stderr)
+
+
+def _joined(items: List[str]) -> str:
+    """``"a, b or c"`` -- for offering alternatives in a sentence."""
+    if len(items) < 2:
+        return "".join(items)
+    return "%s or %s" % (", ".join(items[:-1]), items[-1])
 
 
 def _parse_fetch_lines(out: str, records: Dict[str, JobRecord]) -> None:

@@ -60,6 +60,14 @@ version slow. The `Window` line reports how far back it went. For an explicit `-
 is not repeated; that also shows how `-S DATE` alone was widened to the whole
 calendar day.
 
+There is **no cap on how many jobs a selection may return**. Past a few thousand,
+jobscope says so on stderr and names the narrowings you are not already using — the
+run still proceeds, because a cap would silently answer a different question than the
+one you asked. The cost past that point is real: the per-job data is fetched in
+batches of 200, and every record stays in memory until the run ends (roughly 1 KB
+each, measured). A cluster-wide sweep with no `-p` and a wide window is the case to
+avoid — one day of *every* partition here selects over 300,000 jobs.
+
 **Filters**, every mode: `-p` partition, `-u` user, `-a` all users, `-A` account,
 `-t` how the job ended (`finished` only, see below), `--min-elapsed` runtime floor
 (`running` only, default 10m -- a job still loading data reads as idle;
