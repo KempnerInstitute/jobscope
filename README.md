@@ -141,14 +141,14 @@ Averages can hide whether a job used half a GPU throughout or all of a GPU for h
 the run. Time-series output keeps the per-scrape shape.
 
 ```bash
-jobscope -j 36788818_3 --ts --csv | jobscope plot
+jobscope -j 36788818_3 --ts | jobscope plot
 jobscope -j 36788818_3 --plot-ts
 jobscope -j 36788818_3 --plot-ts-overlay
 jobscope -j 36788818_3 --plot-ts 30m
-jobscope -j 36788818_3 --ts --csv | jobscope plot --compact
+jobscope -j 36788818_3 --ts | jobscope plot --compact
 ```
 
-`--ts --csv` writes one row per GPU per scrape. `jobscope plot` charts that stream.
+`--ts` writes one row per GPU per scrape, as CSV. `jobscope plot` charts that stream.
 `--plot-ts` does the same in one command, with one panel per metric. On multi-node
 jobs, add `--nodename` so GPU ids from different nodes do not merge.
 

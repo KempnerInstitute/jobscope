@@ -83,7 +83,17 @@ RETIRED_FLAGS = {
     # stored in sacct's AdminComment -- so the flag, the [gpu]/[host] source value and
     # the module all say jobstats now. See source.RETIRED_SOURCES for the config side.
     "--no-blob": "--no-jobstats",
+    # Three flags for one axis, folded into the flag's own value.
+    "--stats-per-node": "--stats node",
+    "--stats-per-job": "--stats job",
+    "--all-categories": "--classify all",
 }
+
+# These six exist only to name their replacement, and they are not free forever: each is
+# an argparse action the parser builds on every invocation, and the list only grows.
+# Drop the whole table at the next minor version bump -- by then "unrecognized arguments"
+# is the right answer, because the spellings will have been gone for a release.
+RETIRED_FLAGS_DROP_AT = "the next minor release"
 
 
 class _Retired(argparse.Action):
@@ -197,25 +207,28 @@ def build_parser():
                             "Watts are omitted (they cannot share an axis with "
                             "percentages) and each panel legends its own metrics")
     level = shape.add_mutually_exclusive_group()
-    level.add_argument("--stats", action="store_const", const="gpu", dest="stats",
+    # One flag for one axis. These were --stats/--stats-per-node/--stats-per-job, three
+    # spellings setting this same dest to three constants. `choices` also keeps the
+    # optional value from swallowing a JOBID: `--stats 12345` is an invalid choice rather
+    # than a window-style misreading, which is why this needs no _reclaim equivalent.
+    level.add_argument("--stats", nargs="?", const="gpu", default=None,
+                       choices=("gpu", "node", "job"), metavar="LEVEL",
                        help="--ts: summarize the series instead of writing it -- "
-                            "min/mean/max/last per GPU per metric, over the window")
-    level.add_argument("--stats-per-node", action="store_const",
-                       const="node", dest="stats",
-                       help="the same, pooled per node: one set of figures for the "
-                            "job's GPUs on each host")
-    level.add_argument("--stats-per-job", action="store_const",
-                       const="job", dest="stats",
-                       help="the same, pooled across every node and GPU the job held")
-    shape.add_argument("--classify", action="store_true",
+                            "min/mean/max/last per metric over the window, per GPU "
+                            "(default), or pooled per 'node', or across the whole job")
+    shape.add_argument("--classify", nargs="?", const=True, default=False,
+                       metavar="all",
                        help="--ts: group the jobs into efficiency categories -- "
                             "wasteful, inefficient, needs improvement, average, good "
                             "-- by each one's best metric. The cutoffs are per metric "
                             "and come from [thresholds.timeslice] in your config; each "
-                            "heading states the ones it used")
-    shape.add_argument("--all-categories", dest="all_categories",
-                       action="store_true",
-                       help="--classify: list the 'good' jobs too, instead of counting them")
+                            "heading states the ones it used. '--classify all' lists the "
+                            "'good' jobs too, instead of counting them")
+    # Folded into the two flags above. Defined rather than deleted so the message names
+    # the replacement; see RETIRED_FLAGS.
+    for old in ("--stats-per-node", "--stats-per-job", "--all-categories"):
+        shape.add_argument(old, dest=old.strip("-").replace("-", "_"),
+                           action=_Retired, nargs=0, help=argparse.SUPPRESS)
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
                        metavar="NODE",
                        help="report only this node -- narrows any view, including "
@@ -223,20 +236,20 @@ def build_parser():
     shape.add_argument("--gpuid", dest="gpuid", default=None,
                        metavar="IDS",
                        help="only these GPUs, comma-separated (--gpuid 0,1); ids are "
-                            "per node. Not --gpu, which picks the GPU columns")
+                            "per node. Same spelling as 'jobscope plot --gpuid'")
     block = shape.add_mutually_exclusive_group()
     block.add_argument("--cpu", action="store_const", const="cpu", dest="view",
                        help="CPU columns only")
     block.add_argument("--gpu", action="store_const", const="gpu", dest="view",
                        help="GPU columns only")
-    shape.add_argument("--gpu-source", "--gpu_source", dest="gpu_source", default=None,
+    shape.add_argument("--gpu-source", dest="gpu_source", default=None,
                        metavar="SOURCE",
                        help="where the GPU numbers come from: dcgm, nvml or summary, "
                             "comma-separated for an order (default from [gpu] source). "
                             "Each column takes its own best available source, so naming "
                             "one promotes it rather than dropping what it cannot serve. "
                             "Naming it here also outranks the summary jobstats stored")
-    shape.add_argument("--all-metrics", "--all_metrics", dest="all_metrics",
+    shape.add_argument("--all-metrics", dest="all_metrics",
                        action="store_true",
                        help="every metric the chosen source publishes, not just the "
                             "default columns (clocks, temps, PCIe, NVLink, ...)")
@@ -245,7 +258,7 @@ def build_parser():
     shape.add_argument("--avg", action="store_true",
                        help="running: fold each metric over the job's runtime, making the "
                             "values comparable to jobstats (default: the newest scrape)")
-    shape.add_argument("--no-jobstats", "--no_jobstats", dest="no_jobstats",
+    shape.add_argument("--no-jobstats", dest="no_jobstats",
                        action="store_true",
                        help="read CPU%%/MEM%%/GPU%%/GMEM%% from Prometheus even for finished "
                             "jobs, instead of the summary jobstats stored in sacct's "
@@ -296,7 +309,7 @@ def build_parser():
         "describe", parents=[base], help="describe the columns and metrics")
     p_describe.add_argument("--metrics", dest="metrics", action="store_true",
                             help="describe the GPU metric catalog instead of the columns")
-    p_describe.add_argument("--all-metrics", "--all_metrics", dest="all_metrics",
+    p_describe.add_argument("--all-metrics", dest="all_metrics",
                             action="store_true",
                             help="the full catalog (implies --metrics)")
     p_describe.add_argument("--dcgm", "--ext", dest="dcgm", action=_Retired,
@@ -400,15 +413,19 @@ def _inert_dests(args) -> set:
             hide.update({"csv", "ts", "stats", "classify"})
         else:
             hide.add("plot_ts")
-        if not args.classify:
-            hide.add("all_categories")            # raises without --classify
+            # A plain --ts already writes CSV, so --csv adds nothing -- the two outputs
+            # are byte-identical. Guarded, not blanket: with --stats (or --classify) the
+            # flag is what turns the summary table into CSV, so it is doing something
+            # there and must stay visible.
+            if not (args.stats or args.classify):
+                hide.add("csv")
     else:
         hide.add("step")  # only emit_timeseries reads it
         hide.add("ts" if args.per_gpu else "nodename")
         if args.per_gpu:
             hide.add("plot_ts")
         # All three summarize a series, so all three raise without one.
-        hide.update({"stats", "classify", "all_categories"})
+        hide.update({"stats", "classify"})
     if args.view == "cpu":
         # show_dcgm goes false, so no GPU spec list is built -- which makes both the
         # width of that list and where it would have been read from inert.
@@ -801,8 +818,9 @@ def handle_report(args) -> None:
     if args.classify and not args.ts:
         raise JobscopeError("--classify sorts a time series into categories; add --ts "
                             "(optionally with a window, e.g. --ts 10m)")
-    if args.all_categories and not args.classify:
-        raise JobscopeError("--all-categories applies to --classify")
+    if args.classify not in (False, True, "all"):
+        raise JobscopeError("--classify takes no value, or 'all' to list the "
+                            "'good' jobs too; got %r" % (args.classify,))
     if args.stats and not args.ts:
         raise JobscopeError("--stats summarizes a time series; add --ts (optionally with "
                             "a window, e.g. --ts 1h)")
@@ -883,9 +901,9 @@ def handle_report(args) -> None:
             _plot_timeseries(buffer.getvalue(), args)
         elif args.classify:
             # The unit of "which jobs are idle" is the job, so that is the default
-            # level; --stats-per-node classifies hosts on the same rule.
+            # level; --stats node classifies hosts on the same rule.
             _classify_timeseries(buffer.getvalue(), options, args.stats or "job",
-                                 args.all_categories)
+                                 args.classify == "all")
         else:
             _stats_timeseries(buffer.getvalue(), options, args.stats)
         return

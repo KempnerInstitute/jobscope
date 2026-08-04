@@ -2580,7 +2580,7 @@ def test_the_report_names_the_metrics_it_judged_on():
 def test_good_collapses_unless_asked_for():
     """On a healthy partition it is most of the output and none of the point."""
     jobs = {"1": {"GPU%": 90, "SM_ACT%": 80, "GMEM%": 50, "POWER_W": 400}}
-    assert "--all-categories" in _classify(jobs)
+    assert "--classify all" in _classify(jobs)
     assert "1 " in _classify(jobs, show_all=True).split("good")[1]
 
 

@@ -470,7 +470,7 @@ def render_line(columns, rows, args, plt, Console):
     # that answers "did one card diverge", and 7 metrics x 4 GPUs is 28 panels, which
     # should be asked for rather than arrived at.
     as_columns = (not multinode and n_keys > 1
-                  and (args.columns or len(gpu_list(args.gpu or "")) > 1))
+                  and (args.columns or len(gpu_list(args.gpuid or "")) > 1))
     # `--by gpu --columns`: metrics overlaid on a shared axis (what --by gpu means)
     # packed one panel per GPU into a row per node (what --columns means). The two were
     # inert together before, because the branch below claimed every multi-node CSV.
@@ -554,10 +554,13 @@ def add_arguments(parser):
                         help="chart type (default: auto-detect from the CSV columns)")
     parser.add_argument("--metric", help="metric column for hist (one) or line (comma-separated)")
     parser.add_argument("--node", help="plot only this node (where the CSV has a NODE column)")
-    parser.add_argument("--gpu", metavar="GPU",
+    # --gpuid, matching the report side, where it has always meant GPU ids. --gpu is
+    # still accepted, but it is the *columns* flag on a report, so one word meaning two
+    # things across a pipe was a trap the report's own help had to warn about.
+    parser.add_argument("--gpuid", "--gpu", dest="gpuid", metavar="IDS",
                         help="plot only these GPU indices, comma-separated (where the CSV "
                              "has a GPU column). With --by metric, each one named here "
-                             "becomes a column: --gpu 0,1,2,3 gives four side by side")
+                             "becomes a column: --gpuid 0,1,2,3 gives four side by side")
     parser.add_argument("--all", action="store_true",
                         help="line: draw every metric, not just the default set")
     parser.add_argument("--marker", choices=["braille", "dot", "hd", "fhd"], default="braille",
@@ -642,12 +645,12 @@ def run(args, fobj=None) -> None:
             if not rows:
                 raise JobscopeError("no rows for node %r. Available: %s"
                                     % (args.node, ", ".join(available)))
-    if args.gpu is not None:
+    if args.gpuid is not None:
         if "GPU" not in columns:
             print("note: --gpu ignored (no GPU column in this CSV)", file=sys.stderr)
         else:
             available = sorted({str(r.get("GPU")) for r in rows if r.get("GPU") not in (None, "")})
-            wanted = gpu_list(args.gpu)
+            wanted = gpu_list(args.gpuid)
             missing = [g for g in wanted if g not in available]
             if missing:
                 # Name every one that is absent, not just the first: with a list it is

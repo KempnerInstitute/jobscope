@@ -93,11 +93,11 @@ job that is running right now.
 | `--per-gpu` | one row per GPU, with node name and GPU number (see below) |
 | `--ts [WINDOW]` | the per-scrape time series as CSV; `--ts 1h` is the last hour of the run |
 | `--stats` | with `--ts`: summarize that series instead -- min/mean/max/last per GPU per metric |
-| `--stats-per-node` | the same, pooled per node |
-| `--stats-per-job` | the same, pooled across every node and GPU |
+| `--stats node` | the same, pooled per node |
+| `--stats job` | the same, pooled across every node and GPU |
 | `--classify` | with `--ts`: sort the jobs into efficiency categories, worst first |
-| `--plot_ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
-| `--plot_ts_overlay [WINDOW]` | the same series overlaid: one panel per GPU, every metric on a shared axis, one row per node |
+| `--plot-ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
+| `--plot-ts-overlay [WINDOW]` | the same series overlaid: one panel per GPU, every metric on a shared axis, one row per node |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--all-metrics` | the full DCGM metric catalog |
 | `--avg` | `running` only: fold over the runtime instead of a snapshot |
@@ -695,7 +695,7 @@ jobscope -p kempner_eng -a --avg                  # running, folded over each ru
 jobscope -j 36499551_64                           # summary, with efficiency bars
 jobscope -j 36612315 --plot_ts                    # its metrics charted over time
 jobscope -j 36612315 --plot_ts 60m                # the same, last hour only
-jobscope -j 36441613 --ts 60m --stats-per-job     # the last hour, averaged
+jobscope -j 36441613 --ts 60m --stats job     # the last hour, averaged
 
 # a whole partition, triaged
 jobscope -p kempner_h100 -a --ts 60m --classify
@@ -708,7 +708,7 @@ and the two are mutually exclusive.
 
 Two further notes. `--ts WINDOW` narrows the Prometheus queries rather than filtering
 rows, so a short window over a busy partition is cheap -- 145 jobs in about 16s. And
-`--classify` implies `--stats-per-job`, so the two do not need to be given together.
+`--classify` implies `--stats job`, so the two do not need to be given together.
 
 
 ## Plotting
@@ -728,7 +728,7 @@ of the others do: `GPU%` 96 with `GMEM%` 3 is under-batched.
 jobscope --gpu  --csv JOBID      | jobscope plot                 # bar gauges (one job)
 jobscope --gpu  --csv -D 7       | jobscope plot --kind hist      # distribution (many jobs)
 jobscope finished --all-metrics --csv -D 7 | jobscope plot              # heatmap (jobs/GPUs x metrics)
-jobscope JOBID --ts --csv        | jobscope plot --compact        # time series
+jobscope JOBID --ts             | jobscope plot --compact        # time series
 ```
 
 ### Which time-series layout
@@ -744,7 +744,7 @@ node read side by side, one row per metric:
 
 ```bash
 jobscope -j 36441613 --nodename holygpu8a10501 --ts \
-  | jobscope plot --by metric --gpu 0,1,2,3
+  | jobscope plot --by metric --gpuid 0,1,2,3
 ```
 
 `--columns` asks for the same grid without naming the cards. And since every part of
@@ -759,14 +759,14 @@ jobscope -j 36606149 --plot_ts        # single-node job: no --nodename needed
 It *is* `--ts`, with the CSV charted rather than written, so the schema, `--step`,
 the window below and the `--nodename` filter all behave the same.
 
-#### Overlaid instead: `--plot_ts_overlay`
+#### Overlaid instead: `--plot-ts-overlay`
 
 `--plot_ts` gives each metric its own panel and its own y-axis, which answers "how did
 this one move". The overlay answers the other question -- "did these move together" --
 by putting every metric on one shared axis, a panel per GPU, and a row per node:
 
 ```bash
-jobscope -j 36770231 --plot_ts_overlay        # 2 nodes x 4 GPUs = two rows of four
+jobscope -j 36770231 --plot-ts-overlay        # 2 nodes x 4 GPUs = two rows of four
 ```
 
 It needs no `--nodename`: a row per node is the layout, so the guard `--plot_ts` raises
@@ -826,15 +826,15 @@ which is worth a glance: it says whether the window actually had data. `MEAN` is
 by its band, as `USED` is in the summary table, and `--csv` emits the same rows for
 scripting.
 
-`--stats-per-node` pools the job's GPUs on each host, and `--stats-per-job` pools
+`--stats node` pools the job's GPUs on each host, and `--stats job` pools
 every card it held:
 
 ```console
-$ jobscope -j 36441613 --ts 20m --stats-per-node
+$ jobscope -j 36441613 --ts 20m --stats node
   NODE            GPUS  METRIC    N    MIN   MEAN    MAX   LAST
   holygpu8a10302  4     GPU%     84   17.0   93.1  100.0  100.0
 
-$ jobscope -j 36441613 --ts 20m --stats-per-job
+$ jobscope -j 36441613 --ts 20m --stats job
   JOBID     NODES  GPUS  METRIC     N    MIN   MEAN    MAX   LAST
   36441613  4      16    GPU%     336    0.0   93.4  100.0  100.0
 ```
@@ -852,7 +852,7 @@ adds nothing there and says so.
 
 #### Triaging a partition: `--classify`
 
-`--stats-per-job` over a partition is 145 jobs x 8 metrics and no verdict.
+`--stats job` over a partition is 145 jobs x 8 metrics and no verdict.
 `--classify` sorts them instead:
 
 ```console
@@ -866,7 +866,7 @@ $ jobscope -p kempner_h100 -a --ts 10m --classify --all-metrics
   inefficient (best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM%: 2-10%)  4 jobs
     ...
   good (best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM%: >40%)  98 jobs
-    (--all-categories to list them)
+    (--classify all to list them)
 ```
 
 Each heading states the rule it applied, so the criteria never has to be looked up
@@ -900,11 +900,11 @@ quantity into a rule expressed in percent could only be done by picking one numb
 every architecture, which is the thing that does not work.
 
 `good` collapses to a count by default, since on a healthy partition it is most of the
-output and none of the point; `--all-categories` lists it. `--stats-per-node`
+output and none of the point; `--classify all` lists it. `--stats node`
 classifies hosts on the same rule.
 
 The rows are aligned columns under a header, and the identity block names whatever
-was judged -- `JOBID` per job, `NODE` under `--stats-per-node`, `NODE:GPU` per card.
+was judged -- `JOBID` per job, `NODE` under `--stats node`, `NODE:GPU` per card.
 
 For storing or post-processing, `--csv` gives one row per job -- id, user, every metric
 the series carried, and the label last:

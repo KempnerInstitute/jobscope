@@ -1813,7 +1813,7 @@ def cpu_timeseries(collected, options: RenderOptions, out=None) -> None:
 
     One row per node/timestamp -- there is no GPU dimension, so GPU/MODEL are left
     blank, keeping the schema :func:`dcgm_timeseries` writes so `jobscope plot`,
-    ``--classify`` and ``--stats-per-job`` need no changes to read it.
+    ``--classify`` and ``--stats job`` need no changes to read it.
     """
     out = out or sys.stdout
     writer = csv.writer(out, lineterminator="\n")
@@ -2062,7 +2062,7 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         print("  " + (tint(heading, role) if options.color else heading), file=out)
         if name == "good" and not show_all:
             # Most of a healthy partition, and none of what the report is for.
-            print("    (--all-categories to list them)", file=out)
+            print("    (--classify all to list them)", file=out)
             continue
         if options.header:
             print("    " + row_text(headers), file=out)

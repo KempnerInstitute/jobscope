@@ -326,7 +326,7 @@ def test_default_args_carries_every_option_the_subcommand_defines():
 def test_default_args_applies_overrides():
     args = plot.default_args(kind="line", by="metric", columns=True)
     assert (args.kind, args.by, args.columns) == ("line", "metric", True)
-    assert args.gpu is None and args.compact is False      # the rest stay default
+    assert args.gpuid is None and args.compact is False      # the rest stay default
 
 
 def test_columns_grids_without_naming_the_gpus(tmp_path, capsys):

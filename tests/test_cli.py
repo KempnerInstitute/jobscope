@@ -1215,35 +1215,39 @@ def test_stats_composes_with_the_window(monkeypatch, capsys):
     assert "MEAN" in capsys.readouterr().out       # and the summary still rendered
 
 
-@pytest.mark.parametrize("flag,level", [
-    ("--stats", "gpu"),
-    ("--stats-per-node", "node"),
-    ("--stats-per-job", "job"),
+@pytest.mark.parametrize("argv,level", [
+    (["--stats"], "gpu"),          # bare keeps the per-GPU meaning it always had
+    (["--stats", "node"], "node"),
+    (["--stats", "job"], "job"),
 ])
-def test_the_stats_level_flags(flag, level):
+def test_the_stats_level_is_the_flags_own_value(argv, level):
+    """One flag for one axis: this was --stats/--stats-per-node/--stats-per-job."""
     _, subparsers = build_parser()
-    args = subparsers.choices[RUNNING].parse_intermixed_args([flag])
-    assert args.stats == level
+    assert subparsers.choices[RUNNING].parse_intermixed_args(argv).stats == level
 
 
-def test_the_stats_levels_are_mutually_exclusive():
+def test_an_unknown_stats_level_is_rejected():
+    """`choices` is also what keeps the optional value from eating a JOBID:
+    `--stats 12345` is an invalid choice, not a misread selection."""
     _, subparsers = build_parser()
-    with pytest.raises(SystemExit):
-        subparsers.choices[RUNNING].parse_intermixed_args(["--stats", "--stats-per-job"])
+    for bad in (["--stats", "socket"], ["--stats", "12345"]):
+        with pytest.raises(SystemExit):
+            subparsers.choices[RUNNING].parse_intermixed_args(bad)
 
 
-@pytest.mark.parametrize("flag,lead", [
-    ("--stats", "NODE:GPU"), ("--stats-per-node", "NODE"), ("--stats-per-job", "JOBID"),
+@pytest.mark.parametrize("argv,lead", [
+    (["--stats"], "NODE:GPU"), (["--stats", "node"], "NODE"),
+    (["--stats", "job"], "JOBID"),
 ])
-def test_each_level_renders_through_the_ts_path(flag, lead, monkeypatch, capsys):
+def test_each_level_renders_through_the_ts_path(argv, lead, monkeypatch, capsys):
     _fake_ts(monkeypatch, _ts_rows(nodes=("node01", "node02"), gpus=("0", "1")))
-    main(["-j", "1", "--ts", flag])
+    main(["-j", "1", "--ts"] + argv)
     assert capsys.readouterr().out.splitlines()[0].split()[0] == lead
 
 
 def test_a_stats_level_still_needs_a_timeseries(capsys):
     with pytest.raises(SystemExit):
-        main(["-j", "1", "--stats-per-node"])
+        main(["-j", "1", "--stats", "node"])
     assert "add --ts" in capsys.readouterr().err
 
 
@@ -1264,7 +1268,7 @@ def test_classify_defaults_to_the_job_as_the_unit(monkeypatch, capsys):
 
 def test_classify_can_group_nodes_instead(monkeypatch, capsys):
     _fake_ts(monkeypatch, _ts_rows(nodes=("node01", "node02"), gpus=("0", "1")))
-    main(["-j", "1", "--ts", "--classify", "--stats-per-node"])
+    main(["-j", "1", "--ts", "--classify", "--stats", "node"])
     assert "2 nodes" in capsys.readouterr().out
 
 
@@ -1274,22 +1278,47 @@ def test_classify_needs_a_timeseries(capsys):
     assert "add --ts" in capsys.readouterr().err
 
 
-def test_all_categories_needs_classify(capsys):
+def test_the_good_jobs_are_listed_by_the_flags_own_value(capsys, monkeypatch):
+    """--all-categories only ever qualified --classify, so it is its value now."""
+    _fake_ts(monkeypatch, _ts_rows(nodes=("node01",), gpus=("0",)))
+    main(["-j", "1", "--ts", "--classify", "all"])
+    assert "by best of" in capsys.readouterr().out
+
+
+def test_an_unknown_classify_value_is_rejected(capsys):
     with pytest.raises(SystemExit):
-        main(["-j", "1", "--ts", "--all-categories"])
-    assert "applies to --classify" in capsys.readouterr().err
+        main(["-j", "1", "--ts", "--classify", "everything"])
+    assert "takes no value, or 'all'" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("argv,hidden", [
-    (["running"], {"--stats", "--classify", "--all-categories"}),   # all three raise
+    (["running"], {"--stats", "--classify"}),                 # both raise without --ts
     # (a bare [] would reach the top-level parser, which does not narrow)
-    (["--ts"], {"--all-categories"}),                         # raises without --classify
+    (["--ts"], {"--csv"}),          # a plain --ts already writes CSV; --csv adds nothing
     (["--plot-ts"], {"--stats", "--classify"}),               # both silently ignored
 ])
 def test_the_narrowed_help_hides_the_summarizers_that_would_not_run(argv, hidden, capsys):
     """The feature's whole claim is that it hides what would not have worked."""
     _, shown = _help_for(argv, capsys)
     assert hidden <= set(shown), (hidden - set(shown), shown)
+
+
+def test_csv_is_hidden_under_a_plain_ts_but_not_under_stats(capsys):
+    """A plain --ts already writes CSV, so --csv adds nothing there and the narrowed
+    help says so. With --stats it is the flag that turns the summary table into CSV, so
+    hiding it would hide something that works -- which a blanket rule would have done."""
+    _, plain = _help_for(["--ts"], capsys)
+    assert "--csv" in set(plain)
+    _, with_stats = _help_for(["--ts", "--stats"], capsys)
+    assert "--csv" not in set(with_stats)
+
+
+def test_stats_csv_really_does_emit_csv(monkeypatch, capsys):
+    """The measurement the guard above rests on: if this ever stops being true, the
+    guard is wrong rather than merely redundant."""
+    _fake_ts(monkeypatch, _ts_rows(nodes=("node01",), gpus=("0",)))
+    main(["-j", "1", "--ts", "--stats", "--csv"])
+    assert capsys.readouterr().out.splitlines()[0].startswith("NODE:GPU,METRIC,")
 
 
 def test_classify_with_plot_ts_says_it_is_ignored(monkeypatch, capsys):

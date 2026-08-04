@@ -58,7 +58,7 @@ SUM_USER_ARGS=()
 # readable picture for a screenshot and the one the README shows. The caption is the
 # command verbatim either way -- a caption you cannot paste is worse than none.
 echo "[1/4] time series  (job $TS_JOB)"
-TS_CMD=(-j "$TS_JOB" "${TS_NODE_ARGS[@]}" "${TS_GPU_ARGS[@]}" --ts --csv)
+TS_CMD=(-j "$TS_JOB" "${TS_NODE_ARGS[@]}" "${TS_GPU_ARGS[@]}" --ts)
 "$JOBSCOPE" "${TS_CMD[@]}" \
   | "$JOBSCOPE" plot --width 90 --height 18 \
   | ansi2svg docs/timeseries.svg "jobscope ${TS_CMD[*]} | jobscope plot"
