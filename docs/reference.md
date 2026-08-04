@@ -95,7 +95,7 @@ job that is running right now.
 | `--stats` | with `--ts`: summarize that series instead -- min/mean/max/last per GPU per metric |
 | `--stats node` | the same, pooled per node |
 | `--stats job` | the same, pooled across every node and GPU |
-| `--classify` | with `--ts`: sort the jobs into efficiency categories, worst first |
+| `--eff` | with `--ts`: sort the jobs into efficiency categories, worst first |
 | `--plot-ts [WINDOW]` | that time series charted instead: one panel per metric, one column per GPU |
 | `--plot-ts-overlay [WINDOW]` | the same series overlaid: one panel per GPU, every metric on a shared axis, one row per node |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
@@ -510,7 +510,7 @@ The cutoffs are site-tunable in `[thresholds]`, and they are the same ones
 `jobscope plot` grades with, so a job red in a chart is red in the table.
 
 Every `%` metric is banded into five tiers by four edges, and both the edges and
-the tiers are what `--ts --classify` reports:
+the tiers are what `--ts --eff` reports:
 
 | tier | default range | colour |
 |---|---|---|
@@ -529,7 +529,7 @@ columns under `--all-metrics` graded without listing them.
 **There are two tables, one per view, and nothing is inherited between them:**
 `[thresholds.summary]` grades the plain report (one average over each job's whole
 elapsed runtime) and `[thresholds.timeslice]` grades `--ts` / `--plot_ts` /
-`--classify` (samples pooled inside a window). A two-hour slice that catches a
+`--eff` (samples pooled inside a window). A two-hour slice that catches a
 checkpoint pause is not a two-hour idle job, so the two can want different bars. A
 table you leave out keeps the built-in edges; it does not copy the other one, and
 jobscope prints one note when you have set only one of them.
@@ -564,7 +564,7 @@ Run `jobscope config` to print both tables as they actually resolve.
 Two more sections cover what the report *shows* rather than how it grades.
 
 `[metrics]` picks the GPU/DCGM metrics per view — `summary` for the per-job table's
-profiling block, `timeseries` for `--ts`/`--plot_ts`/`--classify`, and `extended`
+profiling block, `timeseries` for `--ts`/`--plot_ts`/`--eff`, and `extended`
 for what `--all-metrics` widens to. Name them by their short name, the same ones
 `[thresholds]` takes:
 
@@ -698,8 +698,8 @@ jobscope -j 36612315 --plot_ts 60m                # the same, last hour only
 jobscope -j 36441613 --ts 60m --stats job     # the last hour, averaged
 
 # a whole partition, triaged
-jobscope -p kempner_h100 -a --ts 60m --classify
-jobscope -p kempner_h100 -a --ts 10m --classify --csv > triage.csv
+jobscope -p kempner_h100 -a --ts 60m --eff
+jobscope -p kempner_h100 -a --ts 10m --eff --csv > triage.csv
 ```
 
 The window goes on whichever flag you are already using -- `--plot_ts 60m`, not
@@ -708,7 +708,7 @@ and the two are mutually exclusive.
 
 Two further notes. `--ts WINDOW` narrows the Prometheus queries rather than filtering
 rows, so a short window over a busy partition is cheap -- 145 jobs in about 16s. And
-`--classify` implies `--stats job`, so the two do not need to be given together.
+`--eff` implies `--stats job`, so the two do not need to be given together.
 
 
 ## Plotting
@@ -850,13 +850,13 @@ memory where this averages it. That is the honest reading of "the average over t
 window". `--plot_ts` already prints the same figures under its charts, so `--stats`
 adds nothing there and says so.
 
-#### Triaging a partition: `--classify`
+#### Triaging a partition: `--eff`
 
 `--stats job` over a partition is 145 jobs x 8 metrics and no verdict.
-`--classify` sorts them instead:
+`--eff` sorts them instead:
 
 ```console
-$ jobscope -p kempner_h100 -a --ts 10m --classify --all-metrics
+$ jobscope -p kempner_h100 -a --ts 10m --eff --all-metrics
   142 jobs, by best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM% (POWER_W caps the verdict when idle)
 
   wasteful (GPU% <2%, SM_ACT% <2%, OCC% <2%, TENSOR% <2%, DRAM% <2%)  15 jobs
@@ -866,7 +866,7 @@ $ jobscope -p kempner_h100 -a --ts 10m --classify --all-metrics
   inefficient (best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM%: 2-10%)  4 jobs
     ...
   good (best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM%: >40%)  98 jobs
-    (--classify all to list them)
+    (--eff all to list them)
 ```
 
 Each heading states the rule it applied, so the criteria never has to be looked up
@@ -900,8 +900,8 @@ quantity into a rule expressed in percent could only be done by picking one numb
 every architecture, which is the thing that does not work.
 
 `good` collapses to a count by default, since on a healthy partition it is most of the
-output and none of the point; `--classify all` lists it. `--stats node`
-classifies hosts on the same rule.
+output and none of the point; `--eff all` lists it. `--stats node`
+grades hosts on the same rule.
 
 The rows are aligned columns under a header, and the identity block names whatever
 was judged -- `JOBID` per job, `NODE` under `--stats node`, `NODE:GPU` per card.
@@ -910,7 +910,7 @@ For storing or post-processing, `--csv` gives one row per job -- id, user, every
 the series carried, and the label last:
 
 ```console
-$ jobscope -p kempner_h100 -a --ts 10m --classify --csv
+$ jobscope -p kempner_h100 -a --ts 10m --eff --csv
 JOBID,USER,GPU%,SM_ACT%,OCC%,TENSOR%,DRAM%,POWER_W,GMEM_GB,GMEM%,LABEL
 36229482,bob,0.0,0.0,0.0,0.0,0.0,69.5,0.5,0.6,wasteful
 36638420_2,dana,77.5,76.3,30.5,40.0,41.1,587.9,60.5,76.0,good

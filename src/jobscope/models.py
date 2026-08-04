@@ -11,7 +11,7 @@ how a monitoring outage comes to look like a fleet of wasteful jobs:
               A fact about our collection, not about the job.
 
 Both render as ``-``, so nothing about the display changes. The difference is what
-the classifier is allowed to conclude: an ``na`` metric is simply left out of the
+job_eff is allowed to conclude: an ``na`` metric is simply left out of the
 ballot, where a job whose *voting* metrics are all ``unknown`` must not be
 classified at all. It gets ``no-data`` and is excluded from the counts and the
 averages, because "we did not measure this" and "this job wasted its allocation"
@@ -105,7 +105,7 @@ class JobMetrics:
 
         Total on purpose: every display path already renders None as ``-``, so
         callers that only want to print keep working unchanged. Callers that must
-        distinguish -- the classifier -- ask :meth:`state`.
+        distinguish -- job_eff -- ask :meth:`state`.
         """
         found = self.by_header.get(header)
         return found.value if found is not None else None
@@ -117,7 +117,7 @@ class JobMetrics:
         column is not something the jobstats summary *failed* to measure, it is something the
         summary is not about, but no caller needs to tell those apart. What decides a
         `no-data` verdict is which columns the *series* carries -- see
-        classifier.unceilinged -- and that is asked of the column set, not of one
+        job_eff.unceilinged -- and that is asked of the column set, not of one
         job's readings. Read ``by_header`` directly if you ever need the difference.
         """
         found = self.by_header.get(header)

@@ -163,7 +163,7 @@ identical, so `--plot-ts` is the one to use then.
 Useful companions:
 
 - `--stats` summarizes a time window with min/mean/max/last per GPU and metric.
-- `--classify` sorts jobs into efficiency categories.
+- `--eff` sorts jobs into efficiency categories.
 - Array elements such as `36788818_3` can be passed directly.
 
 ## Fewer or More Columns

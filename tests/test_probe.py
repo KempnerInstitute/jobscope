@@ -471,8 +471,8 @@ def test_init_never_writes_the_endpoint(hermetic_config, tmp_path, monkeypatch):
 def test_init_parses_as_toml(hermetic_config, tmp_path, monkeypatch):
     """The whole point: this is a config file, not a report about one."""
     data = config_module._toml.loads(_init_text(tmp_path, monkeypatch))
-    assert set(data) == {"prometheus", "site", "metrics", "classify"}
-    assert data["classify"]["floor"]["power"]["Tesla V100"] == 120   # (40 + 200) / 2
+    assert set(data) == {"prometheus", "site", "metrics", "eff"}
+    assert data["eff"]["floor"]["power"]["Tesla V100"] == 120   # (40 + 200) / 2
 
 
 def test_init_full_appends_only_commented_knobs(hermetic_config, tmp_path, monkeypatch):
@@ -482,7 +482,7 @@ def test_init_full_appends_only_commented_knobs(hermetic_config, tmp_path, monke
     text = _init_text(tmp_path, monkeypatch, full=True)
     assert text.count("[prometheus]") == 1
     data = config_module._toml.loads(text)
-    assert set(data) == {"prometheus", "site", "metrics", "classify"}
+    assert set(data) == {"prometheus", "site", "metrics", "eff"}
 
 
 def test_init_refuses_to_overwrite_an_existing_config(hermetic_config, tmp_path,

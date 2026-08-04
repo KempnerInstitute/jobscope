@@ -65,6 +65,19 @@ def test_doctor_was_renamed_to_probe(capsys):
     assert "renamed" in err and "'probe'" in err
 
 
+@pytest.mark.parametrize("flag", sorted(cli.RETIRED_FLAGS))
+def test_every_retired_flag_names_its_replacement(flag, capsys):
+    """The table's whole reason for existing: a retired spelling must not become
+    argparse's bare "unrecognized arguments", which says nothing about what to type.
+    Parametrized over the table itself, so an entry added without an argparse action
+    to back it fails here rather than the next time someone types it."""
+    with pytest.raises(SystemExit):
+        main([flag])
+    err = capsys.readouterr().err
+    assert "no longer a flag" in err
+    assert cli.RETIRED_FLAGS[flag] in err
+
+
 def test_an_old_subcommand_is_now_an_ordinary_word():
     """summary/detail/dcgm/live used to be rewritten to flags with a note.
 
@@ -1040,7 +1053,7 @@ def _two_table_config():
     (["-j", "1", "--ts"], 8.0),               # a time slice
     (["-j", "1", "--ts", "30m"], 8.0),        # ... with a window
     (["-j", "1", "--plot_ts"], 8.0),          # --plot_ts *is* --ts
-    (["-j", "1", "--ts", "--classify"], 8.0),
+    (["-j", "1", "--ts", "--eff"], 8.0),
     (["-j", "1", "--ts", "--stats"], 8.0),
 ])
 def test_each_view_is_graded_by_its_own_table(monkeypatch, argv, expected):
@@ -1070,7 +1083,7 @@ def test_each_view_is_graded_by_its_own_table(monkeypatch, argv, expected):
                         lambda *a, **kw: select_mod.Resolved(context=[], chunks=[]))
     # The options are captured in emit(); what runs after it consumes a CSV the
     # fake never wrote, so those stages are stubbed out rather than fed one.
-    for stage in ("_plot_timeseries", "_classify_timeseries", "_stats_timeseries"):
+    for stage in ("_plot_timeseries", "_eff_timeseries", "_stats_timeseries"):
         monkeypatch.setattr(cli, stage, lambda *a, **kw: None)
     main(argv)
     assert captured["options"].thresholds.edge("wasteful", "CPU%") == expected
@@ -1251,51 +1264,51 @@ def test_a_stats_level_still_needs_a_timeseries(capsys):
     assert "add --ts" in capsys.readouterr().err
 
 
-def test_classify_groups_the_jobs(monkeypatch, capsys):
+def test_eff_groups_the_jobs(monkeypatch, capsys):
     _fake_ts(monkeypatch, _ts_rows(jobids=("100", "101"), nodes=("node01",), gpus=("0",)))
-    main(["-p", "kempner", "-a", "--ts", "10m", "--classify"])
+    main(["-p", "kempner", "-a", "--ts", "10m", "--eff"])
     out = capsys.readouterr().out
     assert "by best of" in out and "jobs" in out
     assert "JOBID,USER,EPOCH" not in out      # the CSV became the report
 
 
-def test_classify_defaults_to_the_job_as_the_unit(monkeypatch, capsys):
+def test_eff_defaults_to_the_job_as_the_unit(monkeypatch, capsys):
     """"Which jobs are idle" is asked about jobs, so that is the level."""
     _fake_ts(monkeypatch, _ts_rows(nodes=("node01", "node02"), gpus=("0", "1")))
-    main(["-j", "1", "--ts", "--classify"])
+    main(["-j", "1", "--ts", "--eff"])
     assert "1 jobs" in capsys.readouterr().out       # not 2 nodes or 4 GPUs
 
 
-def test_classify_can_group_nodes_instead(monkeypatch, capsys):
+def test_eff_can_group_nodes_instead(monkeypatch, capsys):
     _fake_ts(monkeypatch, _ts_rows(nodes=("node01", "node02"), gpus=("0", "1")))
-    main(["-j", "1", "--ts", "--classify", "--stats", "node"])
+    main(["-j", "1", "--ts", "--eff", "--stats", "node"])
     assert "2 nodes" in capsys.readouterr().out
 
 
-def test_classify_needs_a_timeseries(capsys):
+def test_eff_needs_a_timeseries(capsys):
     with pytest.raises(SystemExit):
-        main(["-j", "1", "--classify"])
+        main(["-j", "1", "--eff"])
     assert "add --ts" in capsys.readouterr().err
 
 
 def test_the_good_jobs_are_listed_by_the_flags_own_value(capsys, monkeypatch):
-    """--all-categories only ever qualified --classify, so it is its value now."""
+    """--all-categories only ever qualified --eff, so it is its value now."""
     _fake_ts(monkeypatch, _ts_rows(nodes=("node01",), gpus=("0",)))
-    main(["-j", "1", "--ts", "--classify", "all"])
+    main(["-j", "1", "--ts", "--eff", "all"])
     assert "by best of" in capsys.readouterr().out
 
 
-def test_an_unknown_classify_value_is_rejected(capsys):
+def test_an_unknown_eff_value_is_rejected(capsys):
     with pytest.raises(SystemExit):
-        main(["-j", "1", "--ts", "--classify", "everything"])
+        main(["-j", "1", "--ts", "--eff", "everything"])
     assert "takes no value, or 'all'" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("argv,hidden", [
-    (["running"], {"--stats", "--classify"}),                 # both raise without --ts
+    (["running"], {"--stats", "--eff"}),                      # both raise without --ts
     # (a bare [] would reach the top-level parser, which does not narrow)
     (["--ts"], {"--csv"}),          # a plain --ts already writes CSV; --csv adds nothing
-    (["--plot-ts"], {"--stats", "--classify"}),               # both silently ignored
+    (["--plot-ts"], {"--stats", "--eff"}),                    # both silently ignored
 ])
 def test_the_narrowed_help_hides_the_summarizers_that_would_not_run(argv, hidden, capsys):
     """The feature's whole claim is that it hides what would not have worked."""
@@ -1321,10 +1334,10 @@ def test_stats_csv_really_does_emit_csv(monkeypatch, capsys):
     assert capsys.readouterr().out.splitlines()[0].startswith("NODE:GPU,METRIC,")
 
 
-def test_classify_with_plot_ts_says_it_is_ignored(monkeypatch, capsys):
+def test_eff_with_plot_ts_says_it_is_ignored(monkeypatch, capsys):
     _fake_ts(monkeypatch, _ts_rows(gpus=("0",)))
-    main(["-j", "1", "--plot_ts", "--classify"])
-    assert "ignoring --classify" in capsys.readouterr().err
+    main(["-j", "1", "--plot_ts", "--eff"])
+    assert "ignoring --eff" in capsys.readouterr().err
 
 
 # --- [defaults] days / state reach the Request -------------------------------

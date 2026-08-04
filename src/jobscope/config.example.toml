@@ -135,7 +135,7 @@ source = ["jobstats", "cgroup", "slurm"]
 # CPU%/MEM% and fixed, because there are two cgroup queries and no catalog to choose.
 #
 #   summary     the per-job table's profiling block (jobscope -p PART -a)
-#   timeseries  --ts / --plot_ts / --classify
+#   timeseries  --ts / --plot_ts / --eff
 #   extended    what --all-metrics widens to; "all" or an explicit list
 #
 # Short names, the same ones [thresholds] takes. 'jobscope describe --all-metrics'
@@ -182,7 +182,7 @@ edges = [2, 10, 20, 40]
 # wrong at one end of a mixed fleet: docs/admin.md has measured figures and a method.
 power_w = 100
 
-# [classify] -- how a job's metrics become a verdict. Two roles:
+# [eff] -- how a job's metrics become an efficiency verdict. Two roles:
 #   vote   best-of-N; one busy measure calls a job not-idle, so it can only RAISE
 #   floor  can only LOWER. A metric that must pull a verdict down cannot be a vote,
 #          because under best-of-N a low reading is simply outvoted.
@@ -191,7 +191,7 @@ power_w = 100
 # reading. That follows the catalog as it grows, which is usually what you want. Set
 # it to stop --all-metrics widening the ballot from four metrics to fifteen.
 #
-# [classify]
+# [eff]
 # vote = ["gpu", "sm_act", "tensor", "dram", "cpu"]
 
 [plot]
@@ -290,12 +290,12 @@ long_running = "bright_red"
 # which cards a job ran on. docs/admin.md has measured idle/busy figures per model
 # and the method for choosing a value.
 #
-# [classify.floor.power]
+# [eff.floor.power]
 # default = 100
 # "NVIDIA H100 80GB HBM3" = 130
 # "Tesla V100-PCIE-32GB"  = 45
 #
-# A bare [classify.floor] with nothing under it means NO floors, which re-opens what
+# A bare [eff.floor] with nothing under it means NO floors, which re-opens what
 # the floor closes: a job at GPU% 48 drawing 80 W goes back to reading `good`.
 # ([thresholds.power_w_by_model] still works as the older spelling.)
 
@@ -306,7 +306,7 @@ long_running = "bright_red"
 # CPU% lifts a GPU-idle job off `wasteful` but never calls it healthy. It still BANDS
 # and COLOURS normally -- a job at CPU% 50 paints green. Two questions, one number.
 #
-# [classify.ceiling]
+# [eff.ceiling]
 # cpu = "inefficient"
 
 # --- Defining or repointing a metric -------------------------------------------
@@ -340,7 +340,7 @@ long_running = "bright_red"
 # The same table with a BUILT-IN's name overrides it, which is how a cluster whose
 # exporter uses different series names ports without patching jobscope. An override
 # changes only what it names -- header, tier, group and roles are inherited, so this
-# does not rename the CPU% column or take it out of the classifier:
+# does not rename the CPU% column or take it out of the efficiency ballot:
 #
 # [metrics.cgroup.cpu]
 # query = "container_cpu_usage_seconds_total"

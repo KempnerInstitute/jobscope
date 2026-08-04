@@ -38,9 +38,9 @@ def test_memory_also_covers_the_cgroup_columns_that_used_to_slip_through():
 
 
 def test_power_is_the_only_cap():
-    """`cap` names the shape [classify] floor now implements: a metric that can only
+    """`cap` names the shape [eff] floor now implements: a metric that can only
     lower a verdict. POWER_W is the built-in one; the role is documentation, since
-    the classifier reads the resolved floors rather than this."""
+    job_eff reads the resolved floors rather than this."""
     assert metrics.headers_with_role(metrics.CAP) == ("POWER_W",)
 
 

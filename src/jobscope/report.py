@@ -29,16 +29,6 @@ from .jobstats import GIB, jobstats_capacity, jobstats_detail, jobstats_metrics
 # kind of waste: a short bad job costs little, whereas hours of idle hardware do
 # not come back. Its entry is highlighted. [defaults] long_running overrides it.
 LONG_RUNNING = parse_duration(DEFAULT_LONG_RUNNING)
-from .classifier import (
-    CATEGORIES,
-    NO_DATA,
-    classify,
-    classify_description,
-    classify_metrics,
-    tier_criteria,
-    tier_range,
-    unceilinged,
-)
 from .cpu import CgroupSpec, chosen_specs
 from .dcgm import (
     ALL_SPECS,
@@ -54,6 +44,16 @@ from .dcgm import (
     gpu_minor_key,
 )
 from .errors import JobscopeError
+from .job_eff import (
+    CATEGORIES,
+    NO_DATA,
+    classify,
+    classify_description,
+    classify_metrics,
+    tier_criteria,
+    tier_range,
+    unceilinged,
+)
 from .running import Gpu, RunningJob, build_columns, job_sort_key
 from .slurm import JobRecord, Selection, format_window
 
@@ -408,7 +408,7 @@ def tint(text: str, role: str) -> str:
     """``text`` wrapped in ``role``'s colour, or unchanged when it has none.
 
     ``role`` is whatever the call site holds -- a bucket identifier
-    (``red``/``yellow``/``green``) for a graded cell, a tier name for a --classify
+    (``red``/``yellow``/``green``) for a graded cell, a tier name for a --eff
     heading, ``long_running`` for a Wasteful-row entry. :meth:`Palette.sgr` resolves
     all three, so no caller has to translate.
 
@@ -749,9 +749,9 @@ class EfficiencyTally:
         """Whether ``value`` clears the strict Wasteful-row cutoff.
 
         Stricter than the red/yellow/green band: red spans both the wasteful and
-        inefficient tiers (matching --ts --classify's own colour grouping), but a
+        inefficient tiers (matching --ts --eff's own colour grouping), but a
         row meant to flag the jobs actually worth a look uses the tighter
-        ``wasteful`` edge alone -- the same one --ts --classify's "wasteful" tier
+        ``wasteful`` edge alone -- the same one --ts --eff's "wasteful" tier
         means, and this column's own, since the edges are per metric. POWER_W has
         no such split (its floor is already two-band), so its own cutoff is
         unchanged. Shared by :meth:`add` (this tally's own Worst row) and
@@ -953,8 +953,8 @@ class SummaryRenderer:
         self._started = False
         # The most recently added job's plain {header: float} values and model --
         # for a single-job selection this is that job's own, used by finish() to
-        # print a Classification line the same classify()
-        # already compute for --ts --classify.
+        # print an Efficiency line from the same classify()
+        # already computed for --ts --eff.
         self._last_values: Dict[str, float] = {}
         self._last_model: str = ""
 
@@ -1354,12 +1354,12 @@ class SummaryRenderer:
                      "problems": ("Problem jobs", problems)}
             self._print_sections([built[name] for name in options.sections])
             if alone and self._last_values:
-                self._print_classification()
+                self._print_efficiency()
 
-    def _print_classification(self) -> None:
+    def _print_efficiency(self) -> None:
         """A single job's classify() verdict, unnumbered.
 
-        Reuses the exact same functions --ts --classify already computes from:
+        Reuses the exact same functions --ts --eff already computes from:
         combined when both GPU and CPU% are present (the default/all view), plain
         GPU-only classify() for a --gpu view, CPU%-only classify() for a --cpu
         view. Printed after the numbered sections, not as one of them, so a
@@ -1387,10 +1387,10 @@ class SummaryRenderer:
         label = tier_range(verdict, thresholds, judged)
         floors_applied = [h for h, v in floor_readings.items() if v is not None]
         desc = classify_description(judged, floors_applied, thresholds)
-        text = ("Classification: %s (%s)" % (verdict, label) if label
-               else "Classification: %s" % verdict)
+        text = ("Efficiency: %s (%s)" % (verdict, label) if label
+               else "Efficiency: %s" % verdict)
         print(file=self.out)
-        print("Classified %s." % desc, file=self.out)
+        print("Graded %s." % desc, file=self.out)
         print(tint(text, role) if options.color and role else text, file=self.out)
 
 
@@ -1813,7 +1813,7 @@ def cpu_timeseries(collected, options: RenderOptions, out=None) -> None:
 
     One row per node/timestamp -- there is no GPU dimension, so GPU/MODEL are left
     blank, keeping the schema :func:`dcgm_timeseries` writes so `jobscope plot`,
-    ``--classify`` and ``--stats job`` need no changes to read it.
+    ``--eff`` and ``--stats job`` need no changes to read it.
     """
     out = out or sys.stdout
     writer = csv.writer(out, lineterminator="\n")
@@ -1937,7 +1937,7 @@ def unit_values(level: str, multi_job: bool, key: tuple, found: dict) -> Tuple[s
     return job + ("%s:%s" % (key[1], key[2]),)
 
 
-def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOptions",
+def timeseries_eff(rows: List[dict], columns: List[str], options: "RenderOptions",
                         out=None, level: str = "job", show_all: bool = False) -> None:
     """Group the units into efficiency categories, worst first.
 
@@ -2062,7 +2062,7 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
         print("  " + (tint(heading, role) if options.color else heading), file=out)
         if name == "good" and not show_all:
             # Most of a healthy partition, and none of what the report is for.
-            print("    (--classify all to list them)", file=out)
+            print("    (--eff all to list them)", file=out)
             continue
         if options.header:
             print("    " + row_text(headers), file=out)
@@ -2075,7 +2075,7 @@ def timeseries_classify(rows: List[dict], columns: List[str], options: "RenderOp
 def pool_samples(rows: List[dict], metrics: List[str], level: str) -> Dict[tuple, dict]:
     """``{key: {values, nodes, gpus, user, models}}``, pooling the series at ``level``.
 
-    Shared by the stats table and the classification so the two cannot disagree about
+    Shared by the stats table and the verdict so the two cannot disagree about
     what a job's mean is: one grouping, read two ways. ``models`` is keyed by
     ``(node, gpu)``, the same shape :func:`job_model` already reads elsewhere, so a
     classify verdict can resolve the group's POWER_W floor the same way the table
@@ -2132,7 +2132,7 @@ def timeseries_stats(rows: List[dict], metrics: List[str], options: "RenderOptio
     table = []
     for key, found in sorted(groups.items(), key=order):
         # Carried per group so POWER_W's mean is tinted against the card it was
-        # measured on. The same resolution timeseries_classify does for the same
+        # measured on. The same resolution timeseries_eff does for the same
         # samples; dropping it here graded a 165 W RTX -- idle -- against the global
         # 100 W floor and called it green.
         model = job_model({k: {MODEL_KEY: m} for k, m in found["models"].items()})

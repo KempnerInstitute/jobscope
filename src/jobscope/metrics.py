@@ -26,8 +26,8 @@ The vocabulary, kept deliberately small:
 ``cap``       can only push a verdict *down*, never up -- POWER_W, whose floor is
               per GPU model. Not a percentage, so it has no tier of its own.
 
-``cap`` is documentation now rather than a lookup: ``[classify] floor`` names the
-metrics that lower a verdict, so the classifier reads the resolved Thresholds and
+``cap`` is documentation now rather than a lookup: ``[eff] floor`` names the
+metrics that lower a verdict, so job_eff reads the resolved Thresholds and
 not this role. It stays because it is still true of POWER_W, and a site adding a
 second floor metric should be able to see that the shape has a name.
 

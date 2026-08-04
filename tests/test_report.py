@@ -915,62 +915,62 @@ def _finish(records, view="all", **kw):
     return out.getvalue()
 
 
-def test_single_job_classification_is_combined_when_cpu_and_gpu_both_present():
-    """--all (the default) sees both CPU% and GPU% -- classify_combined()'s call."""
+def test_single_job_efficiency_is_combined_when_cpu_and_gpu_both_present():
+    """--all (the default) sees both CPU% and GPU%, so both vote."""
     records = {"1": _gpu_job("1", {"0": 90.0})}   # GPU% 90 (good), CPU%/MEM% 50 (jobstats)
     text = _finish(records, view="all")
-    assert "Classification: good (>40%)" in text
+    assert "Efficiency: good (>40%)" in text
 
 
-def test_single_job_classification_falls_back_to_plain_gpu_for_a_gpu_view():
+def test_single_job_efficiency_falls_back_to_plain_gpu_for_a_gpu_view():
     """--gpu excludes CPU%/MEM% from the columns, so there is nothing to combine
     with -- classify() alone decides, unsplit ("wasteful", not "wasteful-*")."""
     records = {"1": _gpu_job("1", {"0": 0.5})}    # GPU% 0.5 -> wasteful
     text = _finish(records, view="gpu")
-    assert "Classification: wasteful (<2%)" in text
+    assert "Efficiency: wasteful (<2%)" in text
 
 
-def test_single_job_classification_uses_cpu_alone_for_a_cpu_view():
+def test_single_job_efficiency_uses_cpu_alone_for_a_cpu_view():
     records = {"1": _gpu_job("1", None)}          # no GPU data at all: CPU-only job
     text = _finish(records, view="cpu")
-    assert "Classification: good (>40%)" in text   # CPU% 50 from the jobstats summary
+    assert "Efficiency: good (>40%)" in text   # CPU% 50 from the jobstats summary
 
 
-def test_single_job_classification_is_not_skewed_by_power_w_wattage():
+def test_single_job_efficiency_is_not_skewed_by_power_w_wattage():
     """POWER_W's raw watts (e.g. 219) must never win classify()'s max() outright --
     it caps the verdict, it does not vote in it (regression: it used to leak into
     the voting dict and its wattage would dominate any percentage)."""
     records = {"1": _gpu_job("1", {"0": 31.0})}   # GPU% 31 -> "average" (20-40%)
     dcgm_data = {"1": ({"SM_ACT%": 20.0, "TENSOR%": 3.0, "DRAM%": 19.0, "POWER_W": 219.0}, {})}
     text = _finish(records, view="all", show_dcgm=True, dcgm_data=dcgm_data)
-    assert "Classification: average (20-40%)" in text
+    assert "Efficiency: average (20-40%)" in text
 
 
-def test_single_job_classification_describes_the_voting_metrics():
+def test_single_job_efficiency_describes_the_voting_metrics():
     records = {"1": _gpu_job("1", {"0": 90.0})}
     dcgm_data = {"1": ({"SM_ACT%": 20.0, "TENSOR%": 3.0, "DRAM%": 19.0, "POWER_W": 219.0}, {})}
     # Mentioning the POWER_W cap requires a resolvable floor -- thresholds configured.
     text = _finish(records, view="all", show_dcgm=True, dcgm_data=dcgm_data,
                   thresholds=_thresholds())
-    assert "Classified by best of GPU%" in text
+    assert "Graded by best of GPU%" in text
     assert "POWER_W lowers it below the floor" in text
     assert "CPU% can vote no higher than inefficient" in text
 
 
-def test_classification_description_names_a_site_configured_ceiling(
+def test_efficiency_description_names_a_site_configured_ceiling(
         hermetic_config, tmp_path):
     """The line must describe the rule the run used, not the built-in default.
 
     It read config.DEFAULT_VOTE_CEILING directly, so a ceiling added through
-    [classify.ceiling] capped verdicts while going unmentioned -- the one thing a
+    [eff.ceiling] capped verdicts while going unmentioned -- the one thing a
     "judged by" line exists to prevent.
     """
-    from jobscope.classifier import classify_description
+    from jobscope.job_eff import classify_description
     from jobscope.config import load_config
 
     path = tmp_path / "c.toml"
-    path.write_text('[classify]\nvote = ["gpu", "sm_act", "cpu"]\n'
-                    '[classify.ceiling]\nsm_act = "average"\n')
+    path.write_text('[eff]\nvote = ["gpu", "sm_act", "cpu"]\n'
+                    '[eff.ceiling]\nsm_act = "average"\n')
     thresholds = load_config(str(path)).thresholds
     text = classify_description(["GPU%", "SM_ACT%", "CPU%"], [], thresholds)
     assert "SM_ACT% can vote no higher than average" in text
@@ -979,33 +979,33 @@ def test_classification_description_names_a_site_configured_ceiling(
     assert "GPU% can vote" not in text
 
 
-def test_single_job_classification_description_omits_cpu_for_a_gpu_view():
+def test_single_job_efficiency_description_omits_cpu_for_a_gpu_view():
     records = {"1": _gpu_job("1", {"0": 90.0})}
     text = _finish(records, view="gpu")
-    assert "Classified by best of GPU%" in text
+    assert "Graded by best of GPU%" in text
     assert "CPU% splits the worst band" not in text
 
 
-def test_single_job_classification_description_for_a_cpu_view():
+def test_single_job_efficiency_description_for_a_cpu_view():
     records = {"1": _gpu_job("1", None)}
     text = _finish(records, view="cpu")
-    assert "Classified by best of CPU%" in text
+    assert "Graded by best of CPU%" in text
 
 
-def test_single_job_with_no_jobstats_gets_no_classification_line():
+def test_single_job_with_no_jobstats_gets_no_efficiency_line():
     record = JobRecord(jobid="1", state="COMPLETED", name="j", runtime="00:10:00",
                        nodes="1", gpus=0, stats={}, start=1000, end=1100, duration=100,
                        jobid_raw="1", cluster="c", user="alice")
     text = _finish({"1": record})
-    assert "Classification" not in text
+    assert "Efficiency:" not in text
 
 
-def test_a_multi_job_selection_gets_no_classification_line():
+def test_a_multi_job_selection_gets_no_efficiency_line():
     """The line is single-job-only -- a partition sweep keeps its existing Worst
     rows instead, so there is no ambiguity about which job it would describe."""
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 5.0})}
     text = _finish(records)
-    assert "Classification" not in text
+    assert "Efficiency:" not in text
 
 
 def test_the_bar_title_obeys_noheader():
@@ -1436,7 +1436,7 @@ def test_narrow_views_show_only_their_own_worst_row():
 def test_wasteful_headings_state_their_own_criteria():
     """Every heading -- single-metric and combined -- names the cutoff it used,
     not a bare number the reader has to look up, so it stays true after a site
-    tunes config.toml. The cutoff is `wasteful` -- the same edge --ts --classify's
+    tunes config.toml. The cutoff is `wasteful` -- the same edge --ts --eff's
     own "wasteful" tier is graded against -- and CPU%'s own default is 5, not the
     catalog-wide 2, because a GPU job legitimately holds cores it never uses."""
     records = {
@@ -1460,7 +1460,7 @@ def test_wasteful_headings_state_their_own_criteria():
 
 def test_a_custom_wasteful_cutoff_changes_membership_and_the_heading():
     """A site-tuned `wasteful` moves both the Wasteful row's membership and its
-    printed criteria -- the one definition --ts --classify also reads."""
+    printed criteria -- the one definition --ts --eff also reads."""
     from jobscope.config import Thresholds
     # GPU% 0 (always wasteful); CPU% 6 -- wasteful at a cutoff of 8, not at 2.
     records = {"1": _timed_job("1", 3600, gpu_util=0.0, gpus=1, cores=10,
@@ -2387,7 +2387,7 @@ def test_the_jobid_leads_only_when_several_jobs_are_present():
     assert two.splitlines()[0].split()[:2] == ["JOBID", "NODE"]
 
 
-# --- --classify: efficiency categories --------------------------------------
+# --- --eff: efficiency categories --------------------------------------
 
 @pytest.mark.parametrize("best,category", [
     (0.0, "wasteful"), (1.9, "wasteful"),
@@ -2550,7 +2550,7 @@ def test_host_mem_takes_no_part_in_the_verdict_either():
     assert report.classify_metrics(["CPU%", "MEM%"]) == ["CPU%"]
 
 
-def _classify_rows(jobs):
+def _ts_eff_rows(jobs):
     """`jobs` is {jobid: {user, metrics...}} -> two samples each."""
     rows = []
     for jobid, spec in jobs.items():
@@ -2561,11 +2561,11 @@ def _classify_rows(jobs):
     return rows
 
 
-def _classify(jobs, columns=("GPU%", "SM_ACT%", "GMEM%", "POWER_W"), **kw):
+def _ts_eff(jobs, columns=("GPU%", "SM_ACT%", "GMEM%", "POWER_W"), **kw):
     out = io.StringIO()
     show_all = kw.pop("show_all", False)
-    report.timeseries_classify(
-        _classify_rows(jobs), list(columns),
+    report.timeseries_eff(
+        _ts_eff_rows(jobs), list(columns),
         RenderOptions(view="all", header=True, thresholds=_thresholds(), **kw),
         out=out, level="job", show_all=show_all)
     return out.getvalue()
@@ -2573,22 +2573,22 @@ def _classify(jobs, columns=("GPU%", "SM_ACT%", "GMEM%", "POWER_W"), **kw):
 
 def test_the_report_names_the_metrics_it_judged_on():
     """--dcgm widens the set, so 'best of' means something different per run."""
-    text = _classify({"1": {"GPU%": 50, "SM_ACT%": 40, "GMEM%": 90, "POWER_W": 300}})
+    text = _ts_eff({"1": {"GPU%": 50, "SM_ACT%": 40, "GMEM%": 90, "POWER_W": 300}})
     assert "by best of GPU%, SM_ACT%" in text and "GMEM%" not in text.splitlines()[0]
 
 
 def test_good_collapses_unless_asked_for():
     """On a healthy partition it is most of the output and none of the point."""
     jobs = {"1": {"GPU%": 90, "SM_ACT%": 80, "GMEM%": 50, "POWER_W": 400}}
-    assert "--classify all" in _classify(jobs)
-    assert "1 " in _classify(jobs, show_all=True).split("good")[1]
+    assert "--eff all" in _ts_eff(jobs)
+    assert "1 " in _ts_eff(jobs, show_all=True).split("good")[1]
 
 
 def test_the_categories_are_listed_worst_first():
     jobs = {"1": {"GPU%": 90, "SM_ACT%": 90, "GMEM%": 1, "POWER_W": 400},
             "2": {"GPU%": 0.5, "SM_ACT%": 0.1, "GMEM%": 1, "POWER_W": 70},
             "3": {"GPU%": 15, "SM_ACT%": 12, "GMEM%": 1, "POWER_W": 300}}
-    text = _classify(jobs)
+    text = _ts_eff(jobs)
     order = [ln.strip().split(" (")[0] for ln in text.splitlines()
              if ln.startswith("  ") and not ln.startswith("    ") and ln.endswith("jobs")]
     assert order == ["wasteful", "needs improvement", "good"]
@@ -2600,7 +2600,7 @@ def test_every_tier_heading_enumerates_its_own_metrics_and_range():
     jobs = {"1": {"GPU%": 90, "SM_ACT%": 80, "GMEM%": 1, "POWER_W": 400},
             "2": {"GPU%": 0.5, "SM_ACT%": 0.1, "GMEM%": 1, "POWER_W": 70},
             "3": {"GPU%": 15, "SM_ACT%": 12, "GMEM%": 1, "POWER_W": 300}}
-    text = _classify(jobs, show_all=True)
+    text = _ts_eff(jobs, show_all=True)
     assert "wasteful (GPU% <2%, SM_ACT% <2%)" in text
     assert "needs improvement (best of GPU%, SM_ACT%: 10-20%)" in text
     assert "good (best of GPU%, SM_ACT%: >40%)" in text
@@ -2614,7 +2614,7 @@ def test_cpu_in_a_combined_series_lifts_a_gpu_idle_unit_off_wasteful():
             "2": {"GPU%": 0.5, "CPU%": 1.0},         # wasteful: idle on both
             "3": {"GPU%": 0.5, "CPU%": 90.0},        # inefficient: host busy, cards idle
             "4": {"GPU%": 15, "CPU%": 1.0}}          # needs improvement
-    text = _classify(jobs, columns=("GPU%", "CPU%"))
+    text = _ts_eff(jobs, columns=("GPU%", "CPU%"))
     order = [ln.strip().split(" (")[0] for ln in text.splitlines()
              if ln.startswith("  ") and not ln.startswith("    ") and ln.endswith("jobs")]
     assert order == ["wasteful", "inefficient", "needs improvement", "good"]
@@ -2629,14 +2629,14 @@ def test_a_combined_series_ranks_by_gpu_percent_not_cpu():
     same category -- which is what lets this isolate the ranking key from the
     category split tested above."""
     jobs = {"9": {"GPU%": 1.5, "CPU%": 90.0}, "1": {"GPU%": 0.2, "CPU%": 90.0}}
-    text = _classify(jobs, columns=("GPU%", "CPU%"), show_all=True)
+    text = _ts_eff(jobs, columns=("GPU%", "CPU%"), show_all=True)
     rows = [ln for ln in text.splitlines() if ln.strip().startswith(("9", "1"))]
     assert [r.split()[0] for r in rows] == ["1", "9"]     # 0.2 before 1.5
 
 
 def test_a_combined_series_shows_cpu_percent_but_it_does_not_vote():
     jobs = {"1": {"GPU%": 50, "CPU%": 3}}
-    text = _classify(jobs, columns=("GPU%", "CPU%"), show_all=True)
+    text = _ts_eff(jobs, columns=("GPU%", "CPU%"), show_all=True)
     assert "good" in text and "CPU%" in text     # displayed
     assert "by best of GPU%" in text             # but not part of the vote
 
@@ -2645,7 +2645,7 @@ def test_a_cpu_only_series_still_uses_the_plain_categories():
     """CPU% with no other GPU metric present stays on the ordinary path -- there
     is nothing for it to be "combined" with."""
     jobs = {"1": {"CPU%": 0.5}}
-    text = _classify(jobs, columns=("CPU%",))
+    text = _ts_eff(jobs, columns=("CPU%",))
     assert "wasteful-cpu-gpu" not in text and "wasteful-gpu" not in text
     order = [ln.strip().split(" (")[0] for ln in text.splitlines()
              if ln.startswith("  ") and not ln.startswith("    ") and ln.endswith("jobs")]
@@ -2656,7 +2656,7 @@ def test_the_csv_is_jobid_user_metrics_label():
     """The shape asked for: plain values, the label last."""
     jobs = {"1": {"GPU%": 0.4, "SM_ACT%": 0.0, "GMEM%": 90, "POWER_W": 73,
                   "USER": "alice"}}
-    text = _classify(jobs, csv=True)
+    text = _ts_eff(jobs, csv=True)
     header, row = [ln.split(",") for ln in text.strip().splitlines()]
     assert header == ["JOBID", "USER", "GPU%", "SM_ACT%", "GMEM%", "POWER_W", "LABEL"]
     assert row == ["1", "alice", "0.4", "0.0", "90.0", "73.0", "wasteful"]
@@ -2666,14 +2666,14 @@ def test_the_csv_reports_metrics_the_verdict_did_not_use():
     """GMEM% and POWER_W do not vote, but a row you will sort or join on should
     still carry what was measured."""
     jobs = {"1": {"GPU%": 50, "SM_ACT%": 40, "GMEM%": 88, "POWER_W": 300}}
-    header = _classify(jobs, csv=True).splitlines()[0].split(",")
+    header = _ts_eff(jobs, csv=True).splitlines()[0].split(",")
     assert "GMEM%" in header and "POWER_W" in header
     assert "GMEM%" not in report.classify_metrics(list(header))
 
 
 def test_a_series_with_no_percentages_cannot_be_classified():
     with pytest.raises(JobscopeError, match="no %-metrics"):
-        _classify({"1": {"POWER_W": 300}}, columns=("POWER_W",))
+        _ts_eff({"1": {"POWER_W": 300}}, columns=("POWER_W",))
 
 
 # --- the POWER_W floor follows the card -------------------------------------
@@ -2710,8 +2710,8 @@ def test_power_is_graded_against_its_own_card(model, watts, band):
     assert report.cell_band(_per_model_options(), "POWER_W", watts, model) == band
 
 
-def test_classify_caps_using_the_per_model_floor():
-    """--classify's cap follows the card, the same as the table views' POWER_W cell."""
+def test_eff_caps_using_the_per_model_floor():
+    """--eff's cap follows the card, the same as the table views' POWER_W cell."""
     rows = [
         {"JOBID": "1", "USER": "alice", "NODE": "n1", "GPU": "0", "MODEL": RTX,
          "GPU%": "45", "POWER_W": "165"},                              # idle for an RTX
@@ -2719,7 +2719,7 @@ def test_classify_caps_using_the_per_model_floor():
          "MODEL": "Tesla V100-PCIE-32GB", "GPU%": "45", "POWER_W": "165"},  # busy for a V100
     ]
     out = io.StringIO()
-    report.timeseries_classify(
+    report.timeseries_eff(
         rows, ["JOBID", "USER", "NODE", "GPU", "MODEL", "GPU%", "POWER_W"],
         _per_model_options(csv=True), out=out, level="job", show_all=True)
     verdicts = {row.split(",")[0]: row.split(",")[-1]
@@ -2739,7 +2739,7 @@ def test_only_a_sustained_low_mean_caps_not_a_momentary_dip():
     sustained_idle = [{"JOBID": "2", "USER": "u", "NODE": "n1", "GPU": "0",
                        "GPU%": "33", "POWER_W": p} for p in ("67", "70", "68", "72", "69")]
     out = io.StringIO()
-    report.timeseries_classify(
+    report.timeseries_eff(
         brief_dip + sustained_idle, ["JOBID", "USER", "NODE", "GPU", "GPU%", "POWER_W"],
         RenderOptions(view="all", csv=True, thresholds=_thresholds()),
         out=out, level="job", show_all=True)
@@ -2824,12 +2824,12 @@ def test_for_model_returns_itself_when_nothing_is_configured():
     assert t.for_model(RTX) is not t and t.for_model(RTX).power_w == 330
 
 
-def test_the_classify_rows_are_aligned_columns_under_a_header():
+def test_the_ts_eff_rows_are_aligned_columns_under_a_header():
     """Not inline "NAME value" pairs: a jobid, a username and a reading ran together."""
     jobs = {"1": {"GPU%": 0.4, "SM_ACT%": 0.0, "GMEM%": 9, "POWER_W": 73, "USER": "al"},
             "2": {"GPU%": 0.1, "SM_ACT%": 0.0, "GMEM%": 9, "POWER_W": 70,
                   "USER": "a-very-long-username"}}
-    lines = [ln for ln in _classify(jobs).splitlines() if ln.startswith("    ")]
+    lines = [ln for ln in _ts_eff(jobs).splitlines() if ln.startswith("    ")]
     header, *body = lines
     assert header.split() == ["JOBID", "NODES", "GPUS", "USER", "GPU%", "SM_ACT%",
                               "POWER_W"]
@@ -2839,12 +2839,12 @@ def test_the_classify_rows_are_aligned_columns_under_a_header():
     assert all(len(ln.split()) == 7 for ln in body)
 
 
-def test_classify_names_the_unit_it_judged():
+def test_eff_names_the_unit_it_judged():
     """At node level every row used to print the job id, so the nodes were identical."""
     rows = [{"JOBID": "1", "USER": "u", "NODE": n, "GPU": "0", "GPU%": "50"}
             for n in ("nodeA", "nodeB") for _ in range(2)]
     out = io.StringIO()
-    report.timeseries_classify(rows, ["GPU%"],
+    report.timeseries_eff(rows, ["GPU%"],
                                RenderOptions(view="all", header=True,
                                              thresholds=_thresholds()),
                                out=out, level="node", show_all=True)
@@ -2981,7 +2981,7 @@ def test_a_unit_with_no_gpu_samples_reads_no_data_not_wasteful():
     died, the node restarted, the window predates retention. Reporting that as
     waste turns a collection gap into an accusation, and it is the reading someone
     acts on."""
-    text = _classify({"1": {"CPU%": 50.0}}, columns=("GPU%", "SM_ACT%", "CPU%"),
+    text = _ts_eff({"1": {"CPU%": 50.0}}, columns=("GPU%", "SM_ACT%", "CPU%"),
                      csv=True)
     _, rows = plot.parse_csv(io.StringIO(text))
     assert rows[0]["LABEL"] == report.NO_DATA
@@ -2990,14 +2990,14 @@ def test_a_unit_with_no_gpu_samples_reads_no_data_not_wasteful():
 def test_no_data_does_not_fall_through_to_the_cpu_ballot():
     """The failure this replaces: with GPU columns blank, a busy CPU would carry
     the job to `good` -- reporting a GPU job with dead telemetry as healthy."""
-    text = _classify({"1": {"CPU%": 95.0}}, columns=("GPU%", "SM_ACT%", "CPU%"),
+    text = _ts_eff({"1": {"CPU%": 95.0}}, columns=("GPU%", "SM_ACT%", "CPU%"),
                      csv=True)
     _, rows = plot.parse_csv(io.StringIO(text))
     assert rows[0]["LABEL"] == report.NO_DATA
 
 
 def test_a_measured_unit_is_unaffected_by_the_no_data_path():
-    text = _classify({"1": {"GPU%": 90.0, "SM_ACT%": 80.0, "CPU%": 50.0}},
+    text = _ts_eff({"1": {"GPU%": 90.0, "SM_ACT%": 80.0, "CPU%": 50.0}},
                      columns=("GPU%", "SM_ACT%", "CPU%"), csv=True)
     _, rows = plot.parse_csv(io.StringIO(text))
     assert rows[0]["LABEL"] == "good"
@@ -3006,7 +3006,7 @@ def test_a_measured_unit_is_unaffected_by_the_no_data_path():
 def test_no_data_units_sort_after_the_real_findings():
     """It is an absence, not a severity. Ranking it first would push the rows
     someone opened the report for off the page."""
-    text = _classify({"idle": {"GPU%": 0.5, "SM_ACT%": 0.1, "CPU%": 1.0},
+    text = _ts_eff({"idle": {"GPU%": 0.5, "SM_ACT%": 0.1, "CPU%": 1.0},
                       "blank": {"CPU%": 50.0}},
                      columns=("GPU%", "SM_ACT%", "CPU%"), csv=True)
     _, rows = plot.parse_csv(io.StringIO(text))
@@ -3015,9 +3015,9 @@ def test_no_data_units_sort_after_the_real_findings():
 
 
 def test_a_cpu_only_series_is_judged_on_cpu_not_called_no_data():
-    """--cpu --ts --classify has CPU% as its only voting column, and must stay on
+    """--cpu --ts --eff has CPU% as its only voting column, and must stay on
     the ordinary path: CPU% votes for itself there."""
-    text = _classify({"1": {"CPU%": 0.5}}, columns=("CPU%",), csv=True)
+    text = _ts_eff({"1": {"CPU%": 0.5}}, columns=("CPU%",), csv=True)
     _, rows = plot.parse_csv(io.StringIO(text))
     assert rows[0]["LABEL"] == "wasteful"
 

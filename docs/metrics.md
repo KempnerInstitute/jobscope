@@ -11,7 +11,7 @@ place of writing it. Both time-series flags take an optional window (`--ts 1h`),
 which narrows the range queries to the end of the run rather than filtering rows,
 and `--ts --stats` reduces the series to min/mean/max/last per GPU per metric
 without querying anything further -- `--stats node` and `--stats job`
-pool the same samples over a host's GPUs and over the whole job. `--classify`
+pool the same samples over a host's GPUs and over the whole job. `--eff`
 turns those means into a verdict per job -- wasteful / inefficient / needs
 improvement / average / good, from each job's *best* %-metric, with `GMEM%`
 excluded and a `POWER_W` reading below the floor capping the verdict at

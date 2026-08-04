@@ -49,7 +49,7 @@ What it detects, all of it measured rather than assumed:
 | `[prometheus] sampling_period` | the spacing of raw samples — **not** `query_range`, which returns whatever step you pass |
 | `[site]` labels | probed against real series, trying `instance`/`host`/`node`/`nodename` when the configured one answers nothing |
 | `[metrics]` lists | narrowed to series this server actually carries, so a missing exporter does not leave columns blank forever |
-| `[classify.floor.power]` | per GPU model: idle p90 vs busy p10, floor between them |
+| `[eff.floor.power]` | per GPU model: idle p90 vs busy p10, floor between them |
 
 **Thresholds are deliberately absent.** A band edge is a policy choice about what
 counts as waste, not a property of the cluster, so the built-ins apply until you set
@@ -317,7 +317,7 @@ Setting only `inefficient.cpu = 1` against a `wasteful` of 2 would leave CPU% a 
 nothing can land in; jobscope rejects that rather than grade by it. Equal neighbours
 are allowed — they collapse a band on purpose.
 
-### `[classify]` — how metrics become a verdict
+### `[eff]` — how metrics become an efficiency verdict
 
 Two roles, and the asymmetry is the whole model:
 
@@ -378,7 +378,7 @@ Keys are the model string the exporter itself reports — the `name` label on
 `nvidia_gpu_*`, `modelName` on `DCGM_FI_*`. jobscope matches it exactly, so copy it
 verbatim; `jobscope <job> --per-gpu` shows which cards a job ran on.
 
-A bare `[classify.floor]` with nothing under it means **no floors**. That is legal and
+A bare `[eff.floor]` with nothing under it means **no floors**. That is legal and
 it re-opens what the floor closes: a job at GPU% 48 drawing 80 W goes back to reading
 `good`.
 
@@ -395,7 +395,7 @@ cannot silently widen every report, or the queries every sweep pays for.
 The same table with a **built-in's** name overrides it, which is how a cluster whose
 exporter uses different series names ports without patching jobscope. An override
 changes only what it names; header, tier, group and roles are inherited, so repointing
-`cgroup.cpu` does not rename the CPU% column or take it out of the classifier.
+`cgroup.cpu` does not rename the CPU% column or take it out of the efficiency ballot.
 
 ### `[colors]`
 
@@ -431,6 +431,14 @@ Retired flag spellings, each a duplicate of the one beside it:
 | `--stats_per_node`, `--stats_per_job`, `--all_categories` | the `-` spellings |
 | `--extended` | `--all-metrics` |
 | `--plot_avgeff` | nothing — the bars are the default; `--no-plot` omits them |
+| `--classify` | `--eff` — named for the question, not the mechanism |
+
+**`[classify]` in a config file is `[eff]`.** This one needs acting on rather than
+just noting: an unknown top-level section is ignored in silence, so a stale
+`[classify]` would leave a site's own floors and ceilings unapplied and its jobs
+graded by the built-in rule instead. jobscope prints a note when it sees one — and
+because `probe --init` used to write `[classify.floor.power]`, generated configs are
+affected too. Rename the section; the keys under it are unchanged.
 
 `--plot_ts` and `--node` keep both spellings: they are what the docs and most
 command lines actually use.

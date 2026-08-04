@@ -31,5 +31,5 @@ POWER_W  11.9h (100%)    0    0       1
   TENSOR%    3%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
     DRAM%    3%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
 
-Classified by best of GPU%, SM_ACT%, TENSOR%, DRAM%, CPU% (CPU% can vote no higher than inefficient; POWER_W lowers it below the floor).
-Classification: average (20-40%)
+Graded by best of GPU%, SM_ACT%, TENSOR%, DRAM%, CPU% (CPU% can vote no higher than inefficient; POWER_W lowers it below the floor).
+Efficiency: average (20-40%)

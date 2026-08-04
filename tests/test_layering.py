@@ -8,7 +8,7 @@ whole package to find out where the queries live. So the layering is a test.
 Layers, bottom up:
 
     errors, models                 leaves; import nothing from the package
-    config, metrics, classifier,   policy -- read settings, return decisions
+    config, metrics, job_eff,      policy -- read settings, return decisions
       source
     prometheus                     the client
     summary, cpu, nvml, dcgm,         collectors -- turn a source into numbers
@@ -30,7 +30,7 @@ import pytest
 SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "jobscope"
 
 LEAVES = {"errors", "models"}
-POLICY = {"config", "metrics", "classifier", "source"}
+POLICY = {"config", "metrics", "job_eff", "source"}
 COLLECTORS = {"jobstats", "cpu", "nvml", "dcgm", "slurm", "running", "timeseries",
               "extra_metric", "job_ave_stats"}
 RENDER = {"report", "plot"}
@@ -98,6 +98,6 @@ def test_leaves_import_nothing_from_the_package(stem):
     assert not imports_of(stem)
 
 
-def test_the_classifier_renders_nothing():
+def test_job_eff_renders_nothing():
     """The verdict is policy. It must stay callable without a terminal in sight."""
-    assert not imports_of("classifier") & (RENDER | {"prometheus"})
+    assert not imports_of("job_eff") & (RENDER | {"prometheus"})

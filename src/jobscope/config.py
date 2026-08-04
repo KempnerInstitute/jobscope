@@ -46,7 +46,7 @@ DEFAULT_LONG_RUNNING = "3h"
 # Four edges make five tiers -- "good" has none, being everything above `average`.
 # One ordered definition rather than several, because three things depend on this
 # order agreeing: which bucket a cell falls in, which verdict classify() calls
-# "best", and the order --classify lists its categories in. It lives here because
+# "best", and the order --eff lists its categories in. It lives here because
 # report imports config, never the reverse.
 TIERS = (
     ("wasteful", "wasteful"),
@@ -203,7 +203,7 @@ class Palette:
 
         Tier names, edge keys, bucket identifiers and ``long_running`` all resolve,
         because the call sites hold different ones: cell tinting has a bucket, a
-        --classify heading has a tier, the Wasteful rows have neither.
+        --eff heading has a tier, the Wasteful rows have neither.
         """
         table = {role: _sgr(colour) for role, colour in self.colors.items()}
         for tier, key in TIERS:
@@ -470,37 +470,37 @@ class Thresholds:
         return BUCKET_OF.get(self.tier(header, value), "")
 
 
-def _classify(table: Mapping, power_w: float,
-              by_model: Mapping[str, float]) -> Tuple:
-    """``[classify]`` -> ``(vote, floors, ceilings)`` for the band tables.
+def _eff(table: Mapping, power_w: float,
+         by_model: Mapping[str, float]) -> Tuple:
+    """``[eff]`` -> ``(vote, floors, ceilings)`` for the band tables.
 
     Three keys, and the difference between the first two is the whole model:
 
     * ``vote`` -- a list. Best-of-N, so a metric here can only ever *raise* a
       verdict. Omitted means "derive it" -- every graded percentage that is not a
       capacity reading -- which is what lets the catalog grow without editing config.
-    * ``floor`` -- a table per metric, ``[classify.floor.<metric>]``. A floor can
+    * ``floor`` -- a table per metric, ``[eff.floor.<metric>]``. A floor can
       only *lower* a verdict, and that is why it is not a vote: under best-of-N a low
       reading is simply outvoted. Omitted keeps the built-in POWER_W floor; written
-      as a bare ``[classify.floor]`` with nothing under it means no floors at all.
+      as a bare ``[eff.floor]`` with nothing under it means no floors at all.
     * ``ceiling`` -- how high a metric may vote, without stopping it voting.
 
     ``floor`` is a table rather than a list-plus-values because TOML forbids a key
     being both, and one concept beats two near-identical names.
 
-    ``[thresholds] power_w`` still feeds POWER_W's floor when ``[classify.floor]``
+    ``[thresholds] power_w`` still feeds POWER_W's floor when ``[eff.floor]``
     says nothing, so an existing config keeps working.
     """
     known = ("vote", "floor", "ceiling")
     unknown = sorted(set(table) - set(known))
     if unknown:
-        raise JobscopeError("[classify] has no %s; it takes %s"
+        raise JobscopeError("[eff] has no %s; it takes %s"
                             % (", ".join(repr(k) for k in unknown), ", ".join(known)))
 
-    vote = _metric_list("[classify] vote", table.get("vote"))
+    vote = _metric_list("[eff] vote", table.get("vote"))
     if vote is not None and not vote:
         raise JobscopeError(
-            "[classify] vote is empty, which leaves nothing to judge a job by. Omit "
+            "[eff] vote is empty, which leaves nothing to judge a job by. Omit "
             "it to use every graded percentage, or name at least one metric.")
     resolved = tuple(metric_header(n) for n in vote) if vote else None
 
@@ -509,40 +509,40 @@ def _classify(table: Mapping, power_w: float,
         floors = power_floors(power_w, by_model)
     elif not isinstance(floor_table, Mapping):
         raise JobscopeError(
-            "[classify] floor must be a table per metric, e.g.\n"
-            "  [classify.floor.power]\n  default = 100\n"
-            "-- not %r. Write a bare [classify.floor] for no floors at all."
+            "[eff] floor must be a table per metric, e.g.\n"
+            "  [eff.floor.power]\n  default = 100\n"
+            "-- not %r. Write a bare [eff.floor] for no floors at all."
             % (floor_table,))
     else:
         # An explicit table replaces the built-in, so an empty one really means "no
         # metric caps a verdict" -- which re-opens what the power floor closes.
         floors = {metric_header(name): _floor_table(
-            "[classify.floor.%s]" % name, body, power_w)
+            "[eff.floor.%s]" % name, body, power_w)
             for name, body in floor_table.items()}
 
     ceilings = dict(DEFAULT_VOTE_CEILING)
     for name, tier in (table.get("ceiling") or {}).items():
         if str(tier) not in TIER_NAMES:
             raise JobscopeError(
-                "[classify.ceiling] %s = %r is not a tier; the tiers are %s"
+                "[eff.ceiling] %s = %r is not a tier; the tiers are %s"
                 % (name, tier, ", ".join(TIER_NAMES)))
         ceilings[metric_header(name)] = str(tier)
 
     both = sorted(set(resolved or ()) & set(floors))
     if both:
         raise JobscopeError(
-            "[classify] names %s as both a vote and a floor. A vote can only raise a "
+            "[eff] names %s as both a vote and a floor. A vote can only raise a "
             "verdict and a floor can only lower it, so a metric cannot be both -- "
             "pick one." % ", ".join(both))
 
-    _check_classify_names("[classify] vote", resolved)
-    _check_classify_names("[classify] floor", tuple(floors) if floor_table else None)
-    _check_classify_names("[classify.ceiling]",
-                          tuple(metric_header(n) for n in (table.get("ceiling") or {})))
+    _check_eff_names("[eff] vote", resolved)
+    _check_eff_names("[eff] floor", tuple(floors) if floor_table else None)
+    _check_eff_names("[eff.ceiling]",
+                     tuple(metric_header(n) for n in (table.get("ceiling") or {})))
     return resolved, floors, ceilings
 
 
-def _check_classify_names(where: str, headers: Optional[Tuple[str, ...]]) -> None:
+def _check_eff_names(where: str, headers: Optional[Tuple[str, ...]]) -> None:
     """Reject a name no metric answers to.
 
     Named rather than ignored, and this one matters more than most: a typo in
@@ -574,11 +574,11 @@ def _all_headers() -> frozenset:
 
 
 def _metric_list(where: str, raw) -> Optional[list]:
-    """A ``[classify]`` metric list, or None when the key is absent."""
+    """An ``[eff]`` metric list, or None when the key is absent."""
     if raw is None:
         return None
     if isinstance(raw, Mapping):
-        # `[classify.floor.power]` tables make `floor` a table as well as a list; the
+        # `[eff.floor.power]` tables make `floor` a table as well as a list; the
         # list form is what names which of them are active.
         return sorted(raw)
     if not isinstance(raw, (list, tuple)):
@@ -589,7 +589,7 @@ def _metric_list(where: str, raw) -> Optional[list]:
 
 
 def _floor_table(where: str, body, fallback: float) -> dict:
-    """One ``[classify.floor.<metric>]`` table -> ``{"": default, model: value}``."""
+    """One ``[eff.floor.<metric>]`` table -> ``{"": default, model: value}``."""
     if body is None:
         return {"": float(fallback)}
     if not isinstance(body, Mapping):
@@ -723,7 +723,7 @@ class Metrics:
     """
 
     summary: Tuple = ()      # the summary table's profiling block
-    timeseries: Tuple = ()   # --ts / --plot_ts / --classify
+    timeseries: Tuple = ()   # --ts / --plot_ts / --eff
     extended: Tuple = ()     # --all-metrics
     host_summary: Tuple = ()      # CPU%/MEM% and any other cgroup column
     host_timeseries: Tuple = ()
@@ -964,7 +964,17 @@ def load_config(path: Optional[str] = None,
               % (named[0], other, other,
                  "the [thresholds] edges" if edges else "the built-in edges"),
               file=sys.stderr)
-    vote, floors, ceilings = _classify(data.get("classify") or {}, power_w, by_model)
+    if "classify" in data:
+        # Same reason as the [thresholds] note above, and a worse failure without it:
+        # an unknown top-level section is silently ignored, so a site's floors and
+        # ceilings would quietly stop applying and its jobs would be graded by the
+        # built-in rule instead -- a changed verdict with nothing on screen to
+        # explain it. 'jobscope probe --init' wrote this section, so this is not a
+        # hypothetical config.
+        print("note: [classify] is now [eff]; its vote, floor and ceiling settings are"
+              " NOT being applied. Rename the section (see jobscope config --example).",
+              file=sys.stderr)
+    vote, floors, ceilings = _eff(data.get("eff") or {}, power_w, by_model)
     bands = {view: _band_table(thr.get(view) or {}, view, floors, vote, ceilings,
                                base=edges)
              for view in BAND_VIEWS}
@@ -1158,7 +1168,7 @@ def _builtin_named(family: str, name: str):
     Looked up so an override inherits every field it does not mention. Overriding
     ``cpu`` to point at another exporter's series must not also rename the column
     from ``CPU%`` to ``CPU`` -- the header is the identity ``[thresholds]``,
-    ``--csv`` consumers and the classifier's own literals all key on.
+    ``--csv`` consumers and job_eff's own literals all key on.
 
     Matched on family as well as key for the GPU families, because one column can
     have a candidate in each: without it, ``[metrics.nvml.power]`` would inherit

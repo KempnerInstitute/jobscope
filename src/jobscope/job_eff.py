@@ -3,7 +3,7 @@
 Separate from :mod:`jobscope.report` because judging and rendering are different
 questions, and only one of them is a policy. Everything here reads ``Thresholds``
 and returns a name; nothing here knows about columns, colour or terminal width. It
-is also the module a site's ``[classify]`` config lands in, so keeping it free of
+is also the module a site's ``[eff]`` config lands in, so keeping it free of
 display concerns is what makes the config surface reviewable.
 
 Two mechanisms, and the asymmetry between them is the design (see :func:`classify`):
@@ -15,7 +15,7 @@ from typing import Dict, List, Optional
 from . import metrics
 from .config import EDGE_KEYS, TIERS, Thresholds
 
-# --classify bands, worst first: (name, the tier whose colour paints it). Derived
+# --eff bands, worst first: (name, the tier whose colour paints it). Derived
 # from config.TIERS rather than restated, because the order is load-bearing in three
 # places that have to agree -- which bucket a cell counts in, which verdict
 # classify() calls "best", and the order the categories are listed in. The colours
@@ -33,12 +33,12 @@ NO_DATA = "no-data"
 def classify_metrics(columns, thresholds: Optional[Thresholds] = None) -> List[str]:
     """The columns a verdict is taken over, in CSV order.
 
-    Without a configured ``[classify] vote`` this derives the ballot: every graded
+    Without a configured ``[eff] vote`` this derives the ballot: every graded
     percentage that is not a capacity reading. Memory is excluded by its catalog role
     rather than by name, so a cgroup or GPU memory metric added later cannot quietly
     start voting -- see jobscope.metrics.MEMORY.
 
-    With one, the list narrows to it. That is what lets ``--dcgm`` widen the
+    With one, the list narrows to it. That is what lets ``--all-metrics`` widen the
     *columns* from four metrics to fifteen without widening the ballot: a job busy on
     ENC% alone would otherwise read `good`. A configured name overrides the memory
     role too -- a site naming GMEM% is making a claim, and explicit beats inferred.
@@ -166,13 +166,13 @@ def classify_description(voted: List[str], floors: List[str],
                          thresholds: Thresholds) -> str:
     """What a verdict was judged from: which metrics voted, and which could lower it.
 
-    Shared by ``timeseries_classify()`` and the single-job summary's Classification
-    line, so the two describe the same rule in the same words. The ceiling is named
+    Shared by ``timeseries_eff()`` and the single-job summary's Efficiency line, so
+    the two describe the same rule in the same words. The ceiling is named
     where it applies, because "CPU% voted" and "CPU% voted but could not call this
     healthy" are different claims and the second is the one that is true.
 
     Ceilings come from ``thresholds``, not from config.DEFAULT_VOTE_CEILING, so a
-    site that set ``[classify.ceiling]`` is told the rule its own verdicts were
+    site that set ``[eff.ceiling]`` is told the rule its own verdicts were
     reached by. Reading the built-in table here would have described a rule the run
     did not use, which is the one thing this line exists to prevent.
     """
@@ -231,7 +231,7 @@ def _tier_agrees(name: str, thresholds: Thresholds, metrics: List[str]) -> bool:
 
 def tier_criteria(name: str, metrics: List[str], thresholds: Thresholds) -> str:
     """The rule that put a unit in category ``name``, spelled out with its own
-    metrics -- e.g. ``"best of GPU%, SM_ACT%: 2-10%"`` -- so a --classify heading
+    metrics -- e.g. ``"best of GPU%, SM_ACT%: 2-10%"`` -- so a --eff heading
     is self-explanatory without a separate legend lookup. Numbers come from
     ``thresholds``, the same table the run graded against, so the heading can never
     quote a cutoff the verdict did not use.

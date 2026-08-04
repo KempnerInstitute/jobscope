@@ -747,7 +747,7 @@ def _print_config_guide(out) -> None:
     """How to turn the listing above into config -- the reason for printing it.
 
     Spelled out because the mapping is not guessable: the left column is what
-    ``[metrics]``, ``[thresholds]`` and ``[classify]`` accept, and a ``new`` row
+    ``[metrics]``, ``[thresholds]`` and ``[eff]`` accept, and a ``new`` row
     needs a definition before any of them will take it.
     """
     print("""
@@ -759,8 +759,8 @@ unique across families.
 
   [metrics]                            # which metrics each view collects/shows
   summary    = ["gpu", "sm_act", "tensor", "power"]
-  timeseries = ["gpu", "sm_act", "power"]     # --ts / --plot_ts / --classify
-  extended   = "all"                          # --dcgm
+  timeseries = ["gpu", "sm_act", "power"]     # --ts / --plot_ts / --eff
+  extended   = "all"                          # --all-metrics
 
   [thresholds.summary.wasteful]        # per-metric band edges, per view
   default = 2                          # every metric not named below
@@ -768,9 +768,9 @@ unique across families.
   [thresholds.timeslice.wasteful]      # --ts's own edges; inherits nothing
   default = 2
 
-  [classify]                           # which metrics decide a verdict
+  [eff]                                # which metrics decide a verdict
   vote = ["gpu", "sm_act", "cpu"]      # best-of-N; omit to use every percentage
-  [classify.floor.power]               # can only *lower* a verdict
+  [eff.floor.power]                    # can only *lower* a verdict
   default = 100                        # watts; below this, cap at inefficient
 
 Either spelling works -- `sm_act` or `dcgm-sm_act` -- since the names are unique
@@ -805,7 +805,7 @@ The same table with a *built-in's* name **overrides** it, which is how a cluster
 whose exporter uses different series names ports without a patch. An override
 changes only what it names -- header, tier, roles and the rest are inherited, so
 pointing cpu at another series does not rename the CPU%% column or take it out of
-the classifier:
+the efficiency ballot:
 
   [metrics.cgroup.cpu]
   query = "container_cpu_usage_seconds_total"
@@ -1019,7 +1019,7 @@ def emit_config(out, client, cfg, timeout: Optional[float],
                   % ", ".join(dropped), file=out)
 
     floors = measure_power_floors(client, timeout)
-    print("\n[classify.floor.power]", file=out)
+    print("\n[eff.floor.power]", file=out)
     print("default = %g              # watts; below this a GPU counts as idle"
           % config.DEFAULT_POWER_W, file=out)
     if not floors:

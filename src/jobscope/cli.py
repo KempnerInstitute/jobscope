@@ -31,7 +31,7 @@ from .report import (
     SummaryRenderer,
     describe,
     describe_dcgm,
-    timeseries_classify,
+    timeseries_eff,
     timeseries_stats,
 )
 from .running import format_duration, parse_duration
@@ -86,10 +86,14 @@ RETIRED_FLAGS = {
     # Three flags for one axis, folded into the flag's own value.
     "--stats-per-node": "--stats node",
     "--stats-per-job": "--stats job",
-    "--all-categories": "--classify all",
+    "--all-categories": "--eff all",
+    # Named for the mechanism rather than the question. See config.py's [classify]
+    # note for the same rename on the config side, which matters more: a stale
+    # section there is silently ignored, where a stale flag here errors.
+    "--classify": "--eff",
 }
 
-# These six exist only to name their replacement, and they are not free forever: each is
+# These seven exist only to name their replacement, and they are not free forever: each is
 # an argparse action the parser builds on every invocation, and the list only grows.
 # Drop the whole table at the next minor version bump -- by then "unrecognized arguments"
 # is the right answer, because the spellings will have been gone for a release.
@@ -216,17 +220,17 @@ def build_parser():
                        help="--ts: summarize the series instead of writing it -- "
                             "min/mean/max/last per metric over the window, per GPU "
                             "(default), or pooled per 'node', or across the whole job")
-    shape.add_argument("--classify", nargs="?", const=True, default=False,
+    shape.add_argument("--eff", nargs="?", const=True, default=False,
                        metavar="all",
                        help="--ts: group the jobs into efficiency categories -- "
                             "wasteful, inefficient, needs improvement, average, good "
                             "-- by each one's best metric. The cutoffs are per metric "
                             "and come from [thresholds.timeslice] in your config; each "
-                            "heading states the ones it used. '--classify all' lists the "
+                            "heading states the ones it used. '--eff all' lists the "
                             "'good' jobs too, instead of counting them")
-    # Folded into the two flags above. Defined rather than deleted so the message names
-    # the replacement; see RETIRED_FLAGS.
-    for old in ("--stats-per-node", "--stats-per-job", "--all-categories"):
+    # Folded into the two flags above, or renamed. Defined rather than deleted so the
+    # message names the replacement; see RETIRED_FLAGS.
+    for old in ("--stats-per-node", "--stats-per-job", "--all-categories", "--classify"):
         shape.add_argument(old, dest=old.strip("-").replace("-", "_"),
                            action=_Retired, nargs=0, help=argparse.SUPPRESS)
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,
@@ -410,14 +414,14 @@ def _inert_dests(args) -> set:
         hide.update({"view", "per_gpu", "no_plot"})
         if args.plot_ts:
             # raises / exclusive / both noted as ignored below
-            hide.update({"csv", "ts", "stats", "classify"})
+            hide.update({"csv", "ts", "stats", "eff"})
         else:
             hide.add("plot_ts")
             # A plain --ts already writes CSV, so --csv adds nothing -- the two outputs
-            # are byte-identical. Guarded, not blanket: with --stats (or --classify) the
+            # are byte-identical. Guarded, not blanket: with --stats (or --eff) the
             # flag is what turns the summary table into CSV, so it is doing something
             # there and must stay visible.
-            if not (args.stats or args.classify):
+            if not (args.stats or args.eff):
                 hide.add("csv")
     else:
         hide.add("step")  # only emit_timeseries reads it
@@ -425,7 +429,7 @@ def _inert_dests(args) -> set:
         if args.per_gpu:
             hide.add("plot_ts")
         # All three summarize a series, so all three raise without one.
-        hide.update({"stats", "classify"})
+        hide.update({"stats", "eff"})
     if args.view == "cpu":
         # show_dcgm goes false, so no GPU spec list is built -- which makes both the
         # width of that list and where it would have been read from inert.
@@ -722,11 +726,11 @@ def _emitted_series(text: str):
     return (columns, rows) if rows else None
 
 
-def _classify_timeseries(text: str, options, level: str, show_all: bool) -> None:
-    """Sort the series --classify just emitted into categories."""
+def _eff_timeseries(text: str, options, level: str, show_all: bool) -> None:
+    """Sort the series --eff just emitted into categories."""
     found = _emitted_series(text)
     if found:
-        timeseries_classify(found[1], found[0], options, level=level, show_all=show_all)
+        timeseries_eff(found[1], found[0], options, level=level, show_all=show_all)
 
 
 def _stats_timeseries(text: str, options, level: str) -> None:
@@ -796,7 +800,7 @@ def handle_report(args) -> None:
     """The one data path: select jobs, then render at the chosen granularity."""
     # --plot_ts_overlay *is* --plot_ts with a different layout, so it is folded into it
     # here -- before _reclaim_jobid_after_ts, which is the first thing to read the value.
-    # Seven places key on args.plot_ts (the window carriers, the --csv/--stats/--classify
+    # Seven places key on args.plot_ts (the window carriers, the --csv/--stats/--eff
     # guards, the --ts implication, and the narrowed help); folding means every one of
     # them applies to the overlay untouched, and only _plot_timeseries has to know.
     if args.plot_ts_overlay is not False:
@@ -815,21 +819,21 @@ def handle_report(args) -> None:
     timeout = _timeout(args, cfg)
     workers = _workers(args, cfg)
 
-    if args.classify and not args.ts:
-        raise JobscopeError("--classify sorts a time series into categories; add --ts "
-                            "(optionally with a window, e.g. --ts 10m)")
-    if args.classify not in (False, True, "all"):
-        raise JobscopeError("--classify takes no value, or 'all' to list the "
-                            "'good' jobs too; got %r" % (args.classify,))
+    if args.eff and not args.ts:
+        raise JobscopeError("--eff sorts a time series into efficiency categories; add "
+                            "--ts (optionally with a window, e.g. --ts 10m)")
+    if args.eff not in (False, True, "all"):
+        raise JobscopeError("--eff takes no value, or 'all' to list the "
+                            "'good' jobs too; got %r" % (args.eff,))
     if args.stats and not args.ts:
         raise JobscopeError("--stats summarizes a time series; add --ts (optionally with "
                             "a window, e.g. --ts 1h)")
     if args.stats and args.plot_ts:
         print("note: the chart already prints min/mean/max/last; ignoring --stats",
               file=sys.stderr)
-    if args.classify and args.plot_ts:
+    if args.eff and args.plot_ts:
         # The plot branch wins below, so say so rather than drop it silently.
-        print("note: %s draws the series; ignoring --classify" % _plot_flag(args),
+        print("note: %s draws the series; ignoring --eff" % _plot_flag(args),
               file=sys.stderr)
     # --nodename and --gpuid apply everywhere now. On --per-gpu and --ts they filter
     # rows, which have a node and a GPU on them; on the summary there is no row to
@@ -891,7 +895,7 @@ def handle_report(args) -> None:
         if view == "gpu":
             print("note: --gpu does not apply to --ts (a per-scrape metric series)",
                   file=sys.stderr)
-        if not (args.plot_ts or args.stats or args.classify):
+        if not (args.plot_ts or args.stats or args.eff):
             emit_timeseries(request, cfg, timeout, workers, ts_specs, args.step, options)
             return
         buffer = io.StringIO()
@@ -899,11 +903,11 @@ def handle_report(args) -> None:
                         out=buffer)
         if args.plot_ts:
             _plot_timeseries(buffer.getvalue(), args)
-        elif args.classify:
+        elif args.eff:
             # The unit of "which jobs are idle" is the job, so that is the default
-            # level; --stats node classifies hosts on the same rule.
-            _classify_timeseries(buffer.getvalue(), options, args.stats or "job",
-                                 args.classify == "all")
+            # level; --stats node grades hosts on the same rule.
+            _eff_timeseries(buffer.getvalue(), options, args.stats or "job",
+                            args.eff == "all")
         else:
             _stats_timeseries(buffer.getvalue(), options, args.stats)
         return

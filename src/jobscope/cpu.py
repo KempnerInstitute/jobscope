@@ -91,11 +91,11 @@ class CgroupSpec:
 # shown, and the only two a stored summary can reconstruct. The rest are `all`:
 # they exist only in a --ts series (see the module docstring on why the summary
 # cannot have them), and being outside the default group also keeps them out of the
-# default --classify ballot, which they have no business deciding.
+# default --eff ballot, which they have no business deciding.
 CGROUP_METRICS: List[CgroupSpec] = [
     # `resource` pairs it with GPU% as the two distinct things a job holds -- the
     # `gpu-cpu` combined ranking. CPU% also votes, capped at `inefficient` by
-    # [classify.ceiling], since a busy host does not justify a GPU allocation; that
+    # [eff.ceiling], since a busy host does not justify a GPU allocation; that
     # is a threshold rather than a role, so it is not named here.
     CgroupSpec("cpu", "CPU%", "cgroup_cpu_total_seconds",
                "rate", "cpus", 0, "default",
@@ -222,7 +222,7 @@ def _inherit(builtin: CgroupSpec, override: Optional[CgroupSpec]) -> CgroupSpec:
     """``override`` with the built-in's *purpose* kept, or the built-in unchanged.
 
     A site overriding ``cpu`` is saying "my exporter calls that series something
-    else", not "demote CPU% out of the summary and out of the classifier". So
+    else", not "demote CPU% out of the summary and out of the efficiency ballot". So
     ``group`` and ``roles`` come from the built-in: forcing the override's own
     ``group="all"`` would drop CPU% from the default view entirely, and dropping its
     ``split`` role would change how every job is classified -- both silently.

@@ -334,6 +334,39 @@ def test_power_w_is_not_flagged_as_stale(tmp_path, capsys):
     assert "no longer apply" not in capsys.readouterr().err
 
 
+def test_a_config_still_using_the_old_classify_section_is_told(tmp_path, capsys):
+    """[classify] is [eff] now, and an unknown top-level section is ignored in
+    silence -- so without this note a site's floors would stop applying and its jobs
+    would be graded by the built-in rule with nothing on screen to say so. Worse than
+    the [thresholds] case above, because 'probe --init' wrote this section itself.
+
+    The note has to be TRUE: the assertion on floor_of is what proves the old section
+    really is inert rather than the note being a reassuring no-op.
+    """
+    path = tmp_path / "c.toml"
+    path.write_text('[classify.floor.power]\ndefault = 250\n'
+                    '[classify.ceiling]\ncpu = "average"\n')
+    cfg = load_config(str(path))
+    err = capsys.readouterr().err
+    assert "[classify] is now [eff]" in err
+    assert "NOT being applied" in err
+    assert cfg.thresholds.floor_of("POWER_W") == 100        # the built-in, not 250
+    assert cfg.thresholds.vote_ceiling("CPU%") == "inefficient"   # not "average"
+
+
+def test_the_new_eff_section_is_the_one_that_applies(tmp_path, capsys):
+    """The other half of the pair above: the same file under the new name works, and
+    says nothing. If this ever fails together with that one, the section is simply
+    broken rather than renamed."""
+    path = tmp_path / "c.toml"
+    path.write_text('[eff.floor.power]\ndefault = 250\n'
+                    '[eff.ceiling]\ncpu = "average"\n')
+    cfg = load_config(str(path))
+    assert "[classify]" not in capsys.readouterr().err
+    assert cfg.thresholds.floor_of("POWER_W") == 250
+    assert cfg.thresholds.vote_ceiling("CPU%") == "average"
+
+
 # --- rejecting a config that cannot mean what it says ------------------------
 
 def test_the_old_block_scoped_one_level_short_is_rejected(tmp_path):
@@ -534,7 +567,7 @@ def test_a_bucket_takes_the_colour_of_the_least_bad_tier_it_covers():
 
 def test_the_sgr_table_resolves_every_role_a_renderer_may_ask_for():
     """Call sites hold different things: a bucket for a cell, a tier for a
-    --classify heading, long_running for a Wasteful entry."""
+    --eff heading, long_running for a Wasteful entry."""
     from jobscope.config import Palette
     sgr = Palette(colors={"average": "cyan"}).sgr()
     for role in ("red", "yellow", "green", "wasteful", "needs improvement",
@@ -813,8 +846,8 @@ def test_a_view_can_name_a_site_metric(hermetic_config, tmp_path):
 
 def test_an_override_changes_only_what_it_names(hermetic_config, tmp_path):
     """"My exporter calls that series something else" must not also rename the
-    column, re-tier it, or take it out of the classifier. CPU%'s header is the
-    identity [thresholds], --csv consumers and the classifier's literals key on."""
+    column, re-tier it, or take it out of the efficiency ballot. CPU%'s header is
+    the identity [thresholds], --csv consumers and job_eff's literals key on."""
     from jobscope import cpu, metrics
     _define(tmp_path, '[metrics.cgroup.cpu]\n'
                       'query = "container_cpu_usage_seconds_total"\n')
@@ -838,13 +871,13 @@ def test_overriding_a_gpu_builtin_keeps_its_purpose(hermetic_config, tmp_path):
     assert metrics.headers_with_role(metrics.RESOURCE) == ("GPU%", "CPU%")
 
 
-# --- [classify]: two roles, vote raises and floor lowers -------------------
+# --- [eff]: two roles, vote raises and floor lowers -----------------------
 
 def test_vote_narrows_the_ballot(hermetic_config, tmp_path):
-    """What lets --dcgm widen the *columns* from four metrics to fifteen without
+    """What lets --all-metrics widen the *columns* from four to fifteen without
     widening the ballot: a job busy on ENC% alone must not read good."""
     from jobscope import report
-    cfg = _define(tmp_path, '[classify]\nvote = ["gpu", "sm_act"]\n')
+    cfg = _define(tmp_path, '[eff]\nvote = ["gpu", "sm_act"]\n')
     t = cfg.thresholds
     assert t.vote == ("GPU%", "SM_ACT%")
     assert report.classify_metrics(["GPU%", "SM_ACT%", "ENC%", "CPU%"], t) == \
@@ -862,7 +895,7 @@ def test_no_vote_key_derives_the_ballot(hermetic_config, tmp_path):
 
 
 def test_a_floor_table_sets_a_per_model_value(hermetic_config, tmp_path):
-    cfg = _define(tmp_path, '[classify.floor.power]\ndefault = 100\n'
+    cfg = _define(tmp_path, '[eff.floor.power]\ndefault = 100\n'
                             '"NVIDIA H100 80GB HBM3" = 130\n')
     t = cfg.thresholds
     assert t.floor_of("POWER_W") == 100
@@ -874,21 +907,21 @@ def test_an_empty_floor_table_means_no_cap(hermetic_config, tmp_path):
     """Legal and documented: it re-opens what the power floor closes, so a job at
     GPU% 48 drawing 80 W reads good again."""
     from jobscope import report
-    cfg = _define(tmp_path, "[classify.floor]\n")
+    cfg = _define(tmp_path, "[eff.floor]\n")
     assert cfg.thresholds.floors == {}
     assert report.classify({"GPU%": 48.0}, cfg.thresholds,
                            {"POWER_W": 80.0}, columns=["GPU%"]) == "good"
 
 
 def test_the_old_power_w_spelling_still_caps(hermetic_config, tmp_path):
-    """An existing config must keep working; [classify.floor.power] is the spelling
+    """An existing config must keep working; [eff.floor.power] is the spelling
     that generalises, not a replacement that breaks the old one."""
     cfg = _define(tmp_path, "[thresholds]\npower_w = 130\n")
     assert cfg.thresholds.floor_of("POWER_W") == 130
 
 
 def test_a_ceiling_caps_how_high_a_metric_may_vote(hermetic_config, tmp_path):
-    cfg = _define(tmp_path, '[classify.ceiling]\ncpu = "average"\n')
+    cfg = _define(tmp_path, '[eff.ceiling]\ncpu = "average"\n')
     assert cfg.thresholds.vote_ceiling("CPU%") == "average"
     assert cfg.thresholds.vote_ceiling("GPU%") is None
 
@@ -896,8 +929,8 @@ def test_a_ceiling_caps_how_high_a_metric_may_vote(hermetic_config, tmp_path):
 def test_a_metric_cannot_both_vote_and_floor(hermetic_config, tmp_path):
     """The roles are opposites; naming one in both is a misunderstanding."""
     with pytest.raises(JobscopeError) as exc:
-        _define(tmp_path, '[classify]\nvote = ["gpu", "power"]\n'
-                          '[classify.floor.power]\ndefault = 100\n')
+        _define(tmp_path, '[eff]\nvote = ["gpu", "power"]\n'
+                          '[eff.floor.power]\ndefault = 100\n')
     assert "both a vote and a floor" in str(exc.value)
 
 
@@ -905,32 +938,32 @@ def test_an_empty_vote_list_is_rejected(hermetic_config, tmp_path):
     """It would leave nothing to judge by, and every job would read no-data --
     indistinguishable from a Prometheus outage."""
     with pytest.raises(JobscopeError) as exc:
-        _define(tmp_path, "[classify]\nvote = []\n")
+        _define(tmp_path, "[eff]\nvote = []\n")
     assert "nothing to judge" in str(exc.value)
 
 
 def test_a_vote_typo_is_rejected_not_ignored(hermetic_config, tmp_path):
     with pytest.raises(JobscopeError) as exc:
-        _define(tmp_path, '[classify]\nvote = ["gpu", "sm_akt"]\n')
+        _define(tmp_path, '[eff]\nvote = ["gpu", "sm_akt"]\n')
     assert "SM_AKT%" in str(exc.value)
 
 
 def test_a_floor_without_a_default_is_rejected(hermetic_config, tmp_path):
     """A card with no entry would then have no floor and never cap."""
     with pytest.raises(JobscopeError) as exc:
-        _define(tmp_path, '[classify.floor.power]\n"NVIDIA A40" = 40\n')
+        _define(tmp_path, '[eff.floor.power]\n"NVIDIA A40" = 40\n')
     assert "needs a `default`" in str(exc.value)
 
 
 def test_a_ceiling_must_name_a_tier(hermetic_config, tmp_path):
     with pytest.raises(JobscopeError) as exc:
-        _define(tmp_path, '[classify.ceiling]\ncpu = "meh"\n')
+        _define(tmp_path, '[eff.ceiling]\ncpu = "meh"\n')
     assert "is not a tier" in str(exc.value)
 
 
-def test_an_unknown_classify_key_is_rejected(hermetic_config, tmp_path):
+def test_an_unknown_eff_key_is_rejected(hermetic_config, tmp_path):
     with pytest.raises(JobscopeError) as exc:
-        _define(tmp_path, '[classify]\nvotes = ["gpu"]\n')
+        _define(tmp_path, '[eff]\nvotes = ["gpu"]\n')
     assert "votes" in str(exc.value) and "vote, floor, ceiling" in str(exc.value)
 
 

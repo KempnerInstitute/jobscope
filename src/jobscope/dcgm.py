@@ -229,7 +229,7 @@ SPEC_BY_HEADER: Dict[str, MetricSpec] = {spec.header: spec for spec in RESOLVED.
 DEFAULT_SPECS: List[MetricSpec] = [s for s in RESOLVED.specs if s.group == "default"]
 ALL_SPECS: List[MetricSpec] = list(RESOLVED.specs)
 
-# The --ts/--plot_ts/--classify default when --all-metrics is not given: a smaller,
+# The --ts/--plot_ts/--eff default when --all-metrics is not given: a smaller,
 # curated set than DEFAULT_SPECS (which also carries the GPU memory pair) --
 # deliberately narrower, for the time-series family specifically. Named by *column*
 # rather than by key, because which key serves GPU% depends on the source.
@@ -401,7 +401,7 @@ def _inherit(builtin: MetricSpec, override: Optional[MetricSpec]) -> MetricSpec:
     """``override`` with the built-in's *purpose* kept, or the built-in unchanged.
 
     A site overriding ``duty`` means "my exporter calls that series something else",
-    not "take GPU% out of the default view and out of the classifier's ballot". So
+    not "take GPU% out of the default view and out of the efficiency ballot". So
     ``group``, ``roles``, ``show``, which column it serves and the short label forms
     come from the built-in; only how to *fetch and scale* the value comes from the
     config.

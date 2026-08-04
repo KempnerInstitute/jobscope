@@ -109,7 +109,7 @@ def test_catalog_shape():
 
 
 def test_key_specs_is_the_curated_ts_default():
-    """--ts/--plot_ts/--classify's default (no --dcgm/--ext): a small subset of
+    """--ts/--plot_ts/--eff's default (no --all-metrics): a small subset of
     DEFAULT_SPECS, not the full 8 -- notably no OCC% or the GPU memory pair."""
     assert [spec.header for spec in KEY_SPECS] == \
         ["GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
