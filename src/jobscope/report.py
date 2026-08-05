@@ -466,7 +466,8 @@ def narrowing_pairs(nodename: Optional[str], gpu_ids) -> List[Tuple[str, str]]:
 def context_pairs(selection: Selection, desc: str,
                   records: Dict[str, JobRecord],
                   specs: Optional[List] = None,
-                  host_specs: Optional[List] = None) -> List[Tuple[str, str]]:
+                  host_specs: Optional[List] = None,
+                  average: bool = False) -> List[Tuple[str, str]]:
     """Context lines for the header block.
 
     With explicit JOBIDs the -u/-A/-p filters are bypassed, so show the jobs'
@@ -477,7 +478,12 @@ def context_pairs(selection: Selection, desc: str,
         owners = sorted({r.user for r in records.values() if r.user})
         user_val = ", ".join(owners) if owners else "(explicit job IDs)"
         pairs = [("User", user_val), ("Select", desc)]
-        return pairs + source_pair(specs, host_specs=host_specs)
+        # Only an explicit-JOBID selection can name a job that has not ended, and it is
+        # the one case with real records in hand to ask -- a window selection is
+        # finished by construction, so it takes the branch below.
+        unfinished = any(r.unfinished for r in records.values())
+        return (pairs + source_pair(specs, host_specs=host_specs)
+                + sampled_pair(specs, unfinished, average, host_specs))
     # -a/--all-users leaves `user` unset, so say so rather than printing None.
     pairs = [("User", selection.user or "(all users)")]
     if selection.account:
@@ -491,7 +497,9 @@ def context_pairs(selection: Selection, desc: str,
         # the default lookback, so a reader could not otherwise tell what was scanned.
         # Not for an explicit -S/-E, where the Select line already is the window.
         pairs.append(("Window", format_window(*selection.window())))
-    return pairs + source_pair(specs, host_specs=host_specs)
+    # A window selection holds only finished jobs, so the fold is unconditional there.
+    return (pairs + source_pair(specs, host_specs=host_specs)
+            + sampled_pair(specs, False, average, host_specs))
 
 
 def gpu_source_line(specs: Optional[List] = None, have_jobstats: bool = True,
@@ -551,6 +559,41 @@ def source_pair(specs, have_jobstats: bool = True,
     """The Source context line, or nothing when the view collected nothing."""
     line = gpu_source_line(specs, have_jobstats, host_specs)
     return [("Source", line)] if line else []
+
+
+def sampled_pair(specs, unfinished: bool, average: bool,
+                 host_specs: Optional[List] = None) -> List[Tuple[str, str]]:
+    """The Sampled context line: over what span the GPU numbers were taken.
+
+    ``Source`` says *where* a column came from; this says *when*, which is the other
+    half of what a number means and the half a reader could not previously recover. A
+    running job has two legitimate answers -- the newest scrape, or a mean over a
+    runtime that is still growing -- and with nothing on screen to distinguish them,
+    two views of one job reporting different figures looks like a bug in the tool
+    rather than a difference in the question.
+
+    ``unfinished`` when the selection holds any job that has not ended; ``average``
+    when ``--avg`` folds those anyway. A window selection is finished by construction
+    (see slurm.UNFINISHED_STATES and the ``-s`` filter), so it passes False and gets
+    the one-clause form.
+
+    Host columns are named only when they are present *and* the GPU answer differs
+    from theirs, because that is the only combination where the line could otherwise
+    be read as a claim about CPU%/MEM% -- those are cumulative whatever the window
+    (see :func:`jobscope.cpu.host_stats`) and never vary with this.
+    """
+    if not specs:
+        # --cpu, or nothing collected: no GPU column, so no GPU window to describe.
+        return []
+    folded = "averaged over each job's runtime"
+    if not unfinished or average:
+        return [("Sampled", "GPU metrics " + folded)]
+    # Names GPU explicitly: the host columns do not vary with this, and a bare "newest
+    # scrape" would read as a claim about every number on the row.
+    text = "GPU metrics at the newest scrape (--avg: %s)" % folded
+    if host_specs:
+        text += "; CPU%/MEM% cumulative either way"
+    return [("Sampled", text)]
 
 
 def extend_detail_row(row, per_gpu):

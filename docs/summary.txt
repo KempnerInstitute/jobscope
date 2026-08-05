@@ -3,6 +3,7 @@
   Select:    last 1 day, completed
   Window:    2026-08-02 20:42 .. 2026-08-03 20:42
   Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- jobstats;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
+  Sampled:   GPU metrics averaged over each job's runtime
 JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME
 ----------------------------------------------------------------------------------------------------------------------------
 36822372     alice        COMPLETED 1     10     1      1     0      21      0.1      0.0      0.0     80       00:08:30

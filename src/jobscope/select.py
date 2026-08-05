@@ -40,6 +40,7 @@ from .report import (
     running_combined_timeseries,
     running_cpu_timeseries,
     running_timeseries,
+    sampled_pair,
     source_pair,
 )
 from .running import (
@@ -148,7 +149,8 @@ def _running_selection(request: Request) -> RunningSelection:
 
 
 def _running_context(selection: RunningSelection, jobs: dict, gpus: dict,
-                     specs=None, host_specs=None) -> List[Tuple[str, str]]:
+                     specs=None, host_specs=None,
+                     average: bool = False) -> List[Tuple[str, str]]:
     """Header context for a squeue selection.
 
     With explicit JOBIDs the -u/-p filters are bypassed, so name the jobs' actual
@@ -169,7 +171,9 @@ def _running_context(selection: RunningSelection, jobs: dict, gpus: dict,
         pairs.append(("Partition", selection.partition))
     pairs.append(("Select", selection.describe()))
     pairs.append(("GPUs", "%d across %d job(s)" % (len(gpus), len(jobs))))
-    return pairs + source_pair(specs, have_jobstats=False, host_specs=host_specs)
+    # Every job here came from squeue, so all of them are unfinished by definition.
+    return (pairs + source_pair(specs, have_jobstats=False, host_specs=host_specs)
+            + sampled_pair(specs, True, average, host_specs))
 
 
 def _report_no_running(selection) -> None:
@@ -234,7 +238,8 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
         apply_slurm_host(records, jobids, timeout,
                          override=cpu.RESOLVED.source_of("CPU%") == "slurm")
     _note_host_gap(records, jobids, host_specs)
-    return Resolved(_running_context(selection, jobs, gpus, requested, host_specs),
+    return Resolved(_running_context(selection, jobs, gpus, requested, host_specs,
+                                    average=request.average),
                     iter([(jobids, records, dcgm_data)]))
 
 
@@ -284,10 +289,12 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
 
     if selection.jobids:
         records = fetch(jobids, timeout)
-        context = context_pairs(selection, desc, records, specs, host_specs) + narrowing
+        context = context_pairs(selection, desc, records, specs, host_specs,
+                                average=request.average) + narrowing
         chunks: Iterator[Tuple[List[str], Dict[str, JobRecord]]] = iter([(jobids, records)])
     else:
-        context = context_pairs(selection, desc, {}, specs, host_specs) + narrowing
+        context = context_pairs(selection, desc, {}, specs, host_specs,
+                                average=request.average) + narrowing
         chunks = fetch_chunks(jobids, timeout)
 
     return Resolved(context, _enrich(chunks, cfg, timeout, workers, specs,

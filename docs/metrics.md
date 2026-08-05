@@ -225,7 +225,26 @@ silently changes the meaning — this is why the reducer lives in the spec rathe
 than at the call site.
 
 The window is the job's runtime, `[start, end]`, expressed as a subquery
-`[<duration>s:]` evaluated at `end`.
+`[<duration>s:]` evaluated at `end` — **once the job has ended.**
+
+A job still running has no closed window to fold. A mean over a window that is still
+filling answers a different question from a mean over a finished one, so an unfinished
+job reports its **newest scrape** and the reduction is dropped altogether — the same
+query the running view builds, which is what makes the two agree. `--avg` asks for the
+fold anyway. `delta` is exempt and keeps its window either way: one sample of a counter
+has no difference to report.
+
+The choice is made per record (`JobRecord.unfinished`, over `slurm.UNFINISHED_STATES`),
+not per selection, so a set holding both states reports each on its own rule. The
+header's `Sampled:` line states which you are looking at:
+
+```
+  Sampled:   GPU metrics averaged over each job's runtime
+  Sampled:   GPU metrics at the newest scrape (--avg: averaged over each job's runtime)
+```
+
+`CPU%`/`MEM%` are absent from that line on purpose — they are cumulative whatever the
+window, so they do not vary with it.
 
 ### The ownership clip
 

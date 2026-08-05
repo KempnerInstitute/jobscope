@@ -141,6 +141,57 @@ def test_no_gpu_specs_means_no_provenance_line():
     assert source_pair(None) == []
 
 
+# --- the Sampled line: over what span, the other half of what a number means -----
+
+def test_a_finished_selection_says_the_numbers_are_folded():
+    """One possible answer, so it is stated rather than implied -- the same reason the
+    Source line names a source even when there is only one."""
+    from jobscope.report import sampled_pair
+    (_label, text), = sampled_pair(dcgm.DEFAULT_SPECS, unfinished=False, average=False)
+    assert text == "GPU metrics averaged over each job's runtime"
+
+
+def test_an_unfinished_selection_says_scrape_and_names_the_alternative():
+    """The line this whole thing exists for: two views of one running job reported
+    different figures, and nothing on screen distinguished the questions."""
+    from jobscope.report import sampled_pair
+    (_label, text), = sampled_pair(dcgm.DEFAULT_SPECS, unfinished=True, average=False)
+    assert "newest scrape" in text
+    assert "--avg" in text          # the other answer is reachable, and says how
+
+
+def test_avg_makes_an_unfinished_selection_read_as_folded():
+    """With --avg the two states are described identically, because they are computed
+    identically -- the line must not keep claiming a scrape."""
+    from jobscope.report import sampled_pair
+    (_label, text), = sampled_pair(dcgm.DEFAULT_SPECS, unfinished=True, average=True)
+    assert text == "GPU metrics averaged over each job's runtime"
+    assert "scrape" not in text
+
+
+def test_the_host_caveat_appears_only_where_it_could_mislead():
+    """CPU%/MEM% never vary with this (see cpu.host_stats), so a bare "newest scrape"
+    beside them would be a claim about numbers it does not describe. Only said when
+    host columns are actually present, and only in the branch that could mislead."""
+    from jobscope import cpu
+    from jobscope.report import sampled_pair
+    (_l, with_host), = sampled_pair(dcgm.DEFAULT_SPECS, True, False,
+                                    host_specs=cpu.DEFAULT_CGROUP_SPECS)
+    (_l, gpu_only), = sampled_pair(dcgm.DEFAULT_SPECS, True, False)
+    assert "CPU%/MEM%" in with_host and "CPU%/MEM%" not in gpu_only
+    # The folded branch makes no instant claim, so it needs no caveat either.
+    (_l, folded), = sampled_pair(dcgm.DEFAULT_SPECS, False, False,
+                                 host_specs=cpu.DEFAULT_CGROUP_SPECS)
+    assert "CPU%/MEM%" not in folded
+
+
+def test_no_gpu_specs_means_no_sampled_line():
+    """--cpu again: nothing here describes the host columns, so the line has no subject."""
+    from jobscope.report import sampled_pair
+    assert sampled_pair(None, unfinished=True, average=False) == []
+    assert sampled_pair([], unfinished=False, average=False) == []
+
+
 # --- the host axis ----------------------------------------------------------
 
 def test_host_columns_have_their_own_axis():

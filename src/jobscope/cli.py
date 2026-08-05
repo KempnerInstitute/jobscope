@@ -412,7 +412,12 @@ def _inert_dests(args) -> set:
         hide.update(dest for _, _, dest in _FINISHED_ONLY)  # raises: no past window
         hide.add("state")                                   # raises: all are RUNNING
     else:
-        hide.add("avg")          # raises: a finished job is always folded over its runtime
+        if not jobids:
+            # Raises: a window selection holds only finished jobs, and those are always
+            # folded over their runtime. An explicit JOBID can name a job that is still
+            # running, where --avg is exactly the right flag -- so it stays offered
+            # there, matching the guard in build_request.
+            hide.add("avg")
         hide.add("min_elapsed")  # only ever reaches RunningSelection
     if args.ts or args.plot_ts:
         # emit_timeseries drops these with a note; the series has no host, advisory or

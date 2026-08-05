@@ -108,7 +108,7 @@ job that is running right now.
 | `--plot-ts-overlay [WINDOW]` | the same series overlaid: one panel per GPU, every metric on a shared axis, one row per node |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--all-metrics` | the full DCGM metric catalog |
-| `--avg` | `running` only: fold over the runtime instead of a snapshot |
+| `--avg` | fold over the runtime instead of a snapshot, for any job still running |
 
 **Output** — `--csv`, `-n`, `--step` (with `--ts`), `--timeout`, `--workers`, `-c`.
 `--help-all` prints every option; plain `-h` narrows to the ones the current flags
@@ -120,9 +120,12 @@ for a running one jobscope reconstructs `CPU%`/`MEM%`/`GPU%`/`GMEM%` from the sa
 Prometheus metrics jobstats falls back to. With no Prometheus endpoint configured
 those columns stay blank and say so.
 
-`jobscope running -j ID` differs from `jobscope ID`: the first reads the running view
-of that job (an instant snapshot, with `--avg` available), the second looks it up
-through `sacct` over its window.
+`jobscope running -j ID` and `jobscope ID` differ in how the job is *found* -- the
+first through `squeue`, the second through `sacct` -- but no longer in what its numbers
+mean. A job that has not ended reports its newest scrape either way, and `--avg` folds it
+over its runtime either way; a finished job is always folded. The header's `Sampled:`
+line states which of the two you are looking at. The second form used to fold a *running*
+job silently, which made the two views of one job disagree with nothing to explain it.
 
 ### `-h` narrows to the command you are writing
 
@@ -131,18 +134,20 @@ for *this* invocation, hiding what it has already ruled out:
 
 ```console
 $ jobscope -j 36441613 --per-gpu -h
-... 17 options ...
-hiding 13 option(s) these flags rule out: --days, --lastn, --starttime, --endtime,
---min-elapsed, --partition, --user, --all-users, --account, --state, --ts, --avg, --step.
+... 21 options ...
+hiding 15 option(s) these flags rule out: --days, --lastn, --starttime, --endtime,
+--min-elapsed, --partition, --user, --all-users, --account, --state, --ts, --plot-ts,
+--stats, --eff, --step.
 Pass --help-all for the full list.
 ```
 
 The rule is mechanical, not editorial: **a flag is hidden exactly when this command
 would reject it or ignore it.** The job ID *is* the selection, so no window or filter
 can narrow it further (jobscope says so at runtime too); `--ts` is mutually exclusive
-with `--per-gpu`; `--step` is read only by the time series; `--avg` applies to running
-jobs alone. Nothing is hidden for being merely uninteresting, and the footer names
-every one that went.
+with `--per-gpu`; `--step` is read only by the time series. `--avg` is dropped only for a
+window selection, which holds finished jobs alone -- an explicit JOBID can name a running
+one, so it stays offered there. Nothing is hidden for being merely uninteresting, and the
+footer names every one that went.
 
 `jobscope --help` is unaffected -- with no flags to narrow against it lists the
 subcommands, as before. `--help-all` is the way back to all thirty from anywhere.

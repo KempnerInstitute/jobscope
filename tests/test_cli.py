@@ -784,9 +784,12 @@ def test_the_help_hides_the_flags_an_explicit_jobid_makes_inert(capsys):
         assert flag not in body
     assert "--ts" in hidden           # mutually exclusive with --per-gpu
     assert "--step" in hidden         # only emit_timeseries reads it
-    assert "--avg" in hidden          # running only
+    # --avg is NOT hidden here, though it used to be: an explicit JOBID can name a job
+    # that is still running, and folding its window is exactly what --avg is for. The
+    # rule is "hidden when this command would reject it", and this one no longer does.
+    assert "--avg" not in hidden
     # What remains is what this command actually honours.
-    for flag in ("--nodename", "--all-metrics", "--csv", "--no-plot", "--per-gpu"):
+    for flag in ("--nodename", "--all-metrics", "--csv", "--no-plot", "--per-gpu", "--avg"):
         assert flag in body
 
 
