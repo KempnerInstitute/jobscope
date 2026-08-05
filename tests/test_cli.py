@@ -1474,3 +1474,41 @@ def test_force_color_is_the_mirror_of_no_color(monkeypatch):
     monkeypatch.delenv("NO_COLOR")
     assert cli._want_color(argparse.Namespace(csv=True, no_color=False)) is False
     assert cli._want_color(argparse.Namespace(csv=False, no_color=True)) is False
+
+
+# --- what the startup path is allowed to import -------------------------------------
+
+def test_the_startup_path_does_not_import_the_network_stack():
+    """`requests` cost 257ms of a 442ms import, and importlib.metadata another 44 -- both
+    on every invocation, including --help, --version, config, describe and every usage
+    error. Deferred into the paths that need them (prometheus._make_session and cli's
+    --version action), which took `jobscope --help` from 0.47s to 0.20s.
+
+    A subprocess, because this process has already imported everything the test suite
+    touches; asserting on sys.modules here would measure pytest, not jobscope.
+    """
+    import subprocess
+    import sys
+
+    code = ("import sys; import jobscope.cli; "
+            "print(' '.join(sorted(m for m in ('requests', 'urllib3', "
+            "'importlib.metadata') if m in sys.modules)))")
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         check=True).stdout.strip()
+    assert out == "", "startup imports %s -- keep these off the import path" % out
+
+
+def test_version_still_prints_and_pulls_the_metadata_then():
+    """The flag has to keep working: deferring the lookup must not turn --version into a
+    lazy attribute nobody resolves."""
+    import subprocess
+    import sys
+
+    # main() rather than -m: cli.py is reached through the console script and has no
+    # __main__ block, so `-m jobscope.cli` prints nothing and would pass vacuously.
+    out = subprocess.run(
+        [sys.executable, "-c", "from jobscope.cli import main; main(['--version'])"],
+        capture_output=True, text=True)
+    printed = (out.stdout + out.stderr).strip()
+    assert printed.startswith("jobscope "), printed
+    assert printed.split()[1][0].isdigit(), printed

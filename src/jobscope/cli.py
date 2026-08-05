@@ -22,7 +22,7 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
-from . import __version__, config, dcgm, plot, probe, report
+from . import config, dcgm, plot, probe, report
 from .errors import JobscopeError
 from .report import (
     DetailRenderer,
@@ -137,6 +137,20 @@ _EPILOG = (
     "  jobscope 30012345 --ts | jobscope plot\n"
     "\n"
     "Flags and JOBIDs may be given in any order.")
+
+
+class _Version(argparse.Action):
+    """``--version``, resolved when asked rather than when the parser is built.
+
+    argparse's own ``action="version"`` wants the string at build time, which means
+    importing importlib.metadata on every invocation to serve a value only this flag
+    prints -- 44ms, measured. See jobscope/__init__.py's __getattr__.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from . import __version__
+        print("jobscope %s" % __version__)
+        parser.exit()
 
 
 class _HelpAll(argparse.Action):
@@ -299,7 +313,8 @@ def build_parser():
     parser = argparse.ArgumentParser(
         prog="jobscope", description=_DESC, epilog=_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--version", action="version", version="jobscope %s" % __version__)
+    parser.add_argument("--version", action=_Version, nargs=0,
+                        help="print the version and exit")
     subparsers = parser.add_subparsers(dest="command")
 
     for mode in MODES:
