@@ -13,10 +13,10 @@ from jobscope.report import RenderOptions
 from jobscope.select import (
     FINISHED,
     JOBIDS,
-    JOBSTATS_SPECS,
     RUNNING,
     Request,
     emit_timeseries,
+    jobstats_specs,
     resolve,
     sacct_selection,
 )
@@ -349,8 +349,9 @@ def test_running_without_specs_still_builds_the_summary(monkeypatch):
     # served by DCGM_FI_DEV_GPU_UTIL, which is one of the three jobstats columns rather
     # than a profiling metric this view declined to print.
     assert not any("DCGM_FI_PROF" in q for q in client.queries)
-    assert JOBSTATS_SPECS and all(
-        s.column in ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB") for s in JOBSTATS_SPECS)
+    specs = jobstats_specs()
+    assert specs and all(
+        s.column in ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB") for s in specs)
 
 
 def test_running_context_names_the_owner_for_explicit_ids(monkeypatch):

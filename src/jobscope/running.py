@@ -34,8 +34,6 @@ from . import config, source
 from . import dcgm as _dcgm
 from .cpu import host_stats_many
 from .dcgm import (
-    ALL_SPECS,
-    DEFAULT_SPECS,
     MODEL_KEY,
     MetricSpec,
     applicable_derived,
@@ -142,16 +140,25 @@ class RunningSelection:
 # The summary and detail views omit GPU% and the GMEM columns from their DCGM set
 # because they render those from the jobstats summary instead; a running job has no jobstats summary, so
 # here Prometheus is the only source and nothing is dropped.
-DEFAULT_RUNNING_SPECS: List[MetricSpec] = DEFAULT_SPECS
-# --all appends the extended catalog, minus delta-reduced counters (ENERGY_kWh):
-# a delta needs two points, so it is meaningless in an instant snapshot.
-EXTENDED_RUNNING_SPECS: List[MetricSpec] = DEFAULT_RUNNING_SPECS + [
-    s for s in ALL_SPECS if s.group == "all" and s.reducer != "delta"]
+# Functions, not constants: both read catalog views that dcgm.set_preference()
+# reassigns, so a value computed at import would freeze the default preference and
+# --gpu-source would pick a source these lists then ignored. See dcgm.REBUILT_NAMES.
+def default_running_specs() -> List[MetricSpec]:
+    """The running view's default DCGM set, under the current source preference."""
+    return list(_dcgm.DEFAULT_SPECS)
+
+
+def extended_running_specs() -> List[MetricSpec]:
+    """``--all-metrics``: the above plus the extended catalog, minus delta-reduced
+    counters (ENERGY_kWh) -- a delta needs two points, so it means nothing in an
+    instant snapshot."""
+    return default_running_specs() + [
+        s for s in _dcgm.ALL_SPECS if s.group == "all" and s.reducer != "delta"]
 
 
 def specs_for(view: Optional[str]) -> List[MetricSpec]:
     """The metric catalog for a running view: the default set, or ``all``."""
-    return EXTENDED_RUNNING_SPECS if view == "all" else DEFAULT_RUNNING_SPECS
+    return extended_running_specs() if view == "all" else default_running_specs()
 
 
 # Moved to config, which needs it for the duration-valued [defaults] keys and

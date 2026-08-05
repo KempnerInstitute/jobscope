@@ -23,14 +23,14 @@ from jobscope.report import (
     running_timeseries,
 )
 from jobscope.running import (
-    DEFAULT_RUNNING_SPECS,
-    EXTENDED_RUNNING_SPECS,
     SQUEUE_FORMAT,
     Gpu,
     RunningSelection,
     build_columns,
     clip_to_job,
     collect_instant,
+    default_running_specs,
+    extended_running_specs,
     filter_by_elapsed,
     format_duration,
     gpu_labels,
@@ -232,32 +232,32 @@ def test_a_window_lands_on_the_runs_own_sample_grid():
 # --- catalogs ---------------------------------------------------------------
 
 def test_live_catalog_column_order_and_membership():
-    assert [h for _k, h, _d in build_columns(DEFAULT_RUNNING_SPECS)] == [
+    assert [h for _k, h, _d in build_columns(default_running_specs())] == [
         "GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
 
 
 def test_gpu_utilization_is_always_present_in_the_live_view():
     # A running job has no jobstats summary, so this is the only place GPU% comes from; there
     # is deliberately no narrower catalog that could drop it.
-    assert "GPU%" in [h for _k, h, _d in build_columns(DEFAULT_RUNNING_SPECS)]
-    assert "GPU%" in [h for _k, h, _d in build_columns(EXTENDED_RUNNING_SPECS)]
+    assert "GPU%" in [h for _k, h, _d in build_columns(default_running_specs())]
+    assert "GPU%" in [h for _k, h, _d in build_columns(extended_running_specs())]
 
 
 def test_total_memory_is_queried_but_not_shown():
     # It exists only to derive MEM%.
-    assert any(s.header == "GMEM_TOTAL_GB" for s in DEFAULT_RUNNING_SPECS)
-    assert "GMEM_TOTAL_GB" not in [h for _k, h, _d in build_columns(DEFAULT_RUNNING_SPECS)]
+    assert any(s.header == "GMEM_TOTAL_GB" for s in default_running_specs())
+    assert "GMEM_TOTAL_GB" not in [h for _k, h, _d in build_columns(default_running_specs())]
 
 
 def test_extended_catalog_excludes_delta_reduced_counters():
     # A delta needs two points, so it is meaningless in an instant snapshot.
-    assert all(s.reducer != "delta" for s in EXTENDED_RUNNING_SPECS)
+    assert all(s.reducer != "delta" for s in extended_running_specs())
     assert any(s.reducer == "delta" for s in ALL_SPECS), "fixture assumes one exists"
 
 
 def test_specs_for_maps_the_view_names():
-    assert specs_for("all") is EXTENDED_RUNNING_SPECS
-    assert specs_for(None) is DEFAULT_RUNNING_SPECS
+    assert specs_for("all") == extended_running_specs()
+    assert specs_for(None) == default_running_specs()
 
 
 def test_live_and_dcgm_render_identical_columns():
@@ -267,7 +267,7 @@ def test_live_and_dcgm_render_identical_columns():
     same eye (and the same script) reads both.
     """
     from jobscope.dcgm import columns_for
-    assert build_columns(DEFAULT_RUNNING_SPECS) == columns_for(DEFAULT_SPECS)
+    assert build_columns(default_running_specs()) == columns_for(DEFAULT_SPECS)
 
 
 def test_gmem_percent_is_per_gpu_and_handles_a_missing_total():
@@ -468,7 +468,7 @@ def test_live_timeseries_uses_the_schema_plot_reads():
     gpus = {"GPU-a": Gpu("GPU-a", 1, "node01", 3, "GPU 3")}
     samples = {"GPU-a": {1000: {"duty": 90.0, "mem": 10.0, "memtot": 80.0}}}
     out = io.StringIO()
-    running_timeseries(jobs, samples, gpus, DEFAULT_RUNNING_SPECS, RenderOptions(), out=out)
+    running_timeseries(jobs, samples, gpus, default_running_specs(), RenderOptions(), out=out)
     lines = out.getvalue().splitlines()
     assert lines[0].startswith("JOBID,USER,EPOCH,TIME,NODE,GPU,")
     assert lines[1].startswith("100_6,alice,1000,")   # USER names whose job it is
@@ -559,7 +559,7 @@ def test_live_combined_timeseries_uses_the_schema_plot_reads():
     options = RenderOptions()
     collected = ts.running_host(jobs, Client(), None, workers=1,
                                 host_specs=options.cgroup_specs, warn=False)
-    running_combined_timeseries(jobs, samples, gpus, DEFAULT_RUNNING_SPECS, collected,
+    running_combined_timeseries(jobs, samples, gpus, default_running_specs(), collected,
                                 options, out=out)
     lines = out.getvalue().splitlines()
     assert lines[0].startswith("JOBID,USER,EPOCH,TIME,NODE,GPU,")
@@ -576,7 +576,7 @@ def test_live_timeseries_keeps_mig_slices_distinct():
             "MIG-b": Gpu("MIG-b", 1, "node01", 0, "MIG 0.1")}
     samples = {"MIG-a": {1000: {"mem": 1.0}}, "MIG-b": {1000: {"mem": 2.0}}}
     out = io.StringIO()
-    running_timeseries(jobs, samples, gpus, DEFAULT_RUNNING_SPECS, RenderOptions(), out=out)
+    running_timeseries(jobs, samples, gpus, default_running_specs(), RenderOptions(), out=out)
     gpu_column = [row.split(",")[5] for row in out.getvalue().splitlines()[1:]]
     # Both share minor 0; without the .instance suffix plot would merge them.
     assert gpu_column == ["0.0", "0.1"]
@@ -594,7 +594,7 @@ def test_collect_instant_stores_by_uuid_and_derives_mem_percent():
             return []
 
     gpus = {"GPU-a": Gpu("GPU-a", 7, "node01", 0, "GPU 0")}
-    metrics = collect_instant(Client(), gpus, DEFAULT_RUNNING_SPECS, None)
+    metrics = collect_instant(Client(), gpus, default_running_specs(), None)
     values = metrics[7]["GPU-a"]
     assert values["mem"] == 40.0 and values["memtot"] == 80.0
     assert values["gmempct"] == 50.0

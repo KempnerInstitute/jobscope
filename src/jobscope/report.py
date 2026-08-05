@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from . import metrics
+from . import dcgm, metrics
 from .config import (
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
@@ -30,10 +30,12 @@ from .jobstats import GIB, jobstats_capacity, jobstats_detail, jobstats_metrics
 # not come back. Its entry is highlighted. [defaults] long_running overrides it.
 LONG_RUNNING = parse_duration(DEFAULT_LONG_RUNNING)
 from .cpu import CgroupSpec, chosen_specs
+
+# NOTE: names dcgm.set_preference() reassigns -- see dcgm.REBUILT_NAMES -- must NOT be
+# imported by value here. Such a binding is taken once at import and never sees the
+# rebuild, so --gpu-source would resolve one source, say so on the Source line, and then
+# render another's numbers. Read them as dcgm.X at call time; tests/test_source.py checks.
 from .dcgm import (
-    ALL_SPECS,
-    DCGM_HEADERS,
-    DCGM_JOBSTATS_HEADERS,
     DESCRIPTIONS,
     MODEL_KEY,
     MetricSpec,
@@ -96,20 +98,28 @@ SUMMARY_COLUMNS: List[Column] = [
     Column("RUNTIME", "{:<12}", "id"),
 ]
 
+# Columns that already have a fixed slot above, so the profiling block must never add a
+# second one for them. Unconditional on purpose: their *position* is a property of this
+# table, not of which exporter happens to win them.
+FIXED_POSITION_HEADERS: Tuple[str, ...] = ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "GMEM%")
+
 
 def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
     """:data:`SUMMARY_COLUMNS` with its DCGM block taken from ``specs``.
 
     The identity and jobstats columns are fixed; only the profiling block varies, which
     is what lets `--all-metrics` widen the table without becoming a different view.
-    jobstats-backed metrics are dropped from the block -- GPU% and the GMEM columns are
-    already rendered from the jobstats summary, and one number deserves one column.
+    The fixed columns are dropped from the block whatever source serves them -- one
+    number deserves one column, and GPU%/GMEM% already have theirs. Deliberately NOT
+    ``dcgm.DCGM_JOBSTATS_HEADERS``: that set shrinks under ``--gpu-source dcgm`` (GPU%
+    stops being jobstats-backed), which would give GPU% a second column beside its fixed
+    one. Which source *fills* the fixed cell is settled in :meth:`SummaryRenderer.add`.
     """
     if specs is None:
         return list(SUMMARY_COLUMNS)
     block = [Column(header, "{:<%d}" % max(7, len(header) + 1), "dcgm")
              for _key, header, _dec in columns_for(specs)
-             if header not in DCGM_JOBSTATS_HEADERS]
+             if header not in FIXED_POSITION_HEADERS]
     out = []
     for col in SUMMARY_COLUMNS:
         if col.group == "dcgm":
@@ -599,7 +609,8 @@ def sampled_pair(specs, unfinished: bool, average: bool,
 def extend_detail_row(row, per_gpu):
     """Append the DCGM cells to a jobstats_detail row."""
     values = per_gpu.get((row[0], str(row[1])), {})
-    return tuple(row) + tuple(format_by_header(h, values.get(h)) for h in DCGM_HEADERS)
+    return tuple(row) + tuple(format_by_header(h, values.get(h))
+                              for h in dcgm.DCGM_HEADERS)
 
 
 # What each graded column is a percentage *of*, as
@@ -1176,13 +1187,31 @@ class SummaryRenderer:
             gpus = record.gpus if record else 0
             weights = self._weights(record, gpus)
             job_metrics = jobstats_metrics(record.stats if record else None, gpus)
+            # Read before the summary block, not inside the DCGM one below: a column the
+            # summary does not own has to be overridden *before* it is tallied, or the row
+            # would show the measured value and the footer average the summary's.
+            measured = dcgm_data.get(jid, ({}, {}))[0] if do_dcgm else {}
             if not job_metrics.by_header:
                 for col in JOBSTATS_HEADERS:
                     row[col] = "-"
             else:
                 for key, col in JOBSTATS_KEYS:
                     value = job_metrics.value(col)
-                    row[col] = "-" if value is None else str(value)
+                    # An exporter named ahead of the summary (--gpu-source dcgm) owns this
+                    # column, so the queried value is the answer. _prefer_stored applies
+                    # the same rule inside dcgm_for_job, but cannot settle it for a running
+                    # job: that summary is synthesized *after* the queries run, so it would
+                    # win by arriving later. Restricted to columns with a resolved spec,
+                    # which excludes the derived GMEM% -- its inputs stay jobstats-backed.
+                    if (col in dcgm.SPEC_BY_HEADER
+                            and col not in dcgm.RESOLVED.from_jobstats
+                            and measured.get(col) is not None):
+                        value = measured[col]
+                        # The block's own formatter, so an overridden cell reads exactly as
+                        # it would in the profiling block (GPU% has no decimals).
+                        row[col] = format_by_header(col, value)
+                    else:
+                        row[col] = "-" if value is None else str(value)
                     if value is not None:
                         self.sums[key][0] += value
                         self.sums[key][1] += 1
@@ -2331,7 +2360,7 @@ def describe(out=None) -> None:
           " in sacct (no network);", file=out)
     print("the DCGM columns (gpu view) come from Prometheus. For the full per-GPU", file=out)
     print("GPU catalog, run 'jobscope describe --metrics' (or --all-metrics for all %d).\n"
-          % len(ALL_SPECS), file=out)
+          % len(dcgm.ALL_SPECS), file=out)
     for header, source, text in SUMMARY_DESCRIPTIONS:
         print("  %-9s %s" % (header, source), file=out)
         for wrapped in textwrap.wrap(text, width=74):
@@ -2349,7 +2378,7 @@ def describe_dcgm(specs: List[MetricSpec], out=None, extended=None) -> None:
     """
     out = out or sys.stdout
     reducer_name = _REDUCER_NAME
-    widest = list(ALL_SPECS if extended is None else extended)
+    widest = list(dcgm.ALL_SPECS if extended is None else extended)
     is_widest = {s.key for s in specs} >= {s.key for s in widest}
     # Hidden specs exist only to feed a derived column, so describe the column
     # instead -- what a reader sees in the table.

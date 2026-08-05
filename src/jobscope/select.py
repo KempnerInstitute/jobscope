@@ -18,8 +18,8 @@ import sys
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 
-from . import config, cpu, jobstats, timeseries
-from .dcgm import DEFAULT_SPECS, JOBSTATS_BACKED_KEYS, MetricSpec, compute_dcgm
+from . import config, cpu, dcgm, jobstats, timeseries
+from .dcgm import MetricSpec, compute_dcgm
 from .errors import JobscopeError
 from .job_ave_stats import (
     apply_slurm_host,
@@ -69,9 +69,15 @@ from .slurm import (
 DcgmData = Dict[str, Tuple[dict, dict]]
 Chunk = Tuple[List[str], Dict[str, JobRecord], DcgmData]
 
-# The metrics the reconstructed summary is built from; enough for CPU%/MEM%/GPU%/GMEM%
-# without the DCGM profiling block.
-JOBSTATS_SPECS: List[MetricSpec] = [s for s in DEFAULT_SPECS if s.key in JOBSTATS_BACKED_KEYS]
+def jobstats_specs() -> List[MetricSpec]:
+    """The metrics the reconstructed summary is built from -- enough for
+    CPU%/MEM%/GPU%/GMEM% without the DCGM profiling block.
+
+    A function, not a module constant: both lists it reads are reassigned by
+    dcgm.set_preference(), so a value computed at import would freeze the default
+    preference and --gpu-source would pick a source the summary then ignored.
+    """
+    return [s for s in dcgm.DEFAULT_SPECS if s.key in dcgm.JOBSTATS_BACKED_KEYS]
 
 RUNNING = "running"
 FINISHED = "finished"
@@ -219,7 +225,7 @@ def _resolve_running(request: Request, cfg: config.Config, timeout: Optional[flo
     # None and still needs JOBSTATS_SPECS queried to reconstruct the jobstats summary, but it prints no
     # GPU column -- so naming a source for one would describe a column that is not there.
     requested = specs
-    specs = specs or JOBSTATS_SPECS
+    specs = specs or jobstats_specs()
     metrics = (collect_averaged(client, jobs, gpus, specs, timeout, workers)
                if request.average else collect_instant(client, gpus, specs, timeout))
     records = running_records(jobs, gpus, metrics, specs, client, timeout)

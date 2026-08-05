@@ -22,8 +22,7 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
-from . import __version__, config, plot, probe, report
-from .dcgm import DCGM_HEADERS
+from . import __version__, config, dcgm, plot, probe, report
 from .errors import JobscopeError
 from .report import (
     DetailRenderer,
@@ -1012,7 +1011,7 @@ def handle_config(args) -> None:
         specs = getattr(cfg.metrics, view)
         print("  %-11s %s" % (view, " ".join(s.header for s in specs)))
     print("  --per-gpu keeps its own fixed four: %s"
-          % " ".join(DCGM_HEADERS))
+          % " ".join(dcgm.DCGM_HEADERS))
     print()
     print("[colors]")
     for role in config.COLOR_ROLES:

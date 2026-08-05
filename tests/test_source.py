@@ -313,3 +313,39 @@ def test_every_resolved_spec_agrees_with_its_uuid_label():
     from jobscope.dcgm import MetricSpec
     with pytest.raises(ValueError):
         MetricSpec("x", "X%", "nvidia_gpu_x", 1, 0, "all", family="nvml")
+
+
+# --- the rebuilt-name trap ---------------------------------------------------------
+
+def test_no_module_holds_a_rebuilt_catalog_name_by_value():
+    """`from .dcgm import DCGM_JOBSTATS_HEADERS` froze the default preference.
+
+    Every name in dcgm.REBUILT_NAMES is a view of the catalog under the current source
+    preference, reassigned by set_preference(). A by-value import is taken once and never
+    sees the rebuild, so --gpu-source resolved one source and the renderer used another --
+    which is exactly how GPU% came out of nvml while the Source line said dcgm.
+
+    Structural rather than behavioural on purpose: it fails for a name nobody has written
+    a behavioural test for yet.
+    """
+    import ast
+    import pathlib
+
+    from jobscope import dcgm
+    src = pathlib.Path(dcgm.__file__).parent
+    offenders = []
+    for path in sorted(src.glob("*.py")):
+        if path.name == "dcgm.py":
+            continue        # its own globals; the rebuild is what it does
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            # Module level only (col_offset 0). A function-local `from .dcgm import X`
+            # is evaluated per call and therefore sees the rebuild -- config.py uses
+            # several deliberately.
+            if (isinstance(node, ast.ImportFrom) and (node.module or "").endswith("dcgm")
+                    and node.col_offset == 0):
+                for alias in node.names:
+                    if alias.name in dcgm.REBUILT_NAMES:
+                        offenders.append("%s imports %s" % (path.name, alias.name))
+    assert not offenders, (
+        "read these as dcgm.<name> at call time instead: %s" % "; ".join(offenders))

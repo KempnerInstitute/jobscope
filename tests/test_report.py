@@ -965,8 +965,8 @@ def test_efficiency_description_names_a_site_configured_ceiling(
     [eff.ceiling] capped verdicts while going unmentioned -- the one thing a
     "judged by" line exists to prevent.
     """
-    from jobscope.job_eff import classify_description
     from jobscope.config import load_config
+    from jobscope.job_eff import classify_description
 
     path = tmp_path / "c.toml"
     path.write_text('[eff]\nvote = ["gpu", "sm_act", "cpu"]\n'

@@ -259,6 +259,19 @@ DCGM_JOBSTATS_HEADERS: Tuple[str, ...] = tuple(
 # Position in METRICS, so a resolved selection can be put back into catalog order.
 _CATALOG_ORDER: Dict[str, int] = {spec.key: i for i, spec in enumerate(METRICS)}
 
+# The module globals set_preference() reassigns. Every one is a *view* of the catalog
+# under the current source preference, so `from .dcgm import <name>` elsewhere freezes it
+# at whatever the default preference produced at import time and never sees the rebuild.
+# That is not theoretical: report.py held DCGM_JOBSTATS_HEADERS by value, so
+# `--gpu-source dcgm` resolved GPU% to DCGM, said so on the Source line, and then
+# rendered the nvml value anyway. Read these as ``dcgm.<name>`` at call time;
+# tests/test_source.py enforces it.
+REBUILT_NAMES: Tuple[str, ...] = (
+    "RESOLVED", "SPEC_BY_HEADER", "SPEC_ALIASES", "METRIC_NAMES", "ALL_SPECS",
+    "DEFAULT_SPECS", "KEY_SPECS", "JOBSTATS_BACKED_KEYS", "GPU_SUMMARY_SPECS",
+    "DCGM_HEADERS", "DCGM_JOBSTATS_HEADERS",
+)
+
 
 def _alias_table() -> Dict[str, MetricSpec]:
     """Every name a config may call a metric by -> its spec.

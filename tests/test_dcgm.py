@@ -119,8 +119,8 @@ def test_key_specs_is_the_curated_ts_default():
 
 def test_dcgm_and_live_columns_are_identical():
     """A finished job and a running one must be described by the same columns."""
-    from jobscope.running import DEFAULT_RUNNING_SPECS, build_columns
-    assert columns_for(DEFAULT_SPECS) == build_columns(DEFAULT_RUNNING_SPECS)
+    from jobscope.running import build_columns, default_running_specs
+    assert columns_for(DEFAULT_SPECS) == build_columns(default_running_specs())
     assert [h for _k, h, _d in columns_for(DEFAULT_SPECS)] == [
         "GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
 
