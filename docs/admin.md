@@ -149,26 +149,35 @@ number per exporter said nothing about the hole in GPU%.
 means the stored summary serves it for a finished job, so the count is what a *running*
 job falls back to.
 
-Name a partition and the comparison is against that partition's own nodes, with the
-absent ones listed:
+Name partitions and the comparison is against their own nodes, with the absent ones
+listed. A comma-separated list works, and so do shell-style wildcards
+(`kempner_h*`) — `sinfo -p` takes the list but not the glob, so jobscope expands it:
 
 ```console
-$ jobscope probe --coverage kempner
-coverage    partition kempner: 22 of 28 node(s) up (6 down/drained, not counted)
+$ jobscope probe --coverage kempner,kempner_eng,kempner_h100,kempner_h200,kempner_rtx
+coverage    5 partition(s): kempner, kempner_eng, kempner_h100, kempner_h200, kempner_rtx
+            239 of 254 node(s) up (15 down/drained, not counted)
             column         source         series                           hosts
-            CPU%           cgroup         cgroup_cpu_total_seconds         22/22
-            GPU%           jobstats/dcgm  DCGM_FI_DEV_GPU_UTIL             21/22
-            SM_ACT%        dcgm           DCGM_FI_PROF_SM_ACTIVE           21/22
+            CPU%           cgroup         cgroup_cpu_total_seconds         232/239
+            GPU%           jobstats/dcgm  DCGM_FI_DEV_GPU_UTIL             238/239
+            SM_ACT%        dcgm           DCGM_FI_PROF_SM_ACTIVE           238/239
             ...
-missing     1 node(s) up but not publishing every series:
-            holygpu8a19102   (mixed) no dcgm: GPU%, SM_ACT%, TENSOR%, DRAM%, POWER_W
+missing     1 node(s) running jobs but not publishing every series:
+            holygpu8a19102   (mixed)     no dcgm: GPU%, SM_ACT%, TENSOR%, DRAM%, POWER_W
+            6 node(s) have no cgroup series with no job running, which is expected:
+              holygpu7c1713 (reserved), holygpu7c1734 (reserved), ...
 ```
 
-Three things it deliberately does not report, because each would be noise rather than
-a fault: `down`/`drained` nodes (nothing runs there to measure), GPU columns on nodes
-with no GPU gres, and an **idle** node's missing `CPU%`/`MEM%` — cgroup series exist per
-running *job*, so absence is the right answer there. On a `mixed` or `allocated` node a
-missing cgroup series **is** flagged, because jobs are running on it.
+That is 254 nodes reduced to the one line worth acting on. Three classes are kept out
+of the fault list, because each would be noise rather than a fault:
+
+- **`down`/`drained`/`inval` nodes** — not serving, so nothing to measure.
+- **GPU columns on nodes with no gpu gres** — a CPU-only partition would otherwise
+  report every GPU column missing on every node.
+- **`CPU%`/`MEM%` where no job is running.** cgroup series exist per running *job*, so
+  `idle`, `reserved` and `planned` nodes correctly have none; they collapse to the
+  summary line. A node in `mixed`, `allocated` or `completing` **is** faulted, because
+  a job is running on it and the series should exist.
 
 ### Pointing jobscope at Prometheus
 

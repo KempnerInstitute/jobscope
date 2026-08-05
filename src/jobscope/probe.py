@@ -24,6 +24,7 @@ So every capability is confirmed against a real job rather than believed from
 configuration.
 """
 
+import fnmatch
 import os
 import sys
 import time
@@ -524,6 +525,42 @@ def _report_coverage(out, client, timeout: Optional[float]) -> None:
 
 
 
+def _expand_partitions(spec: str, timeout: Optional[float]) -> List[str]:
+    """Resolve a comma-separated spec, expanding any shell-style wildcard.
+
+    ``sinfo -p`` takes a comma list natively but no globs, so ``kempner*`` reaches it
+    as a literal name and matches nothing. Expanded here against ``sinfo -o %R``, which
+    is also the list the error message can offer -- a typo and an unsupported pattern
+    are indistinguishable to the caller otherwise.
+    """
+    wanted = [t.strip() for t in spec.split(",") if t.strip()]
+    if not any(ch in t for t in wanted for ch in "*?["):
+        return wanted
+    listed = run_capture(["sinfo", "-h", "-o", "%R"], timeout, "sinfo", soft=True)
+    known = sorted({line.strip() for line in (listed or "").splitlines() if line.strip()})
+    out: List[str] = []
+    for token in wanted:
+        if not any(ch in token for ch in "*?["):
+            out.append(token)
+            continue
+        hits = fnmatch.filter(known, token)
+        if not hits:
+            near = [k for k in known if k.startswith(token.split("*")[0][:4])]
+            raise JobscopeError(
+                "no partition matches %r.%s" % (token,
+                    " Did you mean: %s?" % ", ".join(near[:8]) if near
+                    else " 'sinfo -o %R' lists them."))
+        out.extend(hits)
+    # Deduplicated, order preserved: two patterns may overlap, and sinfo would then
+    # count the same nodes twice.
+    seen, unique = set(), []
+    for name in out:
+        if name not in seen:
+            seen.add(name)
+            unique.append(name)
+    return unique
+
+
 def _partition_nodes(partition: str, timeout: Optional[float]):
     """``{node: (slurm state, has_gpu)}`` for ``partition``.
 
@@ -549,13 +586,31 @@ def _partition_nodes(partition: str, timeout: Optional[float]):
     return nodes
 
 
-# States where absent metrics are the expected answer, not a gap: nothing is running to
-# measure. The trailing `*` Slurm adds for an unresponsive node is stripped first.
-_DOWN_STATES = ("down", "drain", "drng", "fail", "maint", "unk", "resv", "boot", "pow")
+# States where the node is not serving at all, so absent metrics are the expected answer
+# rather than a gap. The trailing `*$~#` Slurm appends (unresponsive, maint, power-saving)
+# is stripped first. `inval` is a node whose registration Slurm rejected -- up in name
+# only.
+_DOWN_STATES = ("down", "drain", "drng", "fail", "maint", "unk", "boot", "pow",
+                "inval", "future", "perfctrs")
+
+
+# States in which a job is actually running on the node. Only these can have cgroup
+# series: those exist per running *job*, not per node, so `idle`, `reserved` and
+# `planned` legitimately have none. Reserved nodes are otherwise up -- their GPU
+# exporters publish normally -- so they are counted, just not faulted for cgroup.
+_BUSY_STATES = ("alloc", "mix", "comp")
+
+
+def _strip_state(state: str) -> str:
+    return state.rstrip("*$~#+").lower()
 
 
 def _is_up(state: str) -> bool:
-    return not state.rstrip("*$~#").lower().startswith(_DOWN_STATES)
+    return not _strip_state(state).startswith(_DOWN_STATES)
+
+
+def _runs_jobs(state: str) -> bool:
+    return _strip_state(state).startswith(_BUSY_STATES)
 
 
 def _series_hosts(client, series: str, timeout: Optional[float]):
@@ -619,17 +674,21 @@ def report_column_coverage(out, client, timeout: Optional[float],
     which is the only line worth acting on.
     """
     columns = _coverage_columns()
-    nodes = _partition_nodes(partition, timeout) if partition else {}
+    names = _expand_partitions(partition, timeout) if partition else []
+    nodes = _partition_nodes(",".join(names), timeout) if names else {}
     states = {n: st for n, (st, _g) in nodes.items()}
     up = {n for n, (st, _g) in nodes.items() if _is_up(st)}
     gpu_up = {n for n in up if nodes[n][1]}
     skipped = len(nodes) - len(up)
 
     if partition:
-        _line(out, "coverage", "partition %s: %d of %d node(s) up%s"
-                               % (partition, len(up), len(nodes),
-                                  " (%d down/drained, not counted)" % skipped
-                                  if skipped else ""))
+        # Names on their own line: five partitions run past 60 characters, and the
+        # counts are what the reader is scanning for.
+        _line(out, "coverage", "%d partition(s): %s"
+                               % (len(names), ", ".join(names)))
+        _cont(out, "%d of %d node(s) up%s"
+                   % (len(up), len(nodes),
+                      " (%d down/drained, not counted)" % skipped if skipped else ""))
     else:
         _line(out, "coverage", "cluster-wide, per column (name a partition to see which "
                                "nodes are missing)")
@@ -668,25 +727,40 @@ def report_column_coverage(out, client, timeout: Optional[float],
     # Node-first, because that is how it gets acted on: one line per node saying which
     # columns it cannot serve, rather than the same node listed under nine columns.
     if not absent_by_node:
-        _cont(out, "every column covers every node that is up in %s" % partition)
+        _cont(out, "every column covers every node that is up")
         return 0
-    print("", file=out)
-    _line(out, "missing", "%d node(s) up but not publishing every series:"
-                          % len(absent_by_node))
+
+    # Split before printing. A node whose only gap is explained belongs in a one-line
+    # summary, not beside a real fault -- on five partitions here six reserved nodes
+    # outnumbered the single host that was running jobs and publishing no DCGM, which
+    # is the whole point of the report.
+    faults, expected = [], []
     for node in sorted(absent_by_node):
         cols = absent_by_node[node]
         fams = sorted({families[c] for c in cols})
-        why = ""
         state = states.get(node, "?")
-        if fams == ["cgroup"] and state.rstrip("*$~#").lower().startswith("idle"):
-            # cgroup series are per running *job*, not per node, so an idle node has
-            # nothing to publish and its absence is the correct answer. Scoped to `idle`
-            # deliberately: `mixed` and `allocated` mean jobs ARE running there, so a
-            # missing cgroup series on one of those is a real gap, not an explanation.
-            why = "  -- expected while idle: cgroup series exist only where a job runs"
-        _cont(out, "%-16s %-7s no %s: %s%s"
-                   % (node, "(%s)" % states.get(node, "?"), "/".join(fams),
-                      ", ".join(cols), why))
+        if fams == ["cgroup"] and not _runs_jobs(state):
+            expected.append((node, state))
+        else:
+            faults.append((node, state, fams, cols))
+
+    print("", file=out)
+    if faults:
+        _line(out, "missing", "%d node(s) running jobs but not publishing every series:"
+                              % len(faults))
+        for node, state, fams, cols in faults:
+            _cont(out, "%-16s %-11s no %s: %s"
+                       % (node, "(%s)" % state, "/".join(fams), ", ".join(cols)))
+    else:
+        _line(out, "missing", "nothing unexplained: every node running jobs publishes "
+                              "every series")
+    if expected:
+        names = ", ".join("%s (%s)" % (n, _strip_state(st)) for n, st in expected[:6])
+        _cont(out, "%d node(s) have no cgroup series with no job running, which is "
+                   "expected:" % len(expected))
+        _cont(out, "  %s%s" % (names,
+                               ", ... and %d more" % (len(expected) - 6)
+                               if len(expected) > 6 else ""))
     return 0
 
 

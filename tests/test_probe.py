@@ -583,16 +583,40 @@ def test_gpu_columns_are_not_reported_missing_on_cpu_only_nodes(monkeypatch):
     assert "every column covers every node that is up" in text
 
 
-def test_an_idle_node_missing_only_cgroup_is_explained_not_flagged(monkeypatch):
-    """cgroup series are per running *job*, so an idle node has nothing to publish and
-    its absence is the right answer. Scoped to `idle`: on `mixed` a job IS running, so a
-    missing cgroup series there is a real gap and must not be explained away."""
-    idle = _coverage_report(monkeypatch, ["n1 idle gpu:a100:4"],
+@pytest.mark.parametrize("state", ["idle", "reserved", "planned"])
+def test_a_node_with_no_job_is_not_faulted_for_missing_cgroup(monkeypatch, state):
+    """cgroup series are per running *job*, not per node, so a node with nothing running
+    has none and its absence is the right answer. Keyed on whether a job runs rather than
+    on `idle` alone: six `reserved` nodes were being reported as faults, outnumbering the
+    one host that really was misconfigured."""
+    text = _coverage_report(monkeypatch, ["n1 %s gpu:a100:4" % state],
                             {"DCGM_FI": ["n1"], "nvidia_gpu": ["n1"]})
-    assert "expected while idle" in idle
-    busy = _coverage_report(monkeypatch, ["n1 mixed gpu:a100:4"],
+    assert "which is expected" in text
+    # Kept out of the fault list, which is what makes the fault list worth reading.
+    assert "nothing unexplained" in text
+
+
+@pytest.mark.parametrize("state", ["mixed", "allocated", "completing"])
+def test_a_node_running_jobs_is_faulted_for_missing_cgroup(monkeypatch, state):
+    """The other half: a job IS running there, so the series should exist."""
+    text = _coverage_report(monkeypatch, ["n1 %s gpu:a100:4" % state],
                             {"DCGM_FI": ["n1"], "nvidia_gpu": ["n1"]})
-    assert "expected while" not in busy      # a real gap, stated plainly
+    assert "1 node(s) running jobs but not publishing" in text
+    assert "which is expected" not in text
+
+
+def test_a_real_fault_is_not_buried_by_explained_absences(monkeypatch):
+    """Measured on five partitions: 6 reserved nodes and 1 genuinely misconfigured host.
+    The fault has to come first and the rest collapse to a line."""
+    text = _coverage_report(
+        monkeypatch,
+        ["bad mixed gpu:a100:4"] + ["r%d reserved gpu:a100:4" % i for i in range(6)],
+        {"nvidia_gpu": ["bad"] + ["r%d" % i for i in range(6)],
+         "DCGM_FI": ["r%d" % i for i in range(6)],
+         "cgroup_": ["bad"]})
+    fault_line = text.index("no dcgm")
+    assert fault_line < text.index("which is expected")
+    assert "1 node(s) running jobs" in text
 
 
 def test_an_unknown_partition_says_how_to_list_them(monkeypatch):
