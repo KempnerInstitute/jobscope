@@ -531,14 +531,37 @@ def test_only_nodes_that_could_report_are_counted(state, up):
     assert probe._is_up(state) is up
 
 
-def test_a_stored_column_names_both_the_summary_and_its_fallback():
-    """"jobstats" beside a DCGM series reads like a contradiction. The JS1: blob is per
-    job in sacct, so it has no host coverage; the count describes what a job with no
-    summary -- every running one -- falls back to."""
-    rows = {c: src for c, src, _series, _fam in probe._coverage_columns()}
-    assert rows["CPU%"] == "cgroup"
-    assert rows["GPU%"].startswith("jobstats/")     # stored, with an exporter behind it
-    assert rows["SM_ACT%"] == "dcgm"                # no summary candidate at all
+def test_every_source_is_reported_not_just_the_winner():
+    """Candidates, not the resolved view: with only the winner shown,
+    nvidia_gpu_duty_cycle is invisible whenever dcgm wins GPU%, so "would --gpu-source
+    nvml cover more of my partition?" has no answer here -- which is the decision this
+    report exists to inform."""
+    by_family = probe._coverage_series()
+    assert set(by_family) >= {"cgroup", "nvml", "dcgm"}
+    # GPU% has a candidate under both exporters, and both are listed.
+    gpu_families = {f for f, rows in by_family.items()
+                    if any(col == "GPU%" for _s, col, _serving in rows)}
+    assert gpu_families == {"nvml", "dcgm"}
+    # slurm serves CPU%/MEM% from sacct, so it has no series and no host coverage.
+    assert "slurm" not in by_family
+    assert all(series for rows in by_family.values() for series, _c, _s in rows)
+
+
+def test_exactly_one_source_is_marked_serving_per_column():
+    """The mark has to name the *exporter* a running job reads. Keyed on source_of it
+    would answer "jobstats" for the columns the stored summary wins -- and jobstats has
+    no series, so every row here would be unmarked and the mark meaningless."""
+    by_family = probe._coverage_series()
+    serving = {}
+    for family, rows in by_family.items():
+        for _series, column, is_serving in rows:
+            if is_serving:
+                serving.setdefault(column, []).append(family)
+    assert serving, "nothing marked serving"
+    for column, families in serving.items():
+        assert len(families) == 1, (column, families)
+    # CPU% comes from cgroup even though the stored summary outranks it in the order.
+    assert serving["CPU%"] == ["cgroup"]
 
 
 def _coverage_report(monkeypatch, sinfo_lines, hosts_by_series):
@@ -580,7 +603,7 @@ def test_gpu_columns_are_not_reported_missing_on_cpu_only_nodes(monkeypatch):
         monkeypatch, ["c1 mixed (null)", "c2 idle (null)"],
         {"cgroup_": ["c1", "c2"]})
     assert "no GPU nodes" in text
-    assert "every column covers every node that is up" in text
+    assert "every serving series covers every node that is up" in text
 
 
 @pytest.mark.parametrize("state", ["idle", "reserved", "planned"])

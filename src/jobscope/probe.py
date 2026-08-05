@@ -628,52 +628,79 @@ def _series_hosts(client, series: str, timeout: Optional[float]):
     return {str(r["metric"].get(label, "?")).split(":")[0] for r in rows}
 
 
-def _coverage_columns():
-    """``[(column, source, series, family)]`` for the columns a default report prints.
+# The order sources are reported in: host axis first, then the two GPU exporters, which
+# is the order the columns themselves print in.
+_SOURCE_ORDER = ("cgroup", "nvml", "dcgm")
 
-    Read off the *resolved* catalog, so this describes the report the reader will get:
-    under ``--gpu-source dcgm`` the GPU% row names the DCGM series. Coverage is a
-    property of the series, and which series serves a column is a property of the
-    preference -- which is exactly what one number per exporter cannot express.
+_SOURCE_WHAT = {
+    "cgroup": "CPU%/MEM%, published per running job",
+    "nvml": "duty cycle, memory, and the job-to-GPU join every source depends on",
+    "dcgm": "the profiling catalog",
+}
+
+
+def _coverage_series():
+    """``{family: [(series, column, serving)]}`` over every *candidate*, not just winners.
+
+    Candidates rather than the resolved view, because comparing sources is the decision
+    this report exists to inform: with only the winner shown, ``nvidia_gpu_duty_cycle``
+    is invisible whenever dcgm wins GPU%, so "would --gpu-source nvml cover more of my
+    partition?" has no answer here. ``serving`` marks the one actually in use.
+
+    ``slurm`` candidates are skipped: they come from sacct, so they have no series and no
+    host coverage to report. Same for the stored summary -- noted in prose instead.
     """
     from . import cpu, dcgm
-    rows, seen = [], set()
-    for spec in cpu.RESOLVED.specs:
-        if spec.column in ("CPU%", "MEM%") and spec.column not in seen:
-            seen.add(spec.column)
-            rows.append((spec.column, spec.family, spec.metric, spec.family))
-    for spec in dcgm.DEFAULT_SPECS:
-        if spec.column in seen:
-            continue
-        seen.add(spec.column)
-        # A column the stored summary wins has no host coverage of its own -- the JS1:
-        # blob is per job in sacct, not per host in Prometheus. The count describes the
-        # *fallback*: the series a job with no summary (every running one) is measured
-        # from. Naming both is the only honest label, since "jobstats" beside a DCGM
-        # series reads like a contradiction.
-        stored = spec.column in dcgm.RESOLVED.from_jobstats
-        source = "jobstats/%s" % spec.family if stored else spec.family
-        rows.append((spec.column, source, spec.metric, spec.family))
-    return rows
+    columns = {spec.column for spec in dcgm.DEFAULT_SPECS}
+    by_family: Dict[str, List[Tuple[str, str, bool]]] = {}
+
+    def winner(resolution, column: str) -> str:
+        """The family of the *exporter* resolved to ``column``.
+
+        Not ``source_of``, which answers ``jobstats`` for the columns the stored summary
+        wins -- and jobstats has no series, so that would leave every row here unmarked
+        and the mark meaningless. The resolved spec list holds exporters only, which is
+        exactly the question host coverage can answer.
+        """
+        for spec in resolution.specs:
+            if spec.column == column:
+                return spec.family
+        return ""
+
+    for spec in cpu.CANDIDATES:
+        if spec.column in ("CPU%", "MEM%") and spec.metric:
+            by_family.setdefault(spec.family, []).append(
+                (spec.metric, spec.column, winner(cpu.RESOLVED, spec.column) == spec.family))
+    for spec in dcgm.METRICS:
+        if spec.column in columns and spec.metric:
+            by_family.setdefault(spec.family, []).append(
+                (spec.metric, spec.column,
+                 winner(dcgm.RESOLVED, spec.column) == spec.family))
+    return by_family
 
 
 def report_column_coverage(out, client, timeout: Optional[float],
                            partition: str = "") -> int:
-    """Per-column host coverage, and by name whatever is missing.
+    """Per-series host coverage for every source, and by name whatever is missing.
 
-    The per-*exporter* line in the main report cannot answer this. It picks one
-    representative series per family, so a family whose members have different coverage
-    reads as uniformly fine: measured here, dcgm-exporter publishes
+    The coverage line in the main report gives one number per exporter, which hides gaps
+    *within* a family: it picks one representative series, so a family whose members have
+    different coverage reads as uniformly fine. Measured here, dcgm-exporter publishes
     ``DCGM_FI_PROF_SM_ACTIVE`` on 437 hosts and ``DCGM_FI_DEV_GPU_UTIL`` on 416, because
     MIG nodes have no whole-device duty cycle. One number per family hid a 22-host hole
-    in one column.
+    in the first column anyone reads.
+
+    Grouped by source and covering every candidate, so all three are answerable side by
+    side -- which is the decision this informs. ``*`` marks the series currently serving
+    its column; the others are what a different ``--gpu-source`` would read.
 
     Node state is read alongside, because without it this cries wolf. A ``down`` node
-    reports nothing by definition, and a partition with six of those would name them
-    against every column -- burying the one node that is *up* and still missing a series,
-    which is the only line worth acting on.
+    reports nothing by definition, and a node with no job running has no cgroup series to
+    publish -- neither is a fault, and on five partitions here they outnumbered the one
+    genuinely misconfigured host eight to one.
     """
-    columns = _coverage_columns()
+    from . import dcgm
+    by_family = _coverage_series()
     names = _expand_partitions(partition, timeout) if partition else []
     nodes = _partition_nodes(",".join(names), timeout) if names else {}
     states = {n: st for n, (st, _g) in nodes.items()}
@@ -682,58 +709,64 @@ def report_column_coverage(out, client, timeout: Optional[float],
     skipped = len(nodes) - len(up)
 
     if partition:
-        # Names on their own line: five partitions run past 60 characters, and the
-        # counts are what the reader is scanning for.
-        _line(out, "coverage", "%d partition(s): %s"
-                               % (len(names), ", ".join(names)))
+        _line(out, "coverage", "%d partition(s): %s" % (len(names), ", ".join(names)))
         _cont(out, "%d of %d node(s) up%s"
                    % (len(up), len(nodes),
                       " (%d down/drained, not counted)" % skipped if skipped else ""))
     else:
-        _line(out, "coverage", "cluster-wide, per column (name a partition to see which "
-                               "nodes are missing)")
-    _cont(out, "%-14s %-14s %-32s %s" % ("column", "source", "series", "hosts"))
+        _line(out, "coverage", "cluster-wide (name a partition to see which nodes are "
+                               "missing)")
 
     absent_by_node: Dict[str, List[str]] = {}
     families: Dict[str, str] = {}
-    for column, source, series, family in columns:
-        hosts = _series_hosts(client, series, timeout)
-        if hosts is None:
-            _cont(out, "%-14s %-14s %-32s query failed"
-                       % (column, source, series[:31]))
+    for family in _SOURCE_ORDER:
+        rows = by_family.get(family)
+        if not rows:
             continue
-        if partition:
-            # Scoped to the nodes that *could* publish it: a GPU column over the GPU
-            # nodes, so "21/22" is not diluted by CPU-only members of a mixed partition.
-            scope = up if family == "cgroup" else gpu_up
-            # "0/0" is true but reads as a failure; a partition with no GPUs simply has
-            # no node this column could describe.
-            count = ("%d/%d" % (len(hosts & scope), len(scope)) if scope
-                     else "-  (no GPU nodes)")
-            for node in sorted(scope - hosts):
-                absent_by_node.setdefault(node, []).append(column)
-                families[column] = family
-        else:
-            count = str(len(hosts))
-        _cont(out, "%-14s %-14s %-32s %s" % (column, source, series[:31], count))
+        print("", file=out)
+        _line(out, family, "-- %s" % _SOURCE_WHAT.get(family, ""))
+        for series, column, serving in rows:
+            hosts = _series_hosts(client, series, timeout)
+            mark = "*" if serving else " "
+            if hosts is None:
+                _cont(out, "%s %-34s %-14s query failed" % (mark, series[:33], column))
+                continue
+            if partition:
+                # Scoped to the nodes that could publish it: a GPU series over the GPU
+                # nodes, so a count is not diluted by CPU-only partition members.
+                scope = up if family == "cgroup" else gpu_up
+                count = ("%d/%d" % (len(hosts & scope), len(scope)) if scope
+                         else "-  (no GPU nodes)")
+                # Only the serving series can break a report, so only it makes a node a
+                # fault. The rest are here to be compared, not to raise alarms.
+                if serving:
+                    for node in sorted(scope - hosts):
+                        absent_by_node.setdefault(node, []).append(column)
+                        families[column] = family
+            else:
+                count = str(len(hosts))
+            _cont(out, "%s %-34s %-14s %s" % (mark, series[:33], column, count))
 
-    if any("/" in source for _c, source, _s, _f in columns):
-        _cont(out, "jobstats/X: stored per job in sacct for a finished job, so the count"
-                   " is what a running job falls back to.")
+    print("", file=out)
+    _cont(out, "* serving that column now. Unmarked rows are what another --gpu-source "
+               "would read.")
+    stored = sorted(dcgm.RESOLVED.from_jobstats)
+    if stored:
+        _cont(out, "jobstats also serves %s for a *finished* job -- stored per job in "
+                   "sacct," % ", ".join(stored))
+        _cont(out, "  so it has no host coverage; the rows above are what a running job "
+                   "falls back to.")
     if not partition:
         _cont(out, "  jobscope probe --coverage PARTITION")
         return 0
 
-    # Node-first, because that is how it gets acted on: one line per node saying which
-    # columns it cannot serve, rather than the same node listed under nine columns.
     if not absent_by_node:
-        _cont(out, "every column covers every node that is up")
+        _cont(out, "every serving series covers every node that is up")
         return 0
 
     # Split before printing. A node whose only gap is explained belongs in a one-line
     # summary, not beside a real fault -- on five partitions here six reserved nodes
-    # outnumbered the single host that was running jobs and publishing no DCGM, which
-    # is the whole point of the report.
+    # outnumbered the single host that was running jobs and publishing no DCGM.
     faults, expected = [], []
     for node in sorted(absent_by_node):
         cols = absent_by_node[node]
@@ -746,20 +779,19 @@ def report_column_coverage(out, client, timeout: Optional[float],
 
     print("", file=out)
     if faults:
-        _line(out, "missing", "%d node(s) running jobs but not publishing every series:"
-                              % len(faults))
+        _line(out, "missing", "%d node(s) running jobs but not publishing every serving "
+                              "series:" % len(faults))
         for node, state, fams, cols in faults:
             _cont(out, "%-16s %-11s no %s: %s"
                        % (node, "(%s)" % state, "/".join(fams), ", ".join(cols)))
     else:
         _line(out, "missing", "nothing unexplained: every node running jobs publishes "
-                              "every series")
+                              "every serving series")
     if expected:
-        names = ", ".join("%s (%s)" % (n, _strip_state(st)) for n, st in expected[:6])
+        shown = ", ".join("%s (%s)" % (n, _strip_state(st)) for n, st in expected[:6])
         _cont(out, "%d node(s) have no cgroup series with no job running, which is "
                    "expected:" % len(expected))
-        _cont(out, "  %s%s" % (names,
-                               ", ... and %d more" % (len(expected) - 6)
+        _cont(out, "  %s%s" % (shown, ", ... and %d more" % (len(expected) - 6)
                                if len(expected) > 6 else ""))
     return 0
 

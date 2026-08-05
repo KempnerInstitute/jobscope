@@ -145,31 +145,50 @@ have different coverage reads as uniformly fine. Measured on one cluster,
 22-host difference is MIG nodes, which have no whole-device duty cycle to report. One
 number per exporter said nothing about the hole in GPU%.
 
-`--coverage` counts **per column**, naming the series behind each. `jobstats/dcgm`
-means the stored summary serves it for a finished job, so the count is what a *running*
-job falls back to.
+`--coverage` counts **per series, grouped by source**, and lists every *candidate* --
+not just the one that won. That matters because comparing sources is the decision it
+exists to inform: with only the winner shown, `nvidia_gpu_duty_cycle` is invisible
+whenever dcgm serves GPU%, so "would `--gpu-source nvml` cover more of my partition?"
+would have no answer here. `*` marks the series serving its column now; unmarked rows
+are what another `--gpu-source` would read.
 
 Name partitions and the comparison is against their own nodes, with the absent ones
 listed. A comma-separated list works, and so do shell-style wildcards
 (`kempner_h*`) — `sinfo -p` takes the list but not the glob, so jobscope expands it:
 
 ```console
-$ jobscope probe --coverage kempner,kempner_eng,kempner_h100,kempner_h200,kempner_rtx
-coverage    5 partition(s): kempner, kempner_eng, kempner_h100, kempner_h200, kempner_rtx
-            239 of 254 node(s) up (15 down/drained, not counted)
-            column         source         series                           hosts
-            CPU%           cgroup         cgroup_cpu_total_seconds         232/239
-            GPU%           jobstats/dcgm  DCGM_FI_DEV_GPU_UTIL             238/239
-            SM_ACT%        dcgm           DCGM_FI_PROF_SM_ACTIVE           238/239
+$ jobscope probe --coverage kempner
+coverage    1 partition(s): kempner
+            22 of 28 node(s) up (6 down/drained, not counted)
+
+cgroup      -- CPU%/MEM%, published per running job
+            * cgroup_cpu_total_seconds           CPU%           22/22
+            * cgroup_memory_rss_bytes            MEM%           22/22
+
+nvml        -- duty cycle, memory, and the job-to-GPU join every source depends on
+              nvidia_gpu_duty_cycle              GPU%           22/22
+            * nvidia_gpu_memory_used_bytes       GMEM_GB        22/22
+
+dcgm        -- the profiling catalog
+            * DCGM_FI_DEV_GPU_UTIL               GPU%           21/22
+            * DCGM_FI_PROF_SM_ACTIVE             SM_ACT%        21/22
             ...
-missing     1 node(s) running jobs but not publishing every series:
+
+missing     1 node(s) running jobs but not publishing every serving series:
             holygpu8a19102   (mixed)     no dcgm: GPU%, SM_ACT%, TENSOR%, DRAM%, POWER_W
-            6 node(s) have no cgroup series with no job running, which is expected:
-              holygpu7c1713 (reserved), holygpu7c1734 (reserved), ...
 ```
 
-That is 254 nodes reduced to the one line worth acting on. Three classes are kept out
-of the fault list, because each would be noise rather than a fault:
+Read side by side, those two GPU% rows are the answer to a question the single
+per-exporter count cannot express: nvml covers the node dcgm does not, so
+`--gpu-source nvml` would report on it.
+
+Cluster-wide, the same view shows both exporters publishing a duty cycle on 416 hosts
+while their memory and power series are on 438 — the 22-host difference is MIG nodes,
+which have no whole-device duty cycle to report from *either* exporter.
+
+The `missing` section is the point: over five kempner partitions this reduces 254 nodes
+to the one host worth acting on. Three classes are kept out of it, because each would be
+noise rather than a fault:
 
 - **`down`/`drained`/`inval` nodes** — not serving, so nothing to measure.
 - **GPU columns on nodes with no gpu gres** — a CPU-only partition would otherwise
