@@ -194,9 +194,33 @@ noise rather than a fault:
 - **GPU columns on nodes with no gpu gres** — a CPU-only partition would otherwise
   report every GPU column missing on every node.
 - **`CPU%`/`MEM%` where no job is running.** cgroup series exist per running *job*, so
-  `idle`, `reserved` and `planned` nodes correctly have none; they collapse to the
-  summary line. A node in `mixed`, `allocated` or `completing` **is** faulted, because
-  a job is running on it and the series should exist.
+  `idle`, `reserved` and `planned` nodes correctly have none. A node in `mixed`,
+  `allocated` or `completing` **is** faulted, because a job is running on it and the
+  series should exist.
+- **`GPU%` on a MIG node.** Partitioning a card leaves no whole *device* to report a duty
+  cycle for, so neither exporter publishes one — measured, `DCGM_FI_DEV_GPU_UTIL` and
+  `nvidia_gpu_duty_cycle` are both absent on every MIG host while the per-instance
+  profiling and memory series are complete. Recognised from Slurm's gres profile
+  (`gpu:nvidia_a100_3g.20gb:8`), and scoped to `GPU%` alone: a MIG node missing
+  `SM_ACT%` **is** a fault, because those series are per instance and should be there.
+
+Each *gap* is judged on its own terms rather than each node, because one node can have
+two absences with two different explanations — an idle MIG node has exactly that, and
+judging the node as a whole put it in the fault list for both. A fully MIG partition
+therefore reads:
+
+```console
+$ jobscope probe --coverage kempner_interactive
+...
+missing     nothing unexplained
+            expected -- MIG: no whole-device GPU%: 8 node(s)
+              holygpu8a19505, holygpu8a19506, ...
+            expected -- no job running (idle): 6 node(s)
+              holygpu8a19506, holygpu8a19601, ...
+```
+
+`GPU%` reading `-` for every job on those nodes is a hardware-configuration
+consequence, not something to fix. `SM_ACT%` is the utilization signal to read there.
 
 ### Pointing jobscope at Prometheus
 

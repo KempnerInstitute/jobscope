@@ -606,6 +606,51 @@ def test_gpu_columns_are_not_reported_missing_on_cpu_only_nodes(monkeypatch):
     assert "every serving series covers every node that is up" in text
 
 
+@pytest.mark.parametrize("gres,is_mig", [
+    ("gpu:nvidia_a100_3g.20gb:8", True),
+    ("gpu:nvidia_a100_1g.5gb:56", True),
+    ("gpu:nvidia_a100-sxm4-40gb:4", False),
+    ("gpu:nvidia_h100_80gb_hbm3:4", False),
+    ("(null)", False),
+])
+def test_mig_is_recognised_from_the_gres_profile(gres, is_mig):
+    """`3g.20gb` is a MIG profile; `a100-sxm4-40gb` is a whole card whose name also has
+    digits and a dash, so the pattern has to be the `Ng.Mgb` form specifically."""
+    assert bool(probe._MIG_GRES.search(gres)) is is_mig
+
+
+def test_mig_excuses_only_the_whole_device_column(monkeypatch):
+    """Partitioning a card leaves no whole *device* to report a duty cycle for, so
+    neither exporter publishes GPU% there -- not a misconfiguration and not fixable. The
+    per-instance profiling and memory series come through fine, so a gap in *those* on a
+    MIG node is still a real fault and must not be waved through."""
+    only_gpu = _coverage_report(
+        monkeypatch, ["m1 mixed gpu:nvidia_a100_3g.20gb:8"],
+        {"DCGM_FI_PROF": ["m1"], "DCGM_FI_DEV_POWER": ["m1"],
+         "nvidia_gpu_memory": ["m1"], "cgroup_": ["m1"]})
+    assert "nothing unexplained" in only_gpu
+    assert "MIG: no whole-device GPU%" in only_gpu
+
+    also_profiling = _coverage_report(
+        monkeypatch, ["m1 mixed gpu:nvidia_a100_3g.20gb:8"],
+        {"nvidia_gpu_memory": ["m1"], "cgroup_": ["m1"]})
+    assert "1 node(s) with an unexplained gap" in also_profiling
+    assert "SM_ACT%" in also_profiling
+
+
+def test_each_gap_is_explained_on_its_own_terms(monkeypatch):
+    """An idle MIG node has two absences with two different explanations. Judging the
+    node as a whole put it in the fault list for both -- the output that prompted this
+    read "8 node(s) running jobs" over six idle ones."""
+    text = _coverage_report(
+        monkeypatch, ["m1 idle gpu:nvidia_a100_3g.20gb:8"],
+        {"DCGM_FI_PROF": ["m1"], "DCGM_FI_DEV_POWER": ["m1"],
+         "nvidia_gpu_memory": ["m1"]})
+    assert "nothing unexplained" in text
+    assert "MIG: no whole-device GPU%" in text
+    assert "no job running (idle)" in text
+
+
 @pytest.mark.parametrize("state", ["idle", "reserved", "planned"])
 def test_a_node_with_no_job_is_not_faulted_for_missing_cgroup(monkeypatch, state):
     """cgroup series are per running *job*, not per node, so a node with nothing running
@@ -614,7 +659,7 @@ def test_a_node_with_no_job_is_not_faulted_for_missing_cgroup(monkeypatch, state
     one host that really was misconfigured."""
     text = _coverage_report(monkeypatch, ["n1 %s gpu:a100:4" % state],
                             {"DCGM_FI": ["n1"], "nvidia_gpu": ["n1"]})
-    assert "which is expected" in text
+    assert "expected -- no job running" in text
     # Kept out of the fault list, which is what makes the fault list worth reading.
     assert "nothing unexplained" in text
 
@@ -624,8 +669,8 @@ def test_a_node_running_jobs_is_faulted_for_missing_cgroup(monkeypatch, state):
     """The other half: a job IS running there, so the series should exist."""
     text = _coverage_report(monkeypatch, ["n1 %s gpu:a100:4" % state],
                             {"DCGM_FI": ["n1"], "nvidia_gpu": ["n1"]})
-    assert "1 node(s) running jobs but not publishing" in text
-    assert "which is expected" not in text
+    assert "1 node(s) with an unexplained gap" in text
+    assert "expected -- no job running" not in text
 
 
 def test_a_real_fault_is_not_buried_by_explained_absences(monkeypatch):
@@ -638,8 +683,8 @@ def test_a_real_fault_is_not_buried_by_explained_absences(monkeypatch):
          "DCGM_FI": ["r%d" % i for i in range(6)],
          "cgroup_": ["bad"]})
     fault_line = text.index("no dcgm")
-    assert fault_line < text.index("which is expected")
-    assert "1 node(s) running jobs" in text
+    assert fault_line < text.index("expected -- no job running")
+    assert "1 node(s) with an unexplained gap" in text
 
 
 def test_an_unknown_partition_says_how_to_list_them(monkeypatch):

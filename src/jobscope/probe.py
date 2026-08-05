@@ -26,6 +26,7 @@ configuration.
 
 import fnmatch
 import os
+import re
 import sys
 import time
 from collections import Counter
@@ -562,7 +563,7 @@ def _expand_partitions(spec: str, timeout: Optional[float]) -> List[str]:
 
 
 def _partition_nodes(partition: str, timeout: Optional[float]):
-    """``{node: (slurm state, has_gpu)}`` for ``partition``.
+    """``{node: (slurm state, has_gpu, is_mig)}`` for ``partition``.
 
     ``%n`` rather than ``%N``, so Slurm expands its own bracketed hostlist -- the
     comparison downstream is against one label value at a time, and
@@ -579,11 +580,24 @@ def _partition_nodes(partition: str, timeout: Optional[float]):
         parts = line.split(None, 2)
         if len(parts) >= 2:
             gres = parts[2] if len(parts) > 2 else ""
-            nodes[parts[0]] = (parts[1], "gpu:" in gres)
+            nodes[parts[0]] = (parts[1], "gpu:" in gres, bool(_MIG_GRES.search(gres)))
     if not nodes:
         raise JobscopeError(
             "no nodes in partition %r. 'sinfo -o %%R' lists the partitions." % partition)
     return nodes
+
+
+# A MIG profile in Slurm's gres string: `gpu:nvidia_a100_3g.20gb:8`. Partitioning a card
+# means there is no longer a whole *device* to report a duty cycle for, so neither
+# exporter publishes one -- measured, DCGM_FI_DEV_GPU_UTIL and nvidia_gpu_duty_cycle are
+# both absent on every MIG host here while the profiling and memory series are complete.
+_MIG_GRES = re.compile(r"\d+g\.\d+gb")
+
+# Columns MIG structurally cannot serve. GPU% is a whole-device duty cycle; the profiling
+# ratios and the memory pair are per instance and come through fine. A future whole-device
+# column would need adding here -- there is no role in the catalog that says "device-wide",
+# so this cannot be derived.
+_MIG_BLIND_COLUMNS = ("GPU%",)
 
 
 # States where the node is not serving at all, so absent metrics are the expected answer
@@ -703,9 +717,10 @@ def report_column_coverage(out, client, timeout: Optional[float],
     by_family = _coverage_series()
     names = _expand_partitions(partition, timeout) if partition else []
     nodes = _partition_nodes(",".join(names), timeout) if names else {}
-    states = {n: st for n, (st, _g) in nodes.items()}
-    up = {n for n, (st, _g) in nodes.items() if _is_up(st)}
+    states = {n: st for n, (st, _g, _m) in nodes.items()}
+    up = {n for n, (st, _g, _m) in nodes.items() if _is_up(st)}
     gpu_up = {n for n in up if nodes[n][1]}
+    mig = {n for n in up if nodes[n][2]}
     skipped = len(nodes) - len(up)
 
     if partition:
@@ -764,35 +779,45 @@ def report_column_coverage(out, client, timeout: Optional[float],
         _cont(out, "every serving series covers every node that is up")
         return 0
 
-    # Split before printing. A node whose only gap is explained belongs in a one-line
-    # summary, not beside a real fault -- on five partitions here six reserved nodes
-    # outnumbered the single host that was running jobs and publishing no DCGM.
-    faults, expected = [], []
+    # Classified per *gap*, not per node: an idle MIG node has two absences with two
+    # different explanations, and judging the node as a whole put it in the fault list
+    # for both. So each (node, column) is asked separately whether it is expected, and a
+    # node is a fault only if something unexplained is left.
+    faults: Dict[str, List[str]] = {}
+    why_expected: Dict[str, List[str]] = {}
     for node in sorted(absent_by_node):
-        cols = absent_by_node[node]
-        fams = sorted({families[c] for c in cols})
         state = states.get(node, "?")
-        if fams == ["cgroup"] and not _runs_jobs(state):
-            expected.append((node, state))
-        else:
-            faults.append((node, state, fams, cols))
+        for column in absent_by_node[node]:
+            family = families[column]
+            if family == "cgroup" and not _runs_jobs(state):
+                # cgroup series are per running *job*, not per node.
+                why_expected.setdefault("no job running (%s)" % _strip_state(state),
+                                        []).append(node)
+            elif node in mig and column in _MIG_BLIND_COLUMNS:
+                # Not a misconfiguration and not fixable: a partitioned card has no
+                # whole-device duty cycle for either exporter to publish.
+                why_expected.setdefault("MIG: no whole-device %s" % column,
+                                        []).append(node)
+            else:
+                faults.setdefault(node, []).append(column)
 
     print("", file=out)
     if faults:
-        _line(out, "missing", "%d node(s) running jobs but not publishing every serving "
-                              "series:" % len(faults))
-        for node, state, fams, cols in faults:
+        _line(out, "missing", "%d node(s) with an unexplained gap:" % len(faults))
+        for node in sorted(faults):
+            cols = faults[node]
+            fams = sorted({families[c] for c in cols})
             _cont(out, "%-16s %-11s no %s: %s"
-                       % (node, "(%s)" % state, "/".join(fams), ", ".join(cols)))
+                       % (node, "(%s)" % states.get(node, "?"), "/".join(fams),
+                          ", ".join(cols)))
     else:
-        _line(out, "missing", "nothing unexplained: every node running jobs publishes "
-                              "every serving series")
-    if expected:
-        shown = ", ".join("%s (%s)" % (n, _strip_state(st)) for n, st in expected[:6])
-        _cont(out, "%d node(s) have no cgroup series with no job running, which is "
-                   "expected:" % len(expected))
-        _cont(out, "  %s%s" % (shown, ", ... and %d more" % (len(expected) - 6)
-                               if len(expected) > 6 else ""))
+        _line(out, "missing", "nothing unexplained")
+    for reason in sorted(why_expected):
+        hosts = sorted(set(why_expected[reason]))
+        shown = ", ".join(hosts[:6])
+        _cont(out, "expected -- %s: %d node(s)" % (reason, len(hosts)))
+        _cont(out, "  %s%s" % (shown, ", ... and %d more" % (len(hosts) - 6)
+                               if len(hosts) > 6 else ""))
     return 0
 
 
