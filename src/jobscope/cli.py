@@ -594,7 +594,13 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
                     "Use 'jobscope finished %s ...', or drop the flag." % (flag, short))
         if args.state is not None:
             raise JobscopeError("-t/--state does not apply to running jobs (all are RUNNING)")
-    elif args.avg:
+    elif args.avg and mode != JOBIDS:
+        # Scoped to a *window* selection, which by construction holds only finished
+        # jobs. An explicit JOBID can name a job that is still running -- this used to
+        # reject that with a message asserting the job had finished, which was both
+        # false and a refusal of the one flag that would have folded its window.
+        # JOBIDS carries whatever states the ids have, so the choice is per record;
+        # see JobRecord.unfinished.
         raise JobscopeError(
             "--avg applies to running jobs only; a finished job's metrics are always "
             "folded over its runtime.")

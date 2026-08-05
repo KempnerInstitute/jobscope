@@ -546,8 +546,20 @@ def gpu_minor_key(minor):
 MODEL_KEY = "__model__"
 
 
-def _reduce(selector: str, reducer: str, duration: int) -> str:
-    """Wrap a selector in its window reducer."""
+def _reduce(selector: str, reducer: str, duration: int, instant: bool = False) -> str:
+    """Wrap a selector in its window reducer, or leave it bare when ``instant``.
+
+    ``instant`` is for a job that has not finished: the newest scrape rather than a
+    mean over a window that is still growing. It leaves the selector unwrapped, which
+    is the same query :func:`jobscope.running.collect_instant` builds -- so a running
+    job reads the same whether it was selected by ``-j`` or by a partition sweep.
+
+    ``delta`` is exempt and keeps its window. It is a counter difference (ENERGY_kWh),
+    so "the newest scrape" of it is not a smaller version of the answer, it is no
+    answer at all -- a single sample has no difference to report.
+    """
+    if instant and reducer != "delta":
+        return selector
     if reducer == "avg":
         return "avg_over_time((%s)[%ds:])" % (selector, duration)
     if reducer == "max":
@@ -557,7 +569,7 @@ def _reduce(selector: str, reducer: str, duration: int) -> str:
 
 
 def window_query(spec: MetricSpec, uuids: List[str], duration: int,
-                 clip: Optional[str] = None) -> str:
+                 clip: Optional[str] = None, instant: bool = False) -> str:
     """PromQL that reduces ``spec`` over a ``duration``-second window for ``uuids``.
 
     ``clip`` is an optional series to intersect the selector with, which restricts
@@ -569,7 +581,7 @@ def window_query(spec: MetricSpec, uuids: List[str], duration: int,
     selector = '%s{%s=~"%s"}' % (spec.metric, spec.uuid_label, regex)
     if clip:
         selector = "%s and %s" % (selector, clip)
-    return _reduce(selector, spec.reducer, duration)
+    return _reduce(selector, spec.reducer, duration, instant)
 
 
 # The label a grouped query's metric name is copied into. Needed because
@@ -591,7 +603,8 @@ def group_key(spec: MetricSpec) -> Tuple[str, str]:
 
 
 def grouped_window_query(reducer: str, uuid_label: str, metrics: List[str],
-                         uuids: List[str], duration: int) -> str:
+                         uuids: List[str], duration: int,
+                         instant: bool = False) -> str:
     """One query covering several metrics that share a reducer and a UUID label.
 
     Replaces N per-metric round trips with one: 7 becomes 3 for the default column
@@ -607,7 +620,10 @@ def grouped_window_query(reducer: str, uuid_label: str, metrics: List[str],
     regex = "^(" + "|".join(uuids) + ")$"
     selector = ('label_replace({__name__=~"%s",%s=~"%s"},"%s","$1","__name__","(.*)")'
                 % (names, uuid_label, regex, NAME_LABEL))
-    return _reduce(selector, reducer, duration)
+    # The label_replace sits inside the selector, so an instant (unreduced) query still
+    # carries NAME_LABEL and stays demultiplexable -- the reduction is what would have
+    # dropped __name__, and its absence cannot reintroduce that problem.
+    return _reduce(selector, reducer, duration, instant)
 
 
 def _store_value(per_uuid: Dict[str, dict], spec: MetricSpec, series: dict) -> bool:
@@ -628,11 +644,13 @@ def _store_value(per_uuid: Dict[str, dict], spec: MetricSpec, series: dict) -> b
     return True
 
 
-def _collect_per_spec(per_uuid, specs, uuids, duration, at, client, timeout) -> None:
+def _collect_per_spec(per_uuid, specs, uuids, duration, at, client, timeout,
+                      instant: bool = False) -> None:
     """One query per metric -- the original path, and the fallback."""
     for spec in specs:
         try:
-            found = client.query(window_query(spec, uuids, duration), at, timeout)
+            found = client.query(window_query(spec, uuids, duration, instant=instant),
+                                 at, timeout)
         except Exception:
             continue        # a failed metric leaves its column empty, as before
         for series in found:
@@ -641,8 +659,12 @@ def _collect_per_spec(per_uuid, specs, uuids, duration, at, client, timeout) -> 
 
 def collect_window(per_uuid: Dict[str, dict], specs: List[MetricSpec], uuids: List[str],
                    duration: int, at, client: PrometheusClient,
-                   timeout: Optional[float]) -> None:
+                   timeout: Optional[float], instant: bool = False) -> None:
     """Fill ``per_uuid`` with every spec's windowed value for these cards.
+
+    ``instant`` asks for the newest scrape instead of a reduction over ``duration``;
+    see :func:`_reduce`. ``duration`` is still required, because the ``delta`` reducer
+    ignores ``instant`` and because the caller's discovery query needs it.
 
     Metrics that share a reducer and a UUID label go in one query
     (:func:`grouped_window_query`); a group that fails or comes back unusable falls
@@ -656,7 +678,8 @@ def collect_window(per_uuid: Dict[str, dict], specs: List[MetricSpec], uuids: Li
 
     for (reducer, uuid_label), members in groups.items():
         if len(members) == 1:
-            _collect_per_spec(per_uuid, members, uuids, duration, at, client, timeout)
+            _collect_per_spec(per_uuid, members, uuids, duration, at, client, timeout,
+                              instant)
             continue
         # One series can back two specs -- DCGM_FI_DEV_POWER_USAGE feeds POWER_W and
         # PWRmax_W -- so a name maps to a *list*. Those two differ by reducer and so
@@ -664,7 +687,8 @@ def collect_window(per_uuid: Dict[str, dict], specs: List[MetricSpec], uuids: Li
         by_metric: Dict[str, List[MetricSpec]] = {}
         for spec in members:
             by_metric.setdefault(spec.metric, []).append(spec)
-        query = grouped_window_query(reducer, uuid_label, list(by_metric), uuids, duration)
+        query = grouped_window_query(reducer, uuid_label, list(by_metric), uuids,
+                                     duration, instant)
         try:
             found = client.query(query, at, timeout)
         except Exception:
@@ -676,7 +700,8 @@ def collect_window(per_uuid: Dict[str, dict], specs: List[MetricSpec], uuids: Li
         if not stored:
             # Nothing attributable came back: either the group query failed or the
             # response carried no NAME_LABEL. Ask per metric rather than report gaps.
-            _collect_per_spec(per_uuid, members, uuids, duration, at, client, timeout)
+            _collect_per_spec(per_uuid, members, uuids, duration, at, client, timeout,
+                              instant)
 
 
 def _jobid_query(record: JobRecord) -> str:
@@ -725,7 +750,8 @@ def discover_gpus(record: JobRecord, client: PrometheusClient,
 def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusClient,
                  timeout: Optional[float],
                  gpus_found: Optional[List[dict]] = None,
-                 nodename: Optional[str] = None, gpu_ids=()) -> Tuple[dict, dict]:
+                 nodename: Optional[str] = None, gpu_ids=(),
+                 average: bool = False) -> Tuple[dict, dict]:
     """``(overall, per_gpu)`` metric dicts for one job over ``specs``.
 
     ``({}, {})`` when the job has no GPUs or no samples. ``overall`` is keyed by
@@ -742,6 +768,14 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
     summary. Applied after discovery but before the metric queries, so a filtered
     card costs one entry in a regex rather than a window of samples fetched and
     discarded -- the same ordering the time-series path uses.
+
+    The **window follows the job, not the caller.** A finished job is folded over its
+    whole runtime, which is what makes the numbers comparable to jobstats. A job still
+    running gets the newest scrape unless ``average``, matching the squeue path and
+    ``--avg``'s documented default. Decided per record, so a selection spanning both
+    states reports each on its own rule -- this used to key on the *selection mode*
+    instead, which made ``jobscope -j <running job>`` silently report a runtime mean
+    while every other view of the same job showed the latest scrape.
     """
     if not (record.gpus and record.jobid_raw and record.duration):
         return {}, {}
@@ -763,7 +797,8 @@ def dcgm_for_job(record: JobRecord, specs: List[MetricSpec], client: PrometheusC
         return {}, {}
 
     per_uuid: Dict[str, dict] = {uuid: {} for uuid in uuids}
-    collect_window(per_uuid, specs, uuids, record.duration, record.end, client, timeout)
+    collect_window(per_uuid, specs, uuids, record.duration, record.end, client, timeout,
+                   instant=record.unfinished and not average)
 
     per_gpu = {}
     for node, minor, uuid in gpus:
@@ -885,7 +920,7 @@ def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],
                  specs: List[MetricSpec], client: PrometheusClient,
                  timeout: Optional[float], workers: int,
                  nodename: Optional[str] = None,
-                 gpu_ids=()) -> Dict[str, Tuple[dict, dict]]:
+                 gpu_ids=(), average: bool = False) -> Dict[str, Tuple[dict, dict]]:
     """Run :func:`dcgm_for_job` over every GPU job, concurrently.
 
     The per-job queries are network I/O-bound, so a thread pool overlaps them and
@@ -915,7 +950,9 @@ def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],
         return {}
 
     workers = max(1, min(workers, len(gpu_jobs)))
-    narrow = {"nodename": nodename, "gpu_ids": gpu_ids}
+    # `average` rides with the narrowing kwargs: it is per call, not per record, and
+    # dcgm_for_job combines it with each record's own state.
+    narrow = {"nodename": nodename, "gpu_ids": gpu_ids, "average": average}
     if workers == 1:
         return {jid: dcgm_for_job(records[jid], specs, client, timeout, **narrow)
                 for jid in gpu_jobs}

@@ -293,13 +293,13 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
     return Resolved(context, _enrich(chunks, cfg, timeout, workers, specs,
                                      no_jobstats=request.no_jobstats,
                                      nodename=nodename, gpu_ids=gpu_ids,
-                                     host_specs=host_specs))
+                                     host_specs=host_specs, average=request.average))
 
 
 def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
             specs: Optional[List[MetricSpec]], no_jobstats: bool = False,
             nodename: Optional[str] = None, gpu_ids=(),
-            host_specs=None) -> Iterator[Chunk]:
+            host_specs=None, average: bool = False) -> Iterator[Chunk]:
     """Attach DCGM metrics and fill running jobs' summaries, chunk by chunk.
 
     The client is built lazily and at most once: a selection with no GPU jobs, or a
@@ -321,9 +321,10 @@ def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
             if client is None:
                 client = client_from_config(cfg, timeout)
             dcgm_data = compute_dcgm(records, chunk_ids, specs, client, timeout, workers,
-                                     nodename=nodename, gpu_ids=gpu_ids)
+                                     nodename=nodename, gpu_ids=gpu_ids,
+                                     average=average)
         client = _fill_running(records, chunk_ids, cfg, timeout, workers, client,
-                               force=no_jobstats)
+                               force=no_jobstats, average=average)
         # Last, and only for what is still missing: Slurm's own accounting, where the
         # site has named it as a host source. After jobstats and Prometheus because it
         # is the coarsest of the three -- job totals rather than per-node series -- so
@@ -383,7 +384,8 @@ def _narrow_records(records, jobids, nodename: Optional[str], gpu_ids) -> None:
                                ", ".join(sorted(seen_gpus))))
 
 
-def _fill_running(records, jobids, cfg, timeout, workers, client, force=False):
+def _fill_running(records, jobids, cfg, timeout, workers, client, force=False,
+                  average=False):
     """Rebuild the utilization summary for the jobs in this chunk that need one.
 
     A running job has no stored summary, so CPU%/MEM%/GPU%/GMEM% would all be empty.
@@ -408,7 +410,7 @@ def _fill_running(records, jobids, cfg, timeout, workers, client, force=False):
                     "'jobscope probe' for how to configure one.")
             note_offline_gap(records, jobids)
             return None
-    fill_running(records, jobids, client, timeout, workers, force)
+    fill_running(records, jobids, client, timeout, workers, force, average)
     return client
 
 

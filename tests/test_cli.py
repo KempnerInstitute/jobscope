@@ -148,6 +148,14 @@ def test_avg_is_accepted_for_running():
     assert _request(mode=RUNNING, avg=True).average is True
 
 
+def test_avg_is_accepted_for_an_explicit_jobid():
+    """An explicit JOBID can name a job that is still running, and this used to reject
+    that with a message asserting the job had finished -- refusing the one flag that
+    would have folded its window. A JOBID selection carries whatever states the ids
+    have, so the fold is decided per record (JobRecord.unfinished), not here."""
+    assert _request(jobids=["36978909"], avg=True).average is True
+
+
 def test_days_must_be_positive():
     with pytest.raises(JobscopeError):
         _request(mode=FINISHED, days=0)
@@ -461,7 +469,8 @@ def test_running_jobstats_summary_is_reconstructed(monkeypatch, capsys, gpu_reco
     monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, timeout: object())
     monkeypatch.setattr(select_mod, "compute_dcgm", lambda *a, **k: {"300": ({}, {})})
 
-    def fake_fill(records, ids, client, timeout=None, workers=1, force=False):
+    def fake_fill(records, ids, client, timeout=None, workers=1, force=False,
+                  average=False):
         records["300"].stats = gpu_record.stats
         return 1
 

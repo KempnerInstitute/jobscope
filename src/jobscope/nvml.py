@@ -28,20 +28,29 @@ FIELDS: Tuple[Tuple[str, str, str], ...] = (
 )
 
 
-def window_query(metric: str, reducer: str, raw_jobid: str, duration: int) -> str:
+def window_query(metric: str, reducer: str, raw_jobid: str, duration: int,
+                 instant: bool = False) -> str:
     """``metric`` reduced over a job's window, restricted to the cards it held.
 
     GPUs have no jobid label -- the job id is a *value* -- so the selector is
     intersected with the join series. That both selects this job's cards and clips
     the window to the samples it owned them for. Both series come from the same
     exporter, so their label sets match, which PromQL's ``and`` requires.
+
+    ``instant`` drops the reduction, for a job that has not finished: the clip still
+    selects the right cards (the join says who owns them *now*), and a mean over a
+    window that is still filling is not what the running view reports. Only the GPU
+    side takes this -- see :func:`jobscope.cpu.host_stats` on why CPU%/MEM% cannot vary.
     """
-    return "%s_over_time((%s and %s == %s)[%ds:])" % (
-        reducer, metric, config.gpu_join(), raw_jobid, duration)
+    selector = "(%s and %s == %s)" % (metric, config.gpu_join(), raw_jobid)
+    if instant:
+        return selector
+    return "%s_over_time(%s[%ds:])" % (reducer, selector, duration)
 
 
 def per_gpu_stats(raw_jobid: str, duration: int, at, client: PrometheusClient,
-                  timeout: Optional[float] = None) -> Dict[str, dict]:
+                  timeout: Optional[float] = None,
+                  instant: bool = False) -> Dict[str, dict]:
     """``{node: {field: {minor: value}}}`` reduced over the job's runtime.
 
     Keyed by minor number because that is what the stored summary uses. MIG instances
@@ -50,7 +59,7 @@ def per_gpu_stats(raw_jobid: str, duration: int, at, client: PrometheusClient,
     """
     nodes: Dict[str, dict] = {}
     for field, metric, reducer in FIELDS:
-        query = window_query(metric, reducer, raw_jobid, duration)
+        query = window_query(metric, reducer, raw_jobid, duration, instant)
         for labels, value in query_value(client, query, at, timeout):
             if value is None:
                 continue

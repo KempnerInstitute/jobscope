@@ -164,6 +164,80 @@ def test_window_query_reducers():
          'min_over_time((DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{UUID=~"^(U1)$"})[100s:]))')
 
 
+def test_instant_drops_the_reducer_for_an_unfinished_job():
+    """The newest scrape, which is the same selector running.collect_instant builds --
+    that identity is what makes a running job read the same via -j as via squeue."""
+    assert window_query(SPEC_BY_HEADER["SM_ACT%"], ["U1", "U2"], 100, instant=True) == \
+        'DCGM_FI_PROF_SM_ACTIVE{UUID=~"^(U1|U2)$"}'
+    assert window_query(SPEC_BY_HEADER["PWRmax_W"], ["U1"], 100, instant=True) == \
+        'DCGM_FI_DEV_POWER_USAGE{UUID=~"^(U1)$"}'
+
+
+def test_instant_does_not_apply_to_a_counter_difference():
+    """ENERGY_kWh is a delta. "The newest scrape" of a counter difference is not a
+    smaller answer, it is none at all -- one sample has no difference to report -- so
+    delta keeps its window even when everything beside it goes instant."""
+    windowed = window_query(SPEC_BY_HEADER["ENERGY_kWh"], ["U1"], 100)
+    assert window_query(SPEC_BY_HEADER["ENERGY_kWh"], ["U1"], 100, instant=True) == windowed
+
+
+def _queries_for(record, **kw):
+    """Every query dcgm_for_job issues for ``record``, so the window can be asserted."""
+    asked = []
+
+    class Recorder(FakeClient):
+        def query(self, query, at, timeout=None):
+            asked.append(query)
+            return super().query(query, at, timeout)
+
+    client = Recorder(gpus=[("UUID-A", "node01", "0")], values={})
+    dcgm_for_job(record, DEFAULT_SPECS, client, None, **kw)
+    # The discovery query keeps its window whatever the state -- it asks which cards the
+    # job held, which is a fact about the run and not a reading.
+    return [q for q in asked if "nvidia_gpu_jobId" not in q]
+
+
+def test_a_finished_job_is_folded_over_its_runtime(gpu_record):
+    """The reason the historical path folds at all: it makes the numbers comparable to
+    the summary jobstats stores. Must not change."""
+    assert all("_over_time" in q for q in _queries_for(gpu_record))
+
+
+def test_an_unfinished_job_takes_the_newest_scrape(gpu_record):
+    """The report: `jobscope -j <running job>` folded over the whole runtime while every
+    other view of the same job showed the newest scrape, so the two disagreed with
+    nothing on screen to say why. The window follows the record now."""
+    running = dataclasses.replace(gpu_record, state="RUNNING", stats={})
+    queries = _queries_for(running)
+    assert queries and not any("_over_time" in q for q in queries)
+
+
+def test_avg_folds_an_unfinished_job_after_all(gpu_record):
+    """--avg is how the old behaviour stays reachable, and it is no longer refused for a
+    job selected by an explicit JOBID."""
+    running = dataclasses.replace(gpu_record, state="RUNNING", stats={})
+    assert all("_over_time" in q for q in _queries_for(running, average=True))
+
+
+@pytest.mark.parametrize("state", ["RUNNING", "PENDING", "SUSPENDED", "REQUEUED",
+                                   "CANCELLED by 64336", "COMPLETED", "TIMEOUT"])
+def test_unfinished_is_decided_by_the_state_not_the_selection(gpu_record, state):
+    """One definition, shared with the sacct filter -- see slurm.UNFINISHED_STATES. The
+    decorated form matters: sacct writes "CANCELLED by 64336", which has ended."""
+    record = dataclasses.replace(gpu_record, state=state)
+    folded = all("_over_time" in q for q in _queries_for(record))
+    assert folded is not record.unfinished
+
+
+def test_grouped_query_stays_demultiplexable_when_instant():
+    """label_replace sits inside the selector, so NAME_LABEL survives without the
+    reduction -- the reduction is what drops __name__, and its absence cannot
+    reintroduce that problem."""
+    q = grouped_window_query("avg", "UUID", ["A", "B"], ["U1"], 100, instant=True)
+    assert "_over_time" not in q
+    assert NAME_LABEL in q
+
+
 def _client():
     return FakeClient(
         gpus=[("UUID-A", "node01", "0"), ("UUID-B", "node01", "1")],

@@ -34,7 +34,8 @@ def stats_dict(duration: int, *node_maps: Dict[str, dict]) -> dict:
 
 
 def synthesize_stats(record: JobRecord, client: PrometheusClient,
-                     timeout: Optional[float] = None) -> dict:
+                     timeout: Optional[float] = None,
+                     average: bool = False) -> dict:
     """Build a stats dict for ``record`` from Prometheus.
 
     Returns ``{}`` when nothing could be read, which leaves the utilization columns
@@ -50,10 +51,14 @@ def synthesize_stats(record: JobRecord, client: PrometheusClient,
     """
     if not (record.jobid_raw and record.duration and record.duration > 0):
         return {}
+    # Host fields are cumulative whatever the window (see cpu.host_stats), so only
+    # the GPU half takes the instant-versus-fold choice -- and it takes it from the
+    # record's own state, so this summary agrees with the squeue view of the same job.
     maps = [host_stats(record.jobid_raw, record.duration, record.end, client, timeout)]
     if record.gpus:
         maps.append(per_gpu_stats(record.jobid_raw, record.duration, record.end,
-                                  client, timeout))
+                                  client, timeout,
+                                  instant=record.unfinished and not average))
     return stats_dict(record.duration, *maps)
 
 
@@ -70,7 +75,7 @@ def needs_fill(record: JobRecord, force: bool = False) -> bool:
 
 def fill_running(records: Dict[str, JobRecord], jobids, client: PrometheusClient,
                  timeout: Optional[float] = None, workers: int = 1,
-                 force: bool = False) -> int:
+                 force: bool = False, average: bool = False) -> int:
     """Synthesize stats for every record in ``jobids`` that needs it.
 
     Mutates the records in place and returns how many were filled. By default a
@@ -86,7 +91,8 @@ def fill_running(records: Dict[str, JobRecord], jobids, client: PrometheusClient
     filled = 0
     if workers > 1 and len(pending) > 1:
         with ThreadPoolExecutor(max_workers=min(workers, len(pending))) as pool:
-            results = pool.map(lambda r: (r, synthesize_stats(r, client, timeout)), pending)
+            results = pool.map(
+                lambda r: (r, synthesize_stats(r, client, timeout, average)), pending)
             for record, stats in results:
                 if stats:
                     record.stats = stats
@@ -94,7 +100,7 @@ def fill_running(records: Dict[str, JobRecord], jobids, client: PrometheusClient
         return filled
 
     for record in pending:
-        stats = synthesize_stats(record, client, timeout)
+        stats = synthesize_stats(record, client, timeout, average)
         if stats:
             record.stats = stats
             filled += 1

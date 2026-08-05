@@ -91,6 +91,12 @@ JOBID_ARG_LIMIT = 16384
 JOBS_PER_CHUNK = 200
 NOTE_EVERY = 4096
 
+# States meaning the job has not ended. `startswith`, because sacct decorates some
+# states with detail ("CANCELLED by 64336"). One definition, because two places ask:
+# _query_ids excludes these from a `finished` selection, and JobRecord.unfinished
+# decides whether a metric may be folded over the job's window.
+UNFINISHED_STATES = ("PENDING", "RUNNING", "SUSPENDED", "REQUEUED")
+
 # When to say the selection is broad enough to be worth narrowing. There is no
 # job-count cap and this does not introduce one -- the run proceeds -- but past a few
 # thousand jobs the cost stops being invisible: records accumulate for the whole run
@@ -143,6 +149,17 @@ class JobRecord:
     jobid_raw: str
     cluster: str
     user: str
+
+    @property
+    def unfinished(self) -> bool:
+        """Whether the job has not ended, so its ``[start, end]`` window is still growing.
+
+        What decides whether a metric can be *folded* over that window: a mean over a
+        window that is still filling is not the same question as a mean over a finished
+        one. Asked of the record rather than of the selection mode, so a job reads the
+        same whichever way it was selected -- see :func:`jobscope.dcgm.dcgm_for_job`.
+        """
+        return self.state.upper().startswith(UNFINISHED_STATES)
 
 
 def default_user() -> Optional[str]:
@@ -330,8 +347,7 @@ def _query_ids(selection: Selection, start: str, end: str,
         parts = line.split("|", 1)
         # Belt and braces behind the -s filter: whatever sacct returns, a job that has
         # not finished has no final numbers and does not belong here.
-        if len(parts) == 2 and not parts[1].upper().startswith(
-                ("PENDING", "RUNNING", "SUSPENDED", "REQUEUED")):
+        if len(parts) == 2 and not parts[1].upper().startswith(UNFINISHED_STATES):
             ids.append(parts[0])
     return ids
 
