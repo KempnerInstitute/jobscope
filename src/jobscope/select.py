@@ -437,6 +437,33 @@ def _note_host_gap(records, jobids, host_specs) -> None:
         note_missing_host_series(records, jobids)
 
 
+def _note_gpu_series_gap(gpus, samples, specs) -> None:
+    """Say when the chosen GPU source has no series for some of the selection's cards.
+
+    Those jobs are absent from the series entirely, and therefore from --stats and
+    --eff's counts -- so without this the same selection reports a different number of
+    jobs under --gpu-source nvml than under dcgm, with nothing to say why. Measured
+    here: dcgm-exporter down on one host of a partition dropped 2 of 3 jobs silently.
+
+    The counterpart of :func:`note_missing_host_series` for the GPU axis, and it names
+    the other source because that is the actionable part: the cards are discovered
+    through the nvml join either way, so a card missing from dcgm is usually present in
+    nvml rather than genuinely idle.
+    """
+    blind = sorted({g.host for uuid, g in gpus.items() if not samples.get(uuid)})
+    if not blind:
+        return
+    jobs_hit = {g.jobid for uuid, g in gpus.items() if not samples.get(uuid)}
+    leading = dcgm.RESOLVED.leading_exporter()
+    other = "dcgm" if leading == "nvml" else "nvml"
+    print("note: %d of %d job(s) have no GPU metrics -- no %s series covers their cards\n"
+          "      on %s. They are absent from the series, and so from --stats and --eff\n"
+          "      counts. Try --gpu-source %s, which reads a different exporter; 'jobscope\n"
+          "      probe' reports which hosts each one covers."
+          % (len(jobs_hit), len({g.jobid for g in gpus.values()}), leading,
+             ", ".join(blind), other), file=sys.stderr)
+
+
 # --- the time-series granularity -------------------------------------------
 
 def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[float],
@@ -489,6 +516,7 @@ def emit_timeseries(request: Request, cfg: config.Config, timeout: Optional[floa
             gpus = kept
         samples = collect_timeseries(client, jobs, gpus, specs, timeout, workers, step,
                                      window=options.window)
+        _note_gpu_series_gap(gpus, samples, specs)
         if options.combined:
             # warn=False: the GPU rows are the report here, so a job with no cgroup
             # data loses two columns rather than its row.

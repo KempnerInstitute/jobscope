@@ -525,3 +525,36 @@ def test_narrowing_names_what_missed():
     with pytest.raises(JobscopeError) as excinfo:
         narrow(gpu_ids=("0", "9"))
     assert "'9'" in str(excinfo.value) and "0, 1" in str(excinfo.value)
+
+
+# --- a source that does not cover every card ---------------------------------------
+
+def _gap_gpus():
+    """Three jobs, one card each, on two hosts -- two of them on the blind host."""
+    from jobscope.running import Gpu
+    return {"u1": Gpu("u1", 1, "goodhost", 0, "GPU 0"),
+            "u2": Gpu("u2", 2, "blindhost", 0, "GPU 0"),
+            "u3": Gpu("u3", 3, "blindhost", 1, "GPU 1")}
+
+
+def test_cards_the_chosen_source_does_not_cover_are_named(capsys):
+    """The report: `-p kempner -a --ts --eff all` counted 3 jobs under --gpu-source nvml
+    and 1 under dcgm, because dcgm-exporter was down on one host of the partition. The
+    jobs vanish from the series and therefore from --eff's counts, so the difference has
+    to be stated -- otherwise the two invocations disagree with nothing to explain it."""
+    samples = {"u1": {100: {"duty": 50.0}}}          # u2/u3 came back empty
+    select_mod._note_gpu_series_gap(_gap_gpus(), samples, DEFAULT_SPECS)
+    err = capsys.readouterr().err
+    assert "2 of 3 job(s) have no GPU metrics" in err
+    assert "blindhost" in err and "goodhost" not in err
+    # The actionable half: the cards are discovered through the nvml join either way, so
+    # one missing from dcgm is usually present in nvml rather than genuinely idle.
+    assert "--gpu-source" in err
+    assert "probe" in err
+
+
+def test_full_coverage_says_nothing(capsys):
+    """A note that fires when nothing is wrong is worse than none."""
+    samples = {u: {100: {"duty": 1.0}} for u in ("u1", "u2", "u3")}
+    select_mod._note_gpu_series_gap(_gap_gpus(), samples, DEFAULT_SPECS)
+    assert capsys.readouterr().err == ""
