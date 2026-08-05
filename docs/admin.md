@@ -528,24 +528,16 @@ Retired flag spellings, each a duplicate of the one beside it:
 | `--stats_per_node`, `--stats_per_job`, `--all_categories` | the `-` spellings |
 | `--extended` | `--all-metrics` |
 | `--plot_avgeff` | nothing — the bars are the default; `--no-plot` omits them |
-| `--classify` | `--eff` — named for the question, not the mechanism |
 
 `--plot_ts` and `--node` keep both spellings: they are what the docs and most
 command lines actually use.
 
-### Renamed config sections
+### Unrecognized config sections
 
-**`[classify]` is `[eff]`.** This one needs acting on rather than just noting: it
-would otherwise leave a site's own floors and ceilings unapplied and its jobs graded
-by the built-in rule instead, and because `probe --init` used to write
-`[classify.floor.power]`, generated configs are affected too. Rename the section; the
-keys under it are unchanged.
-
-jobscope prints a note when it sees a renamed section — and, since the same check
-covers anything else it does not read, when it sees an unrecognized one. A typo'd
-`[promtheus]` used to cost a site every setting under it in silence; it now says so.
-Both stay notes rather than errors, because an unread section is inert and the rest of
-the file still resolves.
+jobscope prints a note when a top-level section is one it does not read. A typo'd
+`[promtheus]` used to cost a site every setting under it in silence; it now says so. A
+note rather than an error, because an unread section is inert and the rest of the file
+still resolves.
 
 Note that bare `jobscope` shows **running** jobs rather than the last day of
 finished ones.

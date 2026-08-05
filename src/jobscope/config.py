@@ -139,12 +139,6 @@ KNOWN_SECTIONS = frozenset({
     "colors", "site", "report", "plot",
 })
 
-# Renamed sections, old -> new. The counterpart of cli.RETIRED_FLAGS and
-# source.RETIRED_SOURCES for the one surface that had no validation to hang a rename
-# off: a section jobscope stopped reading takes its site's settings with it, and
-# `probe --init` wrote [classify.floor.power] into every config it generated.
-LEGACY_SECTIONS = {"classify": "eff"}
-
 # The colour each tier is painted, and the one role that is not a tier: an entry on
 # a Wasteful row whose job ran longer than [defaults] long_running. Two tiers
 # sharing a colour is the default, not a requirement -- a site wanting five distinct
@@ -560,29 +554,22 @@ def _eff(table: Mapping, power_w: float,
 
 
 def _check_sections(data: Mapping) -> None:
-    """Report a top-level name jobscope does not read, renamed ones by their new name.
+    """Report a top-level name jobscope does not read.
 
     A note rather than an error, unlike every inner table's unknown-key check. The
     asymmetry is deliberate: a section jobscope does not read is inert, and the rest of
     the file still resolves, so raising would take a site's whole CLI down over one dead
-    paragraph. But silence is worse than either -- ``[promtheus]`` or a stale
-    ``[classify]`` costs a site every setting under it with nothing on screen to say so,
-    which is the same failure the ``[thresholds]`` note exists to prevent one level down.
+    paragraph. But silence is worse than either -- a typo'd ``[promtheus]`` costs a site
+    every setting under it with nothing on screen to say so, which is the same failure
+    the ``[thresholds]`` note exists to prevent one level down.
 
     "section or key" because a scalar written above the first header lands here too, and
     telling someone to check a section they cannot find is a worse hint than none.
     """
-    unknown = sorted(set(data) - KNOWN_SECTIONS)
-    for name in unknown:
-        replacement = LEGACY_SECTIONS.get(name)
-        if replacement:
-            print("note: [%s] is now [%s]; nothing under it is being applied. Rename "
-                  "the section (see jobscope config --example)." % (name, replacement),
-                  file=sys.stderr)
-        else:
-            print("note: [%s] is not a section or key jobscope reads, so it is being "
-                  "ignored. 'jobscope config --example' lists the sections."
-                  % name, file=sys.stderr)
+    for name in sorted(set(data) - KNOWN_SECTIONS):
+        print("note: [%s] is not a section or key jobscope reads, so it is being "
+              "ignored. 'jobscope config --example' lists the sections."
+              % name, file=sys.stderr)
 
 
 def _check_eff_names(where: str, headers: Optional[Tuple[str, ...]]) -> None:

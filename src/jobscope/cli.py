@@ -91,16 +91,12 @@ RETIRED_FLAGS = {
     "--stats-per-node": "--stats node",
     "--stats-per-job": "--stats job",
     "--all-categories": "--eff all",
-    # Named for the mechanism rather than the question. config.LEGACY_SECTIONS carries
-    # the same rename on the config side, where it matters more -- a stale section is
-    # ignored, where a stale flag here errors.
-    "--classify": "--eff",
 }
 
 # Not a real destination. Every retired spelling shares one, so a dead flag can never
-# occupy the dest of a live one: `--classify` would otherwise land on `classify`, the
-# exact name --eff replaced, and leave args.classify readable as None -- turning a
-# missed call site from an AttributeError into a silent no-op.
+# occupy the dest of a live one -- a rename whose old spelling kept the old dest would
+# leave args.<old> readable as None, turning a missed call site from an AttributeError
+# into a silent no-op.
 _RETIRED_DEST = "_retired"
 
 
@@ -248,9 +244,9 @@ def build_parser():
                             "and come from [thresholds.timeslice] in your config; each "
                             "heading states the ones it used. '--eff all' lists the "
                             "'good' jobs too, instead of counting them")
-    # Folded into the two flags above, or renamed. Defined rather than deleted so the
-    # message names the replacement; see RETIRED_FLAGS.
-    for old in ("--stats-per-node", "--stats-per-job", "--all-categories", "--classify"):
+    # Folded into the two flags above. Defined rather than deleted so the message names
+    # the replacement; see RETIRED_FLAGS.
+    for old in ("--stats-per-node", "--stats-per-job", "--all-categories"):
         shape.add_argument(old, dest=_RETIRED_DEST,
                            action=_Retired, nargs=0, help=argparse.SUPPRESS)
     shape.add_argument("--nodename", "--node", dest="nodename", default=None,

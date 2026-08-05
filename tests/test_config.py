@@ -334,26 +334,10 @@ def test_power_w_is_not_flagged_as_stale(tmp_path, capsys):
     assert "no longer apply" not in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("old,new", sorted(config_module.LEGACY_SECTIONS.items()))
-def test_a_renamed_section_is_named_not_silently_ignored(old, new, tmp_path, capsys):
-    """Parametrized over the table, so a future rename inherits this coverage instead
-    of needing its own test -- the property that makes RETIRED_FLAGS pay for itself.
-
-    The note has to be TRUE, which is what the floor_of assertion is for: the old
-    section really is inert, rather than the note being a reassuring no-op.
-    """
-    path = tmp_path / "c.toml"
-    path.write_text("[%s.floor.power]\ndefault = 250\n" % old)
-    cfg = load_config(str(path))
-    err = capsys.readouterr().err
-    assert "[%s] is now [%s]" % (old, new) in err
-    assert cfg.thresholds.floor_of("POWER_W") == 100        # the built-in, not 250
-
-
 def test_the_new_section_name_applies_and_says_nothing(tmp_path, capsys):
-    """The other half of the pair above. That [eff] resolves at all is pinned by the
-    [eff.floor]/[eff.ceiling] tests further down; what is only checked here is that
-    the supported spelling draws no note."""
+    """A section jobscope does read draws no note. That [eff] resolves at all is pinned
+    by the [eff.floor]/[eff.ceiling] tests further down; what is checked here is only
+    that a recognized section stays silent."""
     path = tmp_path / "c.toml"
     path.write_text("[eff.floor.power]\ndefault = 250\n")
     assert load_config(str(path)).thresholds.floor_of("POWER_W") == 250
