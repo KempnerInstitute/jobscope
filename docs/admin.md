@@ -209,14 +209,23 @@ two absences with two different explanations — an idle MIG node has exactly th
 judging the node as a whole put it in the fault list for both. A fully MIG partition
 therefore reads:
 
+Each reason says which columns it costs and why that follows, and names **every** node
+rather than eliding a tail — the list is what you act on, and an elided one cannot be
+pasted into `scontrol` or a ticket:
+
 ```console
 $ jobscope probe --coverage kempner_interactive
 ...
 missing     nothing unexplained
-            expected -- MIG: no whole-device GPU%: 8 node(s)
-              holygpu8a19505, holygpu8a19506, ...
-            expected -- no job running (idle): 6 node(s)
-              holygpu8a19506, holygpu8a19601, ...
+
+expected    8 node(s) have no GPU%: MIG partitions the card, so there is no whole device
+            for either exporter to report a duty cycle on.
+              holygpu8a19505, holygpu8a19506, holygpu8a19601, holygpu8a19602,
+              holygpu8a19603, holygpu8a19604, holygpu8a19605, holygpu8a19606
+            6 node(s) have no CPU%/MEM%: no job is running, and cgroup series exist per
+            running job rather than per node.
+              holygpu8a19506, holygpu8a19601, holygpu8a19602, holygpu8a19603,
+              holygpu8a19604, holygpu8a19605
 ```
 
 `GPU%` reading `-` for every job on those nodes is a hardware-configuration

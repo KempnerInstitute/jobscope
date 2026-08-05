@@ -28,6 +28,7 @@ import fnmatch
 import os
 import re
 import sys
+import textwrap
 import time
 from collections import Counter
 from typing import Dict, List, Optional, Tuple
@@ -693,6 +694,14 @@ def _coverage_series():
     return by_family
 
 
+def _column_order(columns) -> List[str]:
+    """``columns`` in the order the table prints them, not alphabetically."""
+    from . import cpu, dcgm
+    order = [s.column for s in cpu.RESOLVED.specs] + [s.column for s in dcgm.ALL_SPECS]
+    rank = {c: i for i, c in enumerate(order)}
+    return sorted(columns, key=lambda c: rank.get(c, len(rank)))
+
+
 def report_column_coverage(out, client, timeout: Optional[float],
                            partition: str = "") -> int:
     """Per-series host coverage for every source, and by name whatever is missing.
@@ -784,20 +793,30 @@ def report_column_coverage(out, client, timeout: Optional[float],
     # for both. So each (node, column) is asked separately whether it is expected, and a
     # node is a fault only if something unexplained is left.
     faults: Dict[str, List[str]] = {}
-    why_expected: Dict[str, List[str]] = {}
+    # {reason key: (explanation, {columns}, {nodes})}. Keyed so two nodes absent for the
+    # same reason share one entry, and the explanation travels with it -- "no job running
+    # (idle)" alone did not say *which* columns were affected or why that follows.
+    expected: Dict[str, Tuple[str, set, set]] = {}
+
+    def note_expected(key: str, explanation: str, column: str, node: str) -> None:
+        _text, cols, hosts = expected.setdefault(key, (explanation, set(), set()))
+        cols.add(column)
+        hosts.add(node)
+
     for node in sorted(absent_by_node):
         state = states.get(node, "?")
         for column in absent_by_node[node]:
             family = families[column]
             if family == "cgroup" and not _runs_jobs(state):
-                # cgroup series are per running *job*, not per node.
-                why_expected.setdefault("no job running (%s)" % _strip_state(state),
-                                        []).append(node)
+                note_expected(
+                    "nojob",
+                    "no job is running, and cgroup series exist per running job rather "
+                    "than per node", column, node)
             elif node in mig and column in _MIG_BLIND_COLUMNS:
-                # Not a misconfiguration and not fixable: a partitioned card has no
-                # whole-device duty cycle for either exporter to publish.
-                why_expected.setdefault("MIG: no whole-device %s" % column,
-                                        []).append(node)
+                note_expected(
+                    "mig",
+                    "MIG partitions the card, so there is no whole device for either "
+                    "exporter to report a duty cycle on", column, node)
             else:
                 faults.setdefault(node, []).append(column)
 
@@ -812,12 +831,20 @@ def report_column_coverage(out, client, timeout: Optional[float],
                           ", ".join(cols)))
     else:
         _line(out, "missing", "nothing unexplained")
-    for reason in sorted(why_expected):
-        hosts = sorted(set(why_expected[reason]))
-        shown = ", ".join(hosts[:6])
-        _cont(out, "expected -- %s: %d node(s)" % (reason, len(hosts)))
-        _cont(out, "  %s%s" % (shown, ", ... and %d more" % (len(hosts) - 6)
-                               if len(hosts) > 6 else ""))
+
+    for i, key in enumerate(sorted(expected)):
+        explanation, cols, hosts = expected[key]
+        if i == 0:
+            print("", file=out)      # the two verdicts are different claims
+        label = "expected" if i == 0 else ""
+        header = ("%d node(s) have no %s: %s."
+                  % (len(hosts), "/".join(_column_order(cols)), explanation))
+        for j, line in enumerate(textwrap.wrap(header, 92)):
+            (_line(out, label, line) if j == 0 and label else _cont(out, line))
+        # Every node named, wrapped rather than truncated: the list is what you act on,
+        # and an elided one cannot be pasted into scontrol or a ticket.
+        for line in textwrap.wrap(", ".join(sorted(hosts)), 88):
+            _cont(out, "  " + line)
     return 0
 
 
