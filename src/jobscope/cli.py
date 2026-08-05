@@ -351,6 +351,10 @@ def build_parser():
     p_probe.add_argument("--validate", nargs="?", const="", metavar="JOBID",
                           help="compare one job's utilization across Prometheus, the "
                                "jobstats summary and Slurm's own accounting")
+    p_probe.add_argument("--coverage", nargs="?", const="", metavar="PARTITION",
+                          help="which hosts publish the series behind each column, and "
+                               "what is missing. With a PARTITION, compared against that "
+                               "partition's own nodes and the absent ones are named")
     p_probe.set_defaults(func=handle_probe)
 
     return parser, subparsers
@@ -984,6 +988,7 @@ def handle_probe(args) -> None:
                         validate=args.validate is not None,
                         toml=args.toml is not None,
                         init=args.init, full=args.full,
+                        coverage=args.coverage,
                         jobid=args.metrics or args.validate or args.toml or None)
     if status:
         raise SystemExit(status)

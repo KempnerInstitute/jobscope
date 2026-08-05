@@ -515,3 +515,88 @@ def test_init_writes_when_nothing_is_there(hermetic_config, tmp_path, monkeypatc
     assert "wrote" in notes.getvalue()
     # And what it wrote is loadable.
     assert config_module.load_config(str(path)).site.host_label == "host"
+
+
+# --- probe --coverage: per column, and what is missing -----------------------------
+
+@pytest.mark.parametrize("state,up", [
+    ("idle", True), ("mixed", True), ("allocated", True), ("completing", True),
+    ("down", False), ("down*", False), ("drained", False), ("drng", False),
+    ("maint", False), ("fail", False), ("unknown", False),
+])
+def test_only_nodes_that_could_report_are_counted(state, up):
+    """Without this the report cries wolf: a partition with six `down` nodes names them
+    against every column, burying the one node that is up and still missing a series --
+    the only line worth acting on."""
+    assert probe._is_up(state) is up
+
+
+def test_a_stored_column_names_both_the_summary_and_its_fallback():
+    """"jobstats" beside a DCGM series reads like a contradiction. The JS1: blob is per
+    job in sacct, so it has no host coverage; the count describes what a job with no
+    summary -- every running one -- falls back to."""
+    rows = {c: src for c, src, _series, _fam in probe._coverage_columns()}
+    assert rows["CPU%"] == "cgroup"
+    assert rows["GPU%"].startswith("jobstats/")     # stored, with an exporter behind it
+    assert rows["SM_ACT%"] == "dcgm"                # no summary candidate at all
+
+
+def _coverage_report(monkeypatch, sinfo_lines, hosts_by_series):
+    """Run report_column_coverage against a canned sinfo and a canned server."""
+    monkeypatch.setattr(probe, "run_capture",
+                        lambda *a, **k: "\n".join(sinfo_lines) + "\n")
+
+    class Client:
+        def query(self, query, at, timeout=None):
+            for series, hosts in hosts_by_series.items():
+                if series in query:
+                    return [{"metric": {"host": h}} for h in hosts]
+            return []
+
+    out = io.StringIO()
+    probe.report_column_coverage(out, Client(), None, "somepart")
+    return out.getvalue()
+
+
+def test_a_node_up_and_missing_a_series_is_named_with_its_state(monkeypatch):
+    """The report that prompted this: dcgm-exporter down on one host of a partition
+    dropped 2 of 3 jobs from a --ts --eff run, and nothing said which host."""
+    text = _coverage_report(
+        monkeypatch,
+        ["good mixed gpu:a100:4", "bad mixed gpu:a100:4", "dead down* gpu:a100:4"],
+        {"DCGM_FI": ["good"], "nvidia_gpu": ["good", "bad"],
+         "cgroup_": ["good", "bad"]})
+    assert "bad" in text and "(mixed)" in text
+    assert "no dcgm" in text
+    # The down node is excluded, not listed against every column.
+    assert "dead" not in text
+    assert "1 down/drained, not counted" in text
+
+
+def test_gpu_columns_are_not_reported_missing_on_cpu_only_nodes(monkeypatch):
+    """A node with no GPU publishes no GPU series, correctly. Counting it as missing
+    turns a CPU partition into a page of noise saying "these are CPU nodes"."""
+    text = _coverage_report(
+        monkeypatch, ["c1 mixed (null)", "c2 idle (null)"],
+        {"cgroup_": ["c1", "c2"]})
+    assert "no GPU nodes" in text
+    assert "every column covers every node that is up" in text
+
+
+def test_an_idle_node_missing_only_cgroup_is_explained_not_flagged(monkeypatch):
+    """cgroup series are per running *job*, so an idle node has nothing to publish and
+    its absence is the right answer. Scoped to `idle`: on `mixed` a job IS running, so a
+    missing cgroup series there is a real gap and must not be explained away."""
+    idle = _coverage_report(monkeypatch, ["n1 idle gpu:a100:4"],
+                            {"DCGM_FI": ["n1"], "nvidia_gpu": ["n1"]})
+    assert "expected while idle" in idle
+    busy = _coverage_report(monkeypatch, ["n1 mixed gpu:a100:4"],
+                            {"DCGM_FI": ["n1"], "nvidia_gpu": ["n1"]})
+    assert "expected while" not in busy      # a real gap, stated plainly
+
+
+def test_an_unknown_partition_says_how_to_list_them(monkeypatch):
+    monkeypatch.setattr(probe, "run_capture", lambda *a, **k: "")
+    with pytest.raises(probe.JobscopeError) as exc:
+        probe.report_column_coverage(io.StringIO(), object(), None, "nope")
+    assert "sinfo -o %R" in str(exc.value)

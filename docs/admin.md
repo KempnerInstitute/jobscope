@@ -10,6 +10,7 @@ Users need none of this. The [README](../README.md) is the day-to-day guide, and
 - [What the cluster must provide](#what-the-cluster-must-provide)
 - [Setting up a site](#setting-up-a-site-two-commands)
 - [What `probe` reports](#what-probe-reports)
+- [`--coverage`: which hosts serve each column](#--coverage--which-hosts-serve-each-column)
 - [Pointing jobscope at Prometheus](#pointing-jobscope-at-prometheus)
 - [Looking at a whole partition](#looking-at-a-whole-partition)
 - [Configuration](#configuration) -- the per-section reasoning
@@ -92,6 +93,7 @@ forever.
 ```bash
 jobscope probe --toml               # the same, as an editable [metrics] block
 jobscope probe --validate           # do the exporters agree with the scheduler?
+jobscope probe --coverage [PART]    # which hosts publish each column, and what is missing
 ```
 
 `--toml` turns that listing into config. It prints one
@@ -133,6 +135,40 @@ teardown and idle gaps included. For an efficiency tool the wider denominator is
 the point: allocated-but-idle time is exactly the waste jobscope is looking for.
 A *large* gap on a single job usually means a long warm-up; a large gap across
 many jobs is worth chasing.
+
+### `--coverage` — which hosts serve each column
+
+The `coverage` line in the main report gives one number per exporter, and that hides
+gaps *within* a family: it picks one representative series, so a family whose members
+have different coverage reads as uniformly fine. Measured on one cluster,
+`DCGM_FI_PROF_SM_ACTIVE` is on 437 hosts and `DCGM_FI_DEV_GPU_UTIL` on 416 — the
+22-host difference is MIG nodes, which have no whole-device duty cycle to report. One
+number per exporter said nothing about the hole in GPU%.
+
+`--coverage` counts **per column**, naming the series behind each. `jobstats/dcgm`
+means the stored summary serves it for a finished job, so the count is what a *running*
+job falls back to.
+
+Name a partition and the comparison is against that partition's own nodes, with the
+absent ones listed:
+
+```console
+$ jobscope probe --coverage kempner
+coverage    partition kempner: 22 of 28 node(s) up (6 down/drained, not counted)
+            column         source         series                           hosts
+            CPU%           cgroup         cgroup_cpu_total_seconds         22/22
+            GPU%           jobstats/dcgm  DCGM_FI_DEV_GPU_UTIL             21/22
+            SM_ACT%        dcgm           DCGM_FI_PROF_SM_ACTIVE           21/22
+            ...
+missing     1 node(s) up but not publishing every series:
+            holygpu8a19102   (mixed) no dcgm: GPU%, SM_ACT%, TENSOR%, DRAM%, POWER_W
+```
+
+Three things it deliberately does not report, because each would be noise rather than
+a fault: `down`/`drained` nodes (nothing runs there to measure), GPU columns on nodes
+with no GPU gres, and an **idle** node's missing `CPU%`/`MEM%` — cgroup series exist per
+running *job*, so absence is the right answer there. On a `mixed` or `allocated` node a
+missing cgroup series **is** flagged, because jobs are running on it.
 
 ### Pointing jobscope at Prometheus
 

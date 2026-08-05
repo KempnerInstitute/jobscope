@@ -522,6 +522,174 @@ def _report_coverage(out, client, timeout: Optional[float]) -> None:
                           if family == "cgroup" else ""))
 
 
+
+
+def _partition_nodes(partition: str, timeout: Optional[float]):
+    """``{node: (slurm state, has_gpu)}`` for ``partition``.
+
+    ``%n`` rather than ``%N``, so Slurm expands its own bracketed hostlist -- the
+    comparison downstream is against one label value at a time, and
+    ``holygpu8a[19102,19302]`` matches nothing.
+
+    The gres column is read because a node with no GPU correctly publishes no GPU
+    series. Without it a CPU-only partition reports every GPU column missing on every
+    node, which is a page of noise saying only "these are CPU nodes".
+    """
+    out = run_capture(["sinfo", "-h", "-p", partition, "-o", "%n %T %G"],
+                      timeout, "sinfo", soft=True)
+    nodes = {}
+    for line in (out or "").splitlines():
+        parts = line.split(None, 2)
+        if len(parts) >= 2:
+            gres = parts[2] if len(parts) > 2 else ""
+            nodes[parts[0]] = (parts[1], "gpu:" in gres)
+    if not nodes:
+        raise JobscopeError(
+            "no nodes in partition %r. 'sinfo -o %%R' lists the partitions." % partition)
+    return nodes
+
+
+# States where absent metrics are the expected answer, not a gap: nothing is running to
+# measure. The trailing `*` Slurm adds for an unresponsive node is stripped first.
+_DOWN_STATES = ("down", "drain", "drng", "fail", "maint", "unk", "resv", "boot", "pow")
+
+
+def _is_up(state: str) -> bool:
+    return not state.rstrip("*$~#").lower().startswith(_DOWN_STATES)
+
+
+def _series_hosts(client, series: str, timeout: Optional[float]):
+    """The set of hosts publishing ``series``, or None when the query failed.
+
+    None is not an empty set: "asked and could not tell" must not be reported as
+    "nothing covers this", the same distinction Measure draws for a reading.
+    """
+    label = config.get_config().site.host_label
+    try:
+        rows = client.query("count by (%s) (%s)" % (label, series),
+                            int(time.time()), timeout)
+    except Exception:
+        return None
+    return {str(r["metric"].get(label, "?")).split(":")[0] for r in rows}
+
+
+def _coverage_columns():
+    """``[(column, source, series, family)]`` for the columns a default report prints.
+
+    Read off the *resolved* catalog, so this describes the report the reader will get:
+    under ``--gpu-source dcgm`` the GPU% row names the DCGM series. Coverage is a
+    property of the series, and which series serves a column is a property of the
+    preference -- which is exactly what one number per exporter cannot express.
+    """
+    from . import cpu, dcgm
+    rows, seen = [], set()
+    for spec in cpu.RESOLVED.specs:
+        if spec.column in ("CPU%", "MEM%") and spec.column not in seen:
+            seen.add(spec.column)
+            rows.append((spec.column, spec.family, spec.metric, spec.family))
+    for spec in dcgm.DEFAULT_SPECS:
+        if spec.column in seen:
+            continue
+        seen.add(spec.column)
+        # A column the stored summary wins has no host coverage of its own -- the JS1:
+        # blob is per job in sacct, not per host in Prometheus. The count describes the
+        # *fallback*: the series a job with no summary (every running one) is measured
+        # from. Naming both is the only honest label, since "jobstats" beside a DCGM
+        # series reads like a contradiction.
+        stored = spec.column in dcgm.RESOLVED.from_jobstats
+        source = "jobstats/%s" % spec.family if stored else spec.family
+        rows.append((spec.column, source, spec.metric, spec.family))
+    return rows
+
+
+def report_column_coverage(out, client, timeout: Optional[float],
+                           partition: str = "") -> int:
+    """Per-column host coverage, and by name whatever is missing.
+
+    The per-*exporter* line in the main report cannot answer this. It picks one
+    representative series per family, so a family whose members have different coverage
+    reads as uniformly fine: measured here, dcgm-exporter publishes
+    ``DCGM_FI_PROF_SM_ACTIVE`` on 437 hosts and ``DCGM_FI_DEV_GPU_UTIL`` on 416, because
+    MIG nodes have no whole-device duty cycle. One number per family hid a 22-host hole
+    in one column.
+
+    Node state is read alongside, because without it this cries wolf. A ``down`` node
+    reports nothing by definition, and a partition with six of those would name them
+    against every column -- burying the one node that is *up* and still missing a series,
+    which is the only line worth acting on.
+    """
+    columns = _coverage_columns()
+    nodes = _partition_nodes(partition, timeout) if partition else {}
+    states = {n: st for n, (st, _g) in nodes.items()}
+    up = {n for n, (st, _g) in nodes.items() if _is_up(st)}
+    gpu_up = {n for n in up if nodes[n][1]}
+    skipped = len(nodes) - len(up)
+
+    if partition:
+        _line(out, "coverage", "partition %s: %d of %d node(s) up%s"
+                               % (partition, len(up), len(nodes),
+                                  " (%d down/drained, not counted)" % skipped
+                                  if skipped else ""))
+    else:
+        _line(out, "coverage", "cluster-wide, per column (name a partition to see which "
+                               "nodes are missing)")
+    _cont(out, "%-14s %-14s %-32s %s" % ("column", "source", "series", "hosts"))
+
+    absent_by_node: Dict[str, List[str]] = {}
+    families: Dict[str, str] = {}
+    for column, source, series, family in columns:
+        hosts = _series_hosts(client, series, timeout)
+        if hosts is None:
+            _cont(out, "%-14s %-14s %-32s query failed"
+                       % (column, source, series[:31]))
+            continue
+        if partition:
+            # Scoped to the nodes that *could* publish it: a GPU column over the GPU
+            # nodes, so "21/22" is not diluted by CPU-only members of a mixed partition.
+            scope = up if family == "cgroup" else gpu_up
+            # "0/0" is true but reads as a failure; a partition with no GPUs simply has
+            # no node this column could describe.
+            count = ("%d/%d" % (len(hosts & scope), len(scope)) if scope
+                     else "-  (no GPU nodes)")
+            for node in sorted(scope - hosts):
+                absent_by_node.setdefault(node, []).append(column)
+                families[column] = family
+        else:
+            count = str(len(hosts))
+        _cont(out, "%-14s %-14s %-32s %s" % (column, source, series[:31], count))
+
+    if any("/" in source for _c, source, _s, _f in columns):
+        _cont(out, "jobstats/X: stored per job in sacct for a finished job, so the count"
+                   " is what a running job falls back to.")
+    if not partition:
+        _cont(out, "  jobscope probe --coverage PARTITION")
+        return 0
+
+    # Node-first, because that is how it gets acted on: one line per node saying which
+    # columns it cannot serve, rather than the same node listed under nine columns.
+    if not absent_by_node:
+        _cont(out, "every column covers every node that is up in %s" % partition)
+        return 0
+    print("", file=out)
+    _line(out, "missing", "%d node(s) up but not publishing every series:"
+                          % len(absent_by_node))
+    for node in sorted(absent_by_node):
+        cols = absent_by_node[node]
+        fams = sorted({families[c] for c in cols})
+        why = ""
+        state = states.get(node, "?")
+        if fams == ["cgroup"] and state.rstrip("*$~#").lower().startswith("idle"):
+            # cgroup series are per running *job*, not per node, so an idle node has
+            # nothing to publish and its absence is the correct answer. Scoped to `idle`
+            # deliberately: `mixed` and `allocated` mean jobs ARE running there, so a
+            # missing cgroup series on one of those is a real gap, not an explanation.
+            why = "  -- expected while idle: cgroup series exist only where a job runs"
+        _cont(out, "%-16s %-7s no %s: %s%s"
+                   % (node, "(%s)" % states.get(node, "?"), "/".join(fams),
+                      ", ".join(cols), why))
+    return 0
+
+
 def _report_sources(out) -> None:
     """Which source serves which GPU column, and the one that is not optional.
 
@@ -819,7 +987,8 @@ column stays blank.""" % (NEW, ABSENT), file=out)
 
 def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
         metrics: bool = False, validate: bool = False, toml: bool = False,
-        jobid: Optional[str] = None, init: bool = False, full: bool = False) -> int:
+        jobid: Optional[str] = None, init: bool = False, full: bool = False,
+        coverage: Optional[str] = None) -> int:
     """Print the report. Returns a process exit status."""
     # With --toml, stdout has to be a config file and nothing else: the documented
     # move is `jobscope probe --toml >> config.toml`, and a diagnosis section
@@ -851,10 +1020,14 @@ def run(out, cfg, config_path: Optional[str], timeout: Optional[float],
         return extra_metric.validate(out, target, client, timeout)
     if metrics:
         return discover_metrics(out, client, jobid, timeout, sample)
+    if coverage is not None:
+        print("", file=out)
+        return report_column_coverage(out, client, timeout, coverage)
     print("\nNext:\n"
           "  jobscope probe --init       write a config for this site from the above\n"
           "  jobscope probe --metrics    what this server carries, and its config names\n"
           "  jobscope probe --toml       the same as an editable [metrics] block\n"
+          "  jobscope probe --coverage   per-column host coverage, and what is missing\n"
           "  jobscope probe --validate   compare Prometheus against Slurm's accounting",
           file=out)
     return 0
