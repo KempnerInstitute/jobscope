@@ -7,11 +7,12 @@ import json
 import pytest
 
 from jobscope import config as config_module
-from jobscope.blob import GIB
-from jobscope.sacct import JobRecord
+from jobscope import report, running, slurm
+from jobscope.jobstats import GIB
+from jobscope.slurm import JobRecord
 
 
-def make_blob(stats: dict) -> str:
+def make_jobstats(stats: dict) -> str:
     """Encode a stats dict as the JS1:<base64 gzip JSON> AdminComment form."""
     return "JS1:" + base64.b64encode(gzip.compress(json.dumps(stats).encode())).decode()
 
@@ -52,17 +53,45 @@ DEFAULT_CONFIG = config_module.Config(
     sampling_period=60,
     sampling_period_explicit=False,
     site_jobstats_config_path=None,
-    thresholds=config_module.Thresholds(gpu=25, gmem=20, cpu=25, mem=25, default=15),
-    defaults=config_module.Defaults(workers=8, timeout=60.0, min_runtime=180),
+    thresholds=config_module.Thresholds(),
+    defaults=config_module.Defaults(workers=8, timeout=60.0),
 )
+
+
+def _clear_hostlist_caches() -> None:
+    """Forget memoised node-list expansions between tests.
+
+    Both caches are keyed by the compressed list, which is a stable key in production but
+    not under test: a case that monkeypatches ``expand_nodelist`` would otherwise be served
+    whatever an earlier test cached for the same string, making the pair order-dependent.
+    """
+    slurm._HOSTLIST.clear()
+    running._JOB_NODES.clear()
 
 
 @pytest.fixture(autouse=True)
 def hermetic_config():
-    """Pin the process-wide config to known defaults so tests never read ~/.config."""
+    """Pin the process-wide config to known defaults so tests never read ~/.config.
+
+    Three pieces of module state get reset with it, all installed by a config load:
+
+    * The palette -- ``report._SGR`` is set by ``cli._apply_config``, so a test that
+      runs a command with a configured ``[colors]`` would otherwise leave every
+      later test painting in its colours.
+    * The metric catalogs -- ``[metrics.<family>.<name>]`` appends to ``dcgm.METRICS``
+      and ``cpu.CGROUP_METRICS`` at load time, so a test defining a site metric would
+      otherwise leak it into every test after it, and into the catalog-shape
+      assertions in particular.
+    """
     config_module.set_config(DEFAULT_CONFIG)
+    report.set_palette(DEFAULT_CONFIG.palette)
+    config_module.register_metrics({})
+    _clear_hostlist_caches()
     yield
     config_module.reset_config()
+    report.set_palette(config_module.Palette())
+    config_module.register_metrics({})
+    _clear_hostlist_caches()
 
 
 @pytest.fixture

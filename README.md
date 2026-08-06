@@ -1,179 +1,229 @@
 # jobscope
 
-`jobscope` reports the efficiency of completed Slurm jobs. It decodes the
-utilization data Slurm already stores in each job's `sacct` AdminComment
-(CPU / memory / GPU / GPU-memory), enriches GPU jobs with DCGM profiling metrics
-pulled from Prometheus, and can render any view as a terminal chart.
+`jobscope` reports how efficiently Slurm jobs used the resources they requested. It
+reads the CPU, memory, GPU, and GPU memory utilization already stored in each job's
+`sacct` record, adds DCGM/Prometheus profiling metrics for GPU jobs, and can chart
+the results in the terminal.
 
-For completed jobs the CPU/MEM/GPU/GMEM numbers match `jobstats`, because
-jobscope decodes the same stored blob, but in one bulk `sacct` query, with no
-per-job calls and no job-count cap.
+For completed jobs, the CPU/MEM/GPU/GMEM values match `jobstats`: jobscope decodes
+the same stored data, but does it with one bulk `sacct` query instead of per-job
+calls.
+
+## What You Get
+
+- CPU, memory, GPU, GPU memory, SM activity, tensor activity, DRAM activity, and
+  power columns.
+- Summary bands that count wasteful, borderline, and healthy jobs by metric.
+- Problem-job lists that name the worst offenders in a selection.
+- Per-GPU time-series CSV and terminal plots for deeper GPU debugging.
 
 ## Screenshots
 
-<table width="800">
-  <tr><td><strong>Per-job DCGM time series</strong></td></tr>
-  <tr><td><img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/timeseries.svg" alt="per-job DCGM time series" width="800"></td></tr>
-  <tr><td><strong>Aggregated utilization across jobs</strong></td></tr>
-  <tr><td><img src="https://raw.githubusercontent.com/KempnerInstitute/jobscope/main/docs/aggregated.svg" alt="aggregated mean-utilization bars" width="800"></td></tr>
-</table>
+<p>
+  <strong>Per-job DCGM time series</strong><br>
+  <img src="docs/timeseries.svg" alt="per-job DCGM time series" width="800">
+</p>
 
-```text
-$ jobscope -S 2026-06-01 -E 2026-06-02
-  User:      bdesinghu
-  Select:    2026-06-01 .. 2026-06-02
-JOBID        STATE     GPUS GPU%   GMEM%   SM_ACT%  OCC%    TENSOR%  DRAM%   POWER_W  RUNTIME      NAME
--------------------------------------------------------------------------------------------------------
-17752673     COMPLETED 1    92     6       77.1     24.9    1.5      15.0    452      02:58:26     combo-pile
-18074321     COMPLETED 1    98     8       49.3     5.8     1.0      6.6     181      01:37:53     vae-wt103
-18074326     COMPLETED 1    93     6       76.7     24.8    1.5      14.8    455      09:28:41     combo-wt103
--------------------------------------------------------------------------------------------------------
-Mean:                       94     7       67.7     18.5    1.3      12.1    363
-```
-
-## Requirements
-
-- Python 3.9+
-- Slurm with `sacct`, where the jobstats-style AdminComment blob is populated
-  (needed by every view).
-- For the GPU and DCGM views only: a Prometheus endpoint serving the DCGM
-  (`DCGM_FI_*`) and `nvidia_gpu_*` series that jobstats scrapes. The offline
-  `--cpu` / `--cgpu` views never contact it.
+<p>
+  <strong>Aggregated utilization across jobs</strong><br>
+  <img src="docs/aggregated.svg" alt="aggregated mean-utilization bars" width="800">
+</p>
 
 ## Install
 
-jobscope is a command-line tool, so install it with
-[`uv`](https://docs.astral.sh/uv/). `uv` provisions its own Python and puts the
-`jobscope` executable on your `PATH`; there is no virtualenv to create or
-activate, and it never touches the system Python (which on clusters like
-FASRC/RHEL8 is too old to build `pyproject.toml` projects anyway).
-
-Install `uv` once, if you don't already have it:
+`jobscope` needs Python 3.9+. The recommended install path is
+[`uv`](https://docs.astral.sh/uv/), which can install its own Python and put the
+`jobscope` command on your `PATH`.
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
+uv tool install jobscope
 ```
 
-Then restart your shell so `uv` is on your `PATH`. (Alternatives: `wget -qO-
-https://astral.sh/uv/install.sh | sh`, `pipx install uv`, or `brew install uv`;
-see the [uv install docs](https://docs.astral.sh/uv/getting-started/installation/).)
-
-Now install jobscope:
+Restart your shell if `uv` was just installed. Later:
 
 ```bash
-uv tool install jobscope      # from PyPI
-uv tool install .             # from a source checkout
+uv tool upgrade jobscope
+uv tool uninstall jobscope
 ```
 
-Upgrade or remove it later with `uv tool upgrade jobscope` or `uv tool uninstall
-jobscope`.
+Other ways to install `uv` include `pipx install uv`, `brew install uv`, and the
+[uv installation docs](https://docs.astral.sh/uv/getting-started/installation/).
 
-For development from a checkout there's nothing to install; `uv` runs
-everything straight from the source tree, creating the environment on demand:
+## First-Time Cluster Setup
+
+If your cluster does not already have a jobscope config, run:
 
 ```bash
-uv run jobscope -D 3          # run the CLI from source
-uv run --extra dev pytest     # run the test suite
+jobscope probe
+jobscope probe --init
 ```
 
-## Configuration
+`probe` checks what Slurm and Prometheus expose. `probe --init` writes a config from
+those findings and refuses to overwrite an existing one. Site setup details are in
+[docs/admin.md](docs/admin.md).
 
-The GPU and DCGM views need a Prometheus endpoint serving the DCGM and
-`nvidia_gpu_*` series. (The offline `--cpu` / `--cgpu` views, and everything under
-`describe` and `config`, need nothing.) Provide the endpoint one of these ways.
+## Quick Start
 
-```bash
-# Preferred: environment variable (keeps a credential out of any file)
-export JOBSCOPE_PROM_URL="https://USER:TOKEN@prometheus.example.net/api/prom"
-```
-
-**Kempner AI Cluster users:** the jobstats `config.py` sits beside the `jobstats`
-binary on your `PATH`, and jobscope **auto-discovers it** when nothing else is
-configured, so you need no config file and never handle the URL or token. Just
-run `jobscope`. (This works at any jobstats site; to point at a different install,
-set `site_jobstats_config_path` in the config file below.)
-
-On any other cluster, put your settings in that same config file
-(`~/.config/jobscope/config.toml`, or wherever `$JOBSCOPE_CONFIG` points):
-
-```bash
-jobscope config --example > ~/.config/jobscope/config.toml   # then edit it
-jobscope config                                              # show the path in use
-```
-
-The config file also sets the DCGM sampling period, plot color thresholds, and
-default timeout / worker counts; see `jobscope config --example` for the full,
-commented template.
-
-The Prometheus URL commonly embeds a credential: jobscope never prints it, and a
-`config.toml` in a repo checkout is git-ignored. On sites already running
-jobstats, `site_jobstats_config_path` reuses that install's `PROM_SERVER`, so the
-secret is never copied.
-
-## Quick start
-
-```bash
-jobscope -D 3                     # summary of your jobs over the last 3 days
-jobscope --cgpu -D 2              # CPU + GPU summary, fully offline (no Prometheus)
-jobscope --diagnose -D 5          # add an advisory GPU diagnosis column
-jobscope detail JOBID             # per-node / per-GPU breakdown
-jobscope dcgm --ext JOBID         # full per-GPU DCGM profiling table
-jobscope dcgm --ts --csv JOBID | jobscope plot --compact   # time-series chart
-```
-
-`jobscope` alone is shorthand for `jobscope summary`, so the selectors below work
-with or without a subcommand. Flags and JOBIDs may be given in any order
-(`jobscope 12345 -D 3` and `jobscope -D 3 12345` are equivalent), and
-`-j/--jobid` is an explicit alternative to the positional JOBID.
-
-## Subcommands
-
-| Command | Purpose |
+| command | use |
 |---|---|
-| `jobscope summary` | one row per job (the default) |
-| `jobscope detail` | per-node / per-GPU breakdown |
-| `jobscope dcgm` | per-GPU DCGM profiling table (`--ext` for all 28 metrics, `--ts` for raw time series) |
-| `jobscope plot` | render `--csv` output as a terminal chart |
-| `jobscope describe` | plain-English column and metric reference (`--dcgm` for the catalog) |
-| `jobscope config` | show the config path or print an example |
+| `jobscope` | your running jobs |
+| `jobscope 36770231` | one running or finished job |
+| `jobscope -j 36770231 -j 36770232` | several explicit jobs |
+| `jobscope finished -N 20` | your most recent 20 completed jobs |
+| `jobscope finished -p kempner_h100 -D 1` | your completed jobs in one partition |
+| `jobscope -j 36788818_3 --plot-ts` | chart one job over time, a panel per metric |
+| `jobscope -j 36788818_3 --plot-ts-overlay` | the same series overlaid, a panel per GPU |
 
-Selectors shared by `summary`, `detail`, and `dcgm`: `-N` (last N jobs), `-D`
-(last N days), `-S`/`-E` (explicit window), `-u`/`-A`/`-p`/`-t` (user / account /
-partition / state), `--csv`, and explicit `JOBID`s. With no scope at all, the
-last day is used.
+Without a mode word, `jobscope` shows jobs running now. Use `finished` for history.
+Selections are scoped to your user by default; add `-a` to include all users.
 
-## Views
-
-- `--gpu` (default) shows GPU blob columns plus time-averaged DCGM profiling
-  (`SM_ACT%`/`OCC%`/`TENSOR%`/`DRAM%`/`POWER_W`) pulled from Prometheus.
-- `--cgpu` and `--cpu` are offline views based only on the stored blob.
-- `--diagnose` adds a short advisory GPU diagnosis label.
-
-Run `jobscope describe` for column definitions and `jobscope describe --dcgm
---ext` for the full metric catalog.
-
-## Plotting
-
-`jobscope plot` renders `jobscope <view> --csv` output as terminal bar gauges,
-histograms, heatmaps, and time-series line charts. The chart kind is
-auto-detected from the CSV columns; override with `--kind`.
+## Reading a Report
 
 ```bash
-jobscope --gpu  --csv JOBID      | jobscope plot                 # bar gauges (one job)
-jobscope --gpu  --csv -D 7       | jobscope plot --kind hist      # distribution (many jobs)
-jobscope dcgm   --csv -D 7       | jobscope plot                 # heatmap (jobs/GPUs x metrics)
-jobscope dcgm --ts --csv JOBID   | jobscope plot --compact        # time series
+jobscope -j 36770231
 ```
 
-`jobscope plot` reads `summary`, `dcgm`, and `dcgm --ts` CSV; the `detail` CSV is
-for machine consumption, not charts. Do not pass `-n` when piping to `jobscope
-plot`: the plot needs the CSV header row.
+Typical output has three parts:
+
+- The job table shows one row per job. Percent columns are average utilization over
+  the selected allocation.
+- `Summary by metric` pools the selection. `USED` is resource-time that did work and
+  its share of the allocation, such as GPU-hours used out of GPU-hours requested.
+- `Problem jobs` appears for multi-job selections and lists the jobs that crossed
+  configured waste thresholds.
+
+On a real terminal, utilization cells are tinted by band. The plain text still shows
+the same numbers, but not the color. Run `jobscope describe` for column definitions,
+or see [docs/reference.md](docs/reference.md) for every flag, column, band, and plot
+layout.
+
+## Finished Jobs and Dates
+
+```bash
+jobscope finished -D 3
+jobscope finished -N 20
+jobscope finished -S 2026-08-01
+jobscope finished -S 2026-07-30 -E 2026-08-01
+jobscope finished -t failed
+```
+
+Date and state notes:
+
+- `-D N` selects the last `N` days. The default for `finished` is one day.
+- `-N N` selects the most recent `N` jobs and looks back as far as needed.
+- `-S YYYY-MM-DD` by itself means that calendar day, not "since then".
+- Add `-E` to make an explicit window.
+- `-t` defaults to completed jobs. Use `failed`, `timeout`, `cancelled`, or `all` to
+  include other endings.
+
+Every report header restates the actual window scanned, so saved output is
+self-contained.
+
+## Narrow to Nodes or GPUs
+
+Multi-node jobs can hide uneven work because the default row averages across the
+whole allocation. Narrow the report when you need to inspect placement.
+
+```bash
+jobscope -j 36770231 --nodename holygpu8a15401
+jobscope -j 36770231 --nodename holygpu8a15401 --gpuid 0,1
+jobscope -j 36770231 --per-gpu --nodename holygpu8a15401
+```
+
+`--nodename` recomputes the report for one node. `--gpuid` narrows to particular
+cards; GPU ids are per node, so GPU 0 exists on every node in a multi-node job.
+`--per-gpu` prints one row per GPU with absolute memory beside the percentages.
+
+## Time-Series Views
+
+Averages can hide whether a job used half a GPU throughout or all of a GPU for half
+the run. Time-series output keeps the per-scrape shape.
+
+```bash
+jobscope -j 36788818_3 --ts | jobscope plot
+jobscope -j 36788818_3 --plot-ts
+jobscope -j 36788818_3 --plot-ts-overlay
+jobscope -j 36788818_3 --plot-ts 30m
+jobscope -j 36788818_3 --ts | jobscope plot --compact
+```
+
+`--ts` writes one row per GPU per scrape, as CSV. `jobscope plot` charts that stream.
+`--plot-ts` does the same in one command, with one panel per metric. On multi-node
+jobs, add `--nodename` so GPU ids from different nodes do not merge.
+
+`--plot-ts-overlay` charts the same series the other way round: one panel per GPU with
+every metric on a shared axis, and one row per node — so it needs no `--nodename`. Use
+it to see whether metrics moved *together*, which is the question behind most
+diagnosis: `GPU% 90` beside `SM_ACT% 8` on one pair of axes is a card that was occupied
+but barely loaded. Watts are left out, because they cannot share a scale with
+percentages. Each panel legends its own metrics; without colour the markers are
+identical, so `--plot-ts` is the one to use then.
+
+Useful companions:
+
+- `--stats` summarizes a time window with min/mean/max/last per GPU and metric.
+- `--eff` sorts jobs into efficiency categories.
+- Array elements such as `36788818_3` can be passed directly.
+
+## Fewer or More Columns
+
+```bash
+jobscope -j 36770231 --cpu
+jobscope -j 36770231 --gpu
+jobscope -j 36770231 --all-metrics
+jobscope describe --all-metrics
+```
+
+`--cpu` prints only CPU and memory columns. For finished jobs it does not need
+Prometheus, so it is the fastest wide query. `--gpu` prints the GPU side.
+`--all-metrics` adds the full catalog, including clocks, temperatures, PCIe, and NVLink.
+
+## Where the GPU numbers come from
+
+Every column has its own source, and the header block names them:
+
+```
+  Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- jobstats;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
+```
+
+`CPU%`, `MEM%`, `GPU%` and GPU memory come from the jobstats record Slurm already
+stored, which costs no query; the activity columns come from dcgm-exporter, which is
+the only source that publishes them. To measure the first group instead of reading it
+back:
+
+```bash
+jobscope -j 36770231 --gpu-source dcgm     # GPU% from DCGM_FI_DEV_GPU_UTIL
+jobscope -j 36770231 --gpu-source nvml     # the nvidia exporter's own readings
+```
+
+Naming a source promotes it for the columns it can serve, so `--gpu-source dcgm` does
+not drop GPU memory, which DCGM has no total for here. `--gpu-source nvml` does narrow
+the table, because the nvidia exporter publishes no SM, tensor or DRAM activity at all.
+
+A running job has no stored record — Slurm writes it at job end — so its numbers are
+always measured, and the line says so: `CPU% MEM% <- cgroup;  GPU% ... <- dcgm`. A
+column whose source has nothing prints `-`, which is how a cluster with no cgroup
+exporter reads. Set the defaults with `[gpu] source` and `[host] source` (see
+`jobscope config --example`).
+
+## Documentation
+
+| document | contents |
+|---|---|
+| [docs/reference.md](docs/reference.md) | all flags, columns, thresholds, and plot layouts |
+| [docs/admin.md](docs/admin.md) | cluster setup, `probe`, Prometheus, and config |
+| [docs/metrics.md](docs/metrics.md) | how metrics are measured and checked |
+| [CHANGELOG.md](CHANGELOG.md) | release notes and CSV-affecting changes |
+
+`jobscope --help` narrows the help to the command shape you are writing. Use
+`jobscope --help-all` for every option.
 
 ## Contrib
 
-`contrib/jobstats_extended.py` is a site-specific prototype that folds DCGM
-metrics into the jobstats blob itself. It depends on an upstream jobstats install
-and is not part of the package; see [`contrib/README.md`](contrib/README.md).
+`contrib/jobstats_extended.py` is a site-specific prototype that folds DCGM metrics
+into the jobstats summary itself. It depends on an upstream jobstats install and is not
+part of the package; see [contrib/README.md](contrib/README.md).
 
 ## References
 

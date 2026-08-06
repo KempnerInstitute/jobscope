@@ -1,0 +1,57 @@
+  User:      alice
+  Partition: kempner_h100
+  Select:    last 1 day, completed
+  Window:    2026-08-02 20:42 .. 2026-08-03 20:42
+  Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- jobstats;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
+  Sampled:   GPU metrics averaged over each job's whole runtime
+JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME
+----------------------------------------------------------------------------------------------------------------------------
+36822372     alice        COMPLETED 1     10     1      1     0      21      0.1      0.0      0.0     80       00:08:30
+36828732     alice        COMPLETED 1     10     1      1     1      21      0.1      0.0      0.0     85       00:09:36
+36910077     alice        COMPLETED 1     27     2      3     4      8       1.0      0.0      0.1     121      00:06:39
+36956151     alice        COMPLETED 1     28     3      2     18     45      8.9      1.9      7.8     157      00:39:08
+36956183     alice        COMPLETED 1     42     3      1     30     52      16.3     1.7      11.5    182      00:29:31
+36956205     alice        COMPLETED 1     52     3      1     38     50      20.6     2.8      13.9    212      00:21:50
+... 30 more rows ...
+
+1. Summary by metric
+-----------------------------------------------------------------------------------------------------------------------------
+Used/GPU-hr:                              32     3            19     45      9.4      1.3      7.3     160
+  Averaged over time: every value below is each job's mean over its whole runtime. Pooled across jobs by resource-time, so a
+    10-hour job weighs ten times a 1-hour one.
+  JOBS is how many jobs reported the metric and GOOD/OK/BAD sum to it, so the total differs per row wherever coverage does. Banded
+    by GOOD above 20%, OK above 10%, BAD otherwise; POWER_W is GOOD above 100 W and BAD below, never OK.
+  USED is the resource-time that did work, over what was allocated -- for POWER_W, the time spent above that watt floor.
+  bands locate the waste and USED measures it: no red jobs but a low USED means every job wastes a little, rather than a few jobs
+    wasting a lot
+METRIC   USED               JOBS  GOOD  OK  BAD
+CPU%     4.1h (32%)         36    27    1   8
+MEM%     20.3GBh (3%)       36    0     0   36
+GPU%     2.4h (19%)         24    8     5   11
+GMEM%    5.5h (45%)         24    18    3   3
+SM_ACT%  1.2h (9%)          34    3     8   23
+TENSOR%  0.2h (1%)          34    0     0   34
+DRAM%    0.9h (7%)          34    0     6   28
+POWER_W  11.6h (92% >100W)  34    20    0   14
+
+2. Average efficiency  (filled = used, grey = idle)
+---------------------------------------------------
+  bars are the USED share above -- averaged over
+    each job's whole runtime
+     CPU%   32%  ███████████░░░░░░░░░░░░░░░░░░░░░░░
+     MEM%    3%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+     GPU%   19%  ███████░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    GMEM%   45%  ███████████████░░░░░░░░░░░░░░░░░░░
+  SM_ACT%    9%  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+  TENSOR%    1%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    DRAM%    7%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+3. Problem jobs
+-----------------------------------------------------------------------------------------------
+Wasteful GPU (11/24): GPU < 2%
+  alice | 36828732:1%:0.2h(00:09:36), 36836738:0%:0.1h(00:02:55), 36822372:0%:0.1h(00:08:30)
+Wasteful SM (23/34): SM < 2%
+  alice | 36910077:1%:0.3h(00:06:39), 36828732:0%:0.2h(00:09:36), 36822372:0%:0.1h(00:08:30)
+Wasteful POWER (14/34): POWER < 100W
+  alice | 36828732:85W:0.2h(00:09:36), 36836738:83W:0.1h(00:02:55), 36822372:80W:0.1h(00:08:30)
+Jobs: cpu-jobs=36  gpu-jobs=24  gpus=38

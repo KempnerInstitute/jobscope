@@ -1,0 +1,40 @@
+  User:      alice
+  Select:    1 job ID(s)
+  Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- jobstats;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
+  Sampled:   GPU metrics averaged over each job's whole runtime
+JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME
+----------------------------------------------------------------------------------------------------------------------------
+36770231     alice        COMPLETED 2     6      28     8     28     70      6.0      3.3      2.6     149      01:29:10
+
+1. Summary by metric
+-----------------------------------------------------------------------------------------------------------------------------
+  Averaged over time: every value below is this job's mean over its whole runtime. USED is resource-time.
+  JOBS is how many jobs reported the metric and GOOD/OK/BAD sum to it, so the total differs per row wherever coverage does. Banded
+    by GOOD above 20%, OK above 10%, BAD otherwise; POWER_W is GOOD above 100 W and BAD below, never OK.
+  USED is the resource-time that did work, over what was allocated -- for POWER_W, the time spent above that watt floor.
+  bands locate the waste and USED measures it: no red jobs but a low USED means every job wastes a little, rather than a few jobs
+    wasting a lot
+METRIC   USED                JOBS  GOOD  OK  BAD
+CPU%     11.4h (6%)          1     0     0   1
+MEM%     665.8GBh (28%)      1     1     0   0
+GPU%     3.3h (28%)          1     1     0   0
+GMEM%    8.3h (70%)          1     1     0   0
+SM_ACT%  0.7h (6%)           1     0     0   1
+TENSOR%  0.4h (3%)           1     0     0   1
+DRAM%    0.3h (3%)           1     0     0   1
+POWER_W  11.9h (100% >100W)  1     1     0   0
+
+2. Average efficiency  (filled = used, grey = idle)
+---------------------------------------------------
+  bars are the USED share above -- averaged over
+    the job's whole runtime
+     CPU%    6%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+     MEM%   28%  ██████████░░░░░░░░░░░░░░░░░░░░░░░░
+     GPU%   28%  ██████████░░░░░░░░░░░░░░░░░░░░░░░░
+    GMEM%   70%  ████████████████████████░░░░░░░░░░
+  SM_ACT%    6%  ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+  TENSOR%    3%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    DRAM%    3%  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+
+Graded by best of GPU%, SM_ACT%, TENSOR%, DRAM%, CPU% (CPU% can vote no higher than inefficient; POWER_W lowers it below the floor).
+Efficiency: average (20-40%)
