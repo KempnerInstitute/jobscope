@@ -34,6 +34,20 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7", "pytest-cov>=4", "ruff>=0.1"]
 
+# What uv.lock is resolved for, which is narrower than what jobscope *supports*:
+# requires-python stays >=3.9 above, so `pip install jobscope` on 3.9 still works and
+# resolves the newest dependencies that exist for it.
+#
+# Without this, uv forks the lock and pins a second set for python < 3.10 -- urllib3
+# 2.6.3, requests 2.32.5, pytest 8.4.2, the last releases before all three required
+# 3.10. Those carry advisories with no fixed version for 3.9, so the lockfile shipped
+# four permanent Dependabot alerts describing an environment nobody develops in.
+#
+# The cost is that `uv sync` needs a 3.10+ interpreter. Developing on 3.9 means
+# `pip install -e .[dev]` instead, unlocked -- which is what it was before uv.lock.
+[tool.uv]
+environments = ["python_version >= '3.10'"]
+
 [project.urls]
 Homepage = "https://github.com/KempnerInstitute/jobscope"
 Repository = "https://github.com/KempnerInstitute/jobscope"
