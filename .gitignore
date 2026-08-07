@@ -25,3 +25,6 @@ htmlcov/
 # Only config.example.toml is tracked.
 config.toml
 *.local.toml
+
+# Local design notes kept out of the repo but on disk while a branch is in flight.
+docs/superpowers/
