@@ -141,12 +141,12 @@ class RunningSelection:
 # The summary and detail views omit GPU% and the GMEM columns from their DCGM set
 # because they render those from the jobstats summary instead; a running job has no jobstats summary, so
 # here Prometheus is the only source and nothing is dropped.
-# Functions, not constants: both read catalog views that dcgm.set_preference()
-# reassigns, so a value computed at import would freeze the default preference and
-# --gpu-source would pick a source these lists then ignored. See dcgm.REBUILT_NAMES.
+# Functions, not constants: both read the resolved catalog, which set_preference()
+# replaces, so a value computed at import would freeze the default preference and
+# --gpu-source would pick a source these lists then ignored. See dcgm.catalog().
 def default_running_specs() -> List[MetricSpec]:
     """The running view's default DCGM set, under the current source preference."""
-    return list(_dcgm.DEFAULT_SPECS)
+    return list(_dcgm.catalog().default_specs)
 
 
 def extended_running_specs() -> List[MetricSpec]:
@@ -154,7 +154,7 @@ def extended_running_specs() -> List[MetricSpec]:
     counters (ENERGY_kWh) -- a delta needs two points, so it means nothing in an
     instant snapshot."""
     return default_running_specs() + [
-        s for s in _dcgm.ALL_SPECS if s.group == "all" and s.reducer != "delta"]
+        s for s in _dcgm.catalog().all_specs if s.group == "all" and s.reducer != "delta"]
 
 
 def specs_for(view: Optional[str]) -> List[MetricSpec]:
@@ -892,14 +892,14 @@ def _gpu_node_map(job_gpus: List[Gpu], by_uuid: Dict[str, dict]) -> Dict[str, di
     the finished view reads -- and then by the resolved provider's key, because which
     key serves GPU% depends on ``[gpu] source``. Keyed on the literal ``"duty"`` this
     silently stopped producing a GPU% the moment dcgm became the preferred exporter
-    for that column. Read through the module, since ``dcgm._rebuild`` *rebinds*
-    ``SPEC_BY_HEADER`` and a by-value import would keep the pre-config one.
+    for that column. Read the catalog at call time: ``set_preference`` replaces it, so
+    a lookup table kept from before the config load would resolve the old winner.
     """
     nodes: Dict[str, dict] = {}
     for gpu in job_gpus:
         values = by_uuid.get(gpu.uuid, {})
         for column, jobstats_field in source.JOBSTATS_COLUMNS.items():
-            spec = _dcgm.SPEC_BY_HEADER.get(column)
+            spec = _dcgm.catalog().spec_by_header.get(column)
             if spec is None:
                 continue
             value = values.get(spec.key)

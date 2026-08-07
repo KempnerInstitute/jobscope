@@ -7,8 +7,9 @@ import time
 
 import pytest
 
-from jobscope import select as select_mod
-from jobscope.dcgm import DEFAULT_SPECS
+from jobscope.rows import build_rows
+
+from jobscope import dcgm, select as select_mod
 from jobscope.errors import JobscopeError
 from jobscope.job_ave_stats import needs_fill
 from jobscope.report import RenderOptions
@@ -106,7 +107,7 @@ def test_historical_yields_one_chunk_per_batch(monkeypatch, gpu_record):
     monkeypatch.setattr(select_mod, "compute_dcgm",
                         lambda r, ids, *a, **k: {j: ({"SM_ACT%": 1.0}, {}) for j in ids})
 
-    selected = resolve(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, DEFAULT_SPECS)
+    selected = resolve(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs)
     chunks = list(selected.chunks)
     assert [ids for ids, _r, _d in chunks] == [["100"], ["101"]]
     # Each chunk arrives with its own metrics attached, so rendering can stream.
@@ -155,7 +156,7 @@ def test_emit_timeseries_dispatches_to_cpu_for_a_finished_request(monkeypatch, g
         raise AssertionError("the GPU/DCGM emitter must not run for a --cpu --ts request")
     monkeypatch.setattr(select_mod, "dcgm_timeseries", boom)
 
-    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs,
                     None, RenderOptions(view="cpu"))
     assert len(calls) == 1
 
@@ -173,7 +174,7 @@ def test_emit_timeseries_still_dispatches_gpu_when_not_cpu_view(monkeypatch, gpu
         raise AssertionError("the CPU emitter must not run for a plain --ts request")
     monkeypatch.setattr(select_mod, "cpu_timeseries", boom)
 
-    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs,
                     None, RenderOptions(view="all"))
     assert len(calls) == 1
 
@@ -194,7 +195,7 @@ def test_emit_timeseries_dispatches_to_cpu_for_a_running_request(monkeypatch):
     monkeypatch.setattr(select_mod, "discover_gpus", boom)
     monkeypatch.setattr(select_mod, "collect_timeseries", boom)
 
-    emit_timeseries(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+    emit_timeseries(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs,
                     None, RenderOptions(view="cpu"))
     assert len(calls) == 1
 
@@ -214,7 +215,7 @@ def test_emit_timeseries_dispatches_to_combined_for_a_finished_request(monkeypat
     monkeypatch.setattr(select_mod, "dcgm_timeseries", boom)
     monkeypatch.setattr(select_mod, "cpu_timeseries", boom)
 
-    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs,
                     None, RenderOptions(view="all", combined=True))
     assert len(calls) == 1
 
@@ -233,7 +234,7 @@ def test_emit_timeseries_combined_wins_over_cpu_only_when_both_are_set(monkeypat
         raise AssertionError("cpu-only must not run when combined is also set")
     monkeypatch.setattr(select_mod, "cpu_timeseries", boom)
 
-    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+    emit_timeseries(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs,
                     None, RenderOptions(view="cpu", combined=True))
     assert len(calls) == 1
 
@@ -250,7 +251,7 @@ def test_emit_timeseries_dispatches_to_combined_for_a_running_request(monkeypatc
         raise AssertionError("running_cpu_timeseries must not run when combined")
     monkeypatch.setattr(select_mod, "running_cpu_timeseries", boom)
 
-    emit_timeseries(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS,
+    emit_timeseries(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs,
                     None, RenderOptions(view="all", combined=True))
     assert len(calls) == 1
 
@@ -316,7 +317,7 @@ def _patch_running(monkeypatch, client=None):
 def test_running_yields_records_that_look_finished(monkeypatch):
     """The squeue branch must be indistinguishable from sacct downstream."""
     _patch_running(monkeypatch)
-    selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS)
+    selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs)
     (jobids, records, dcgm_data), = list(selected.chunks)
     assert jobids == ["7"]
     record = records["7"]
@@ -331,7 +332,7 @@ def test_running_yields_records_that_look_finished(monkeypatch):
 
 def test_running_provides_the_per_gpu_metrics(monkeypatch):
     _patch_running(monkeypatch)
-    selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS)
+    selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs)
     (_ids, _records, dcgm_data), = list(selected.chunks)
     per_gpu = dcgm_data["7"][1]
     # Keyed (node, minor) as the detail renderer and the jobstats summary both expect.
@@ -359,14 +360,14 @@ def test_running_without_specs_still_builds_the_summary(monkeypatch):
 def test_running_context_names_the_owner_for_explicit_ids(monkeypatch):
     _patch_running(monkeypatch)
     selected = resolve(Request(mode=RUNNING, jobids=["7"], user=None),
-                       _cfg(), None, 1, DEFAULT_SPECS)
+                       _cfg(), None, 1, dcgm.catalog().default_specs)
     assert ("User", "alice") in selected.context
 
 
 def test_running_context_says_all_users(monkeypatch):
     _patch_running(monkeypatch)
     selected = resolve(Request(mode=RUNNING, all_users=True, user=None),
-                       _cfg(), None, 1, DEFAULT_SPECS)
+                       _cfg(), None, 1, dcgm.catalog().default_specs)
     assert ("User", "(all users)") in selected.context
 
 
@@ -395,14 +396,14 @@ def test_both_branches_yield_the_same_chunk_shape(monkeypatch, gpu_record):
     """The contract that lets one renderer serve both sources."""
     _patch_running(monkeypatch)
     live = list(resolve(Request(mode=RUNNING, user="alice"),
-                        _cfg(), None, 1, DEFAULT_SPECS).chunks)
+                        _cfg(), None, 1, dcgm.catalog().default_specs).chunks)
 
     monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: (["100"], "x"))
     monkeypatch.setattr(select_mod, "fetch", lambda i, t: {"100": gpu_record})
     monkeypatch.setattr(select_mod, "compute_dcgm",
                         lambda r, ids, *a, **k: {"100": select_mod.JobGpuData()})
     past = list(resolve(Request(mode=JOBIDS, jobids=["100"], user="alice"),
-                        _cfg(), None, 1, DEFAULT_SPECS).chunks)
+                        _cfg(), None, 1, dcgm.catalog().default_specs).chunks)
 
     for chunks in (live, past):
         (jobids, records, dcgm_data), = chunks
@@ -549,7 +550,7 @@ def test_cards_the_chosen_source_does_not_cover_are_named(capsys):
     jobs vanish from the series and therefore from --eff's counts, so the difference has
     to be stated -- otherwise the two invocations disagree with nothing to explain it."""
     samples = {"u1": {100: {"duty": 50.0}}}          # u2/u3 came back empty
-    select_mod._note_gpu_series_gap(_gap_gpus(), samples, DEFAULT_SPECS)
+    select_mod._note_gpu_series_gap(_gap_gpus(), samples, dcgm.catalog().default_specs)
     err = capsys.readouterr().err
     assert "2 of 3 job(s) have no GPU metrics" in err
     assert "blindhost" in err and "goodhost" not in err
@@ -562,7 +563,7 @@ def test_cards_the_chosen_source_does_not_cover_are_named(capsys):
 def test_full_coverage_says_nothing(capsys):
     """A note that fires when nothing is wrong is worse than none."""
     samples = {u: {100: {"duty": 1.0}} for u in ("u1", "u2", "u3")}
-    select_mod._note_gpu_series_gap(_gap_gpus(), samples, DEFAULT_SPECS)
+    select_mod._note_gpu_series_gap(_gap_gpus(), samples, dcgm.catalog().default_specs)
     assert capsys.readouterr().err == ""
 
 
@@ -575,7 +576,7 @@ def test_the_running_branch_supplies_per_node_figures(monkeypatch):
     was already right.
     """
     _patch_running(monkeypatch)
-    selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, DEFAULT_SPECS)
+    selected = resolve(Request(mode=RUNNING, user="alice"), _cfg(), None, 1, dcgm.catalog().default_specs)
     (_jobids, _records, dcgm_data), = list(selected.chunks)
     per_node = dcgm_data["7"].per_node
     assert per_node, "the running branch supplied no per-node figures"
@@ -653,7 +654,7 @@ def _resolve_running_for(monkeypatch, jobs, client, cfg=None, **kw):
     monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, t: dict(jobs))
     monkeypatch.setattr(select_mod, "client_from_config", lambda c, t: client)
     request = Request(mode=RUNNING, user="alice", **kw)
-    return resolve(request, cfg or _cfg(), None, 4, DEFAULT_SPECS,
+    return resolve(request, cfg or _cfg(), None, 4, dcgm.catalog().default_specs,
                    host_specs=list((cfg or _cfg()).metrics.host_summary))
 
 
@@ -765,7 +766,7 @@ def test_batching_does_not_change_the_summary(monkeypatch):
                                    RenderOptions(view="all", header=True,
                                                  time_weighted=resolved.folded), out)
         for batch, records, dcgm_data in resolved.chunks:
-            renderer.add(batch, records, dcgm_data)
+            renderer.add(build_rows(batch, records, dcgm_data))
         renderer.finish()
         return out.getvalue()
 

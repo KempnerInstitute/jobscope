@@ -7,16 +7,8 @@ import pytest
 
 from jobscope import dcgm
 from jobscope.dcgm import (
-    ALL_SPECS,
-    DCGM_HEADERS,
-    DEFAULT_SPECS,
-    GPU_SUMMARY_SPECS,
-    JOBSTATS_BACKED_KEYS,
-    KEY_SPECS,
-    METRICS,
     MODEL_KEY,
     NAME_LABEL,
-    SPEC_BY_HEADER,
     JobGpuData,
     columns_for,
     compute_dcgm,
@@ -98,48 +90,50 @@ class FakeClient:
 
 
 def test_catalog_shape():
-    assert len(ALL_SPECS) == 30
-    assert len(DEFAULT_SPECS) == 7          # 5 profiling + the GPU memory pair
-    assert len(GPU_SUMMARY_SPECS) == 4
+    assert len(dcgm.catalog().all_specs) == 30
+    assert len(dcgm.catalog().default_specs) == 7          # 5 profiling + the GPU memory pair
+    assert len(dcgm.catalog().gpu_summary_specs) == 4
     # The summary/detail DCGM columns exclude what the jobstats summary already supplies, so
     # neither GPU% nor the GMEM columns appear twice in those views. OCC% moved to
     # the "all" group -- --all-metrics only -- so it is not part of the default set.
-    assert DCGM_HEADERS == ["SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
-    # METRICS is the *candidates*, so its headers repeat wherever two exporters
+    assert dcgm.catalog().headers == ("SM_ACT%", "TENSOR%", "DRAM%", "POWER_W")
+    # dcgm.catalog().metrics is the *candidates*, so its headers repeat wherever two exporters
     # offer one column. Uniqueness is a property of the resolved view, which is what
-    # SPEC_BY_HEADER and every consumer read -- see jobscope.source.
-    headers = [spec.header for spec in ALL_SPECS]
+    # dcgm.catalog().spec_by_header and every consumer read -- see jobscope.source.
+    headers = [spec.header for spec in dcgm.catalog().all_specs]
     assert len(headers) == len(set(headers))
-    assert set(SPEC_BY_HEADER) == set(headers)
-    assert len(METRICS) > len(ALL_SPECS)
-    assert any(spec.column == "GPU%" for spec in DEFAULT_SPECS)
+    assert set(dcgm.catalog().spec_by_header) == set(headers)
+    assert len(dcgm.catalog().metrics) > len(dcgm.catalog().all_specs)
+    assert any(spec.column == "GPU%" for spec in dcgm.catalog().default_specs)
 
 
 def test_key_specs_is_the_curated_ts_default():
     """--ts/--plot_ts/--eff's default (no --all-metrics): a small subset of
-    DEFAULT_SPECS, not the full 8 -- notably no OCC% or the GPU memory pair."""
-    assert [spec.header for spec in KEY_SPECS] == \
+    dcgm.catalog().default_specs, not the full 8 -- notably no OCC% or the GPU memory pair."""
+    assert [spec.header for spec in dcgm.catalog().key_specs] == \
         ["GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
-    assert set(KEY_SPECS) <= set(DEFAULT_SPECS)
-    assert all(spec.key not in JOBSTATS_BACKED_KEYS for spec in GPU_SUMMARY_SPECS)
+    assert set(dcgm.catalog().key_specs) <= set(dcgm.catalog().default_specs)
+    active = dcgm.catalog()
+    assert all(spec.key not in active.jobstats_backed_keys
+               for spec in active.gpu_summary_specs)
 
 
 def test_dcgm_and_live_columns_are_identical():
     """A finished job and a running one must be described by the same columns."""
     from jobscope.running import build_columns, default_running_specs
-    assert columns_for(DEFAULT_SPECS) == build_columns(default_running_specs())
-    assert [h for _k, h, _d in columns_for(DEFAULT_SPECS)] == [
+    assert columns_for(dcgm.catalog().default_specs) == build_columns(default_running_specs())
+    assert [h for _k, h, _d in columns_for(dcgm.catalog().default_specs)] == [
         "GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "GMEM_GB", "GMEM%"]
 
 
 def test_hidden_total_memory_is_queried_but_not_a_column():
-    assert any(s.header == "GMEM_TOTAL_GB" for s in DEFAULT_SPECS)
-    assert "GMEM_TOTAL_GB" not in [h for _k, h, _d in columns_for(DEFAULT_SPECS)]
+    assert any(s.header == "GMEM_TOTAL_GB" for s in dcgm.catalog().default_specs)
+    assert "GMEM_TOTAL_GB" not in [h for _k, h, _d in columns_for(dcgm.catalog().default_specs)]
 
 
 def test_gpu_memory_comes_from_the_jobstats_summary_for_a_finished_job(gpu_record):
     """As with GPU%, a stored value is never recomputed -- see _prefer_stored."""
-    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
+    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, dcgm.catalog().default_specs, _client(), None)
     # The summary holds 48 GiB used of 80 total on GPU 0, 32 of 80 on GPU 1.
     assert per_gpu[("node01", "0")]["GMEM_GB"] == 48.0
     assert per_gpu[("node01", "0")]["GMEM%"] == 60.0
@@ -150,9 +144,9 @@ def test_gpu_memory_comes_from_the_jobstats_summary_for_a_finished_job(gpu_recor
 
 
 def test_format_value():
-    assert format_value(SPEC_BY_HEADER["SM_ACT%"], 60.0) == "60.0"
-    assert format_value(SPEC_BY_HEADER["POWER_W"], 400.6) == "401"
-    assert format_value(SPEC_BY_HEADER["POWER_W"], None) == "-"
+    assert format_value(dcgm.catalog().spec_by_header["SM_ACT%"], 60.0) == "60.0"
+    assert format_value(dcgm.catalog().spec_by_header["POWER_W"], 400.6) == "401"
+    assert format_value(dcgm.catalog().spec_by_header["POWER_W"], None) == "-"
     assert format_by_header("SM_ACT%", None) == "-"
 
 
@@ -162,11 +156,11 @@ def test_gpu_minor_key():
 
 
 def test_window_query_reducers():
-    assert window_query(SPEC_BY_HEADER["SM_ACT%"], ["U1", "U2"], 100) == \
+    assert window_query(dcgm.catalog().spec_by_header["SM_ACT%"], ["U1", "U2"], 100) == \
         'avg_over_time((DCGM_FI_PROF_SM_ACTIVE{UUID=~"^(U1|U2)$"})[100s:])'
-    assert window_query(SPEC_BY_HEADER["PWRmax_W"], ["U1"], 100) == \
+    assert window_query(dcgm.catalog().spec_by_header["PWRmax_W"], ["U1"], 100) == \
         'max_over_time((DCGM_FI_DEV_POWER_USAGE{UUID=~"^(U1)$"})[100s:])'
-    assert window_query(SPEC_BY_HEADER["ENERGY_kWh"], ["U1"], 100) == \
+    assert window_query(dcgm.catalog().spec_by_header["ENERGY_kWh"], ["U1"], 100) == \
         ('(max_over_time((DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{UUID=~"^(U1)$"})[100s:]) - '
          'min_over_time((DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION{UUID=~"^(U1)$"})[100s:]))')
 
@@ -174,9 +168,9 @@ def test_window_query_reducers():
 def test_instant_drops_the_reducer_for_an_unfinished_job():
     """The newest scrape, which is the same selector running.collect_instant builds --
     that identity is what makes a running job read the same via -j as via squeue."""
-    assert window_query(SPEC_BY_HEADER["SM_ACT%"], ["U1", "U2"], 100, instant=True) == \
+    assert window_query(dcgm.catalog().spec_by_header["SM_ACT%"], ["U1", "U2"], 100, instant=True) == \
         'DCGM_FI_PROF_SM_ACTIVE{UUID=~"^(U1|U2)$"}'
-    assert window_query(SPEC_BY_HEADER["PWRmax_W"], ["U1"], 100, instant=True) == \
+    assert window_query(dcgm.catalog().spec_by_header["PWRmax_W"], ["U1"], 100, instant=True) == \
         'DCGM_FI_DEV_POWER_USAGE{UUID=~"^(U1)$"}'
 
 
@@ -184,8 +178,8 @@ def test_instant_does_not_apply_to_a_counter_difference():
     """ENERGY_kWh is a delta. "The newest scrape" of a counter difference is not a
     smaller answer, it is none at all -- one sample has no difference to report -- so
     delta keeps its window even when everything beside it goes instant."""
-    windowed = window_query(SPEC_BY_HEADER["ENERGY_kWh"], ["U1"], 100)
-    assert window_query(SPEC_BY_HEADER["ENERGY_kWh"], ["U1"], 100, instant=True) == windowed
+    windowed = window_query(dcgm.catalog().spec_by_header["ENERGY_kWh"], ["U1"], 100)
+    assert window_query(dcgm.catalog().spec_by_header["ENERGY_kWh"], ["U1"], 100, instant=True) == windowed
 
 
 def _queries_for(record, **kw):
@@ -198,7 +192,7 @@ def _queries_for(record, **kw):
             return super().query(query, at, timeout)
 
     client = Recorder(gpus=[("UUID-A", "node01", "0")], values={})
-    dcgm_for_job(record, DEFAULT_SPECS, client, None, **kw)
+    dcgm_for_job(record, dcgm.catalog().default_specs, client, None, **kw)
     # The discovery query keeps its window whatever the state -- it asks which cards the
     # job held, which is a fact about the run and not a reading.
     return [q for q in asked if "nvidia_gpu_jobId" not in q]
@@ -259,7 +253,7 @@ def test_discover_gpus_sorted(gpu_record):
 
 
 def test_dcgm_for_job_scales_and_aggregates(gpu_record):
-    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
+    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, dcgm.catalog().default_specs, _client(), None)
     assert overall["SM_ACT%"] == 60.0          # mean(80, 40), 0-1 fraction scaled to percent
     assert overall["POWER_W"] == 400.0         # mean(300, 500)
     assert per_gpu[("node01", "0")]["SM_ACT%"] == 80.0
@@ -273,7 +267,7 @@ def test_utilization_comes_from_the_jobstats_summary_not_a_recomputation(gpu_rec
     come from the jobstats summary -- and it is the same number jobstats_metrics gives the summary
     view, which is the point: the two cannot drift apart.
     """
-    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
+    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, dcgm.catalog().default_specs, _client(), None)
     assert per_gpu[("node01", "0")]["GPU%"] == 90.0   # the summary's own per-GPU values
     assert per_gpu[("node01", "1")]["GPU%"] == 50.0
     assert overall["GPU%"] == 70.0                   # mean(90, 50)
@@ -283,7 +277,7 @@ def test_utilization_comes_from_the_jobstats_summary_not_a_recomputation(gpu_rec
 def test_running_job_keeps_the_prometheus_utilization(gpu_record):
     """With no jobstats summary there is nothing to defer to, so the query stands."""
     running = dataclasses.replace(gpu_record, state="RUNNING", stats={})
-    overall, per_gpu, _nodes = dcgm_for_job(running, DEFAULT_SPECS, _client(), None)
+    overall, per_gpu, _nodes = dcgm_for_job(running, dcgm.catalog().default_specs, _client(), None)
     # _client() serves no duty samples, so the column is simply absent rather
     # than silently borrowed from somewhere else.
     assert "GPU%" not in overall
@@ -299,18 +293,20 @@ def test_stored_utilization_empty_without_a_summary(gpu_record):
 
 
 def test_dcgm_for_job_cpu_only(cpu_record):
-    assert dcgm_for_job(cpu_record, DEFAULT_SPECS, _client(), None) == JobGpuData()
+    assert dcgm_for_job(cpu_record, dcgm.catalog().default_specs, _client(), None) == JobGpuData()
 
 
 def test_compute_dcgm_serial(gpu_record):
-    results = compute_dcgm({"100": gpu_record}, ["100"], DEFAULT_SPECS, _client(), None, workers=1)
+    results = compute_dcgm({"100": gpu_record}, ["100"], dcgm.catalog().default_specs,
+                           _client(), None, workers=1)
     assert set(results) == {"100"}
     assert results["100"][0]["SM_ACT%"] == 60.0
 
 
 def test_compute_dcgm_threaded(gpu_record, cpu_record):
     records = {"100": gpu_record, "101": gpu_record, "200": cpu_record}
-    results = compute_dcgm(records, ["100", "101", "200"], DEFAULT_SPECS, _client(), None, workers=4)
+    results = compute_dcgm(records, ["100", "101", "200"], dcgm.catalog().default_specs,
+                           _client(), None, workers=4)
     assert set(results) == {"100", "101"}      # cpu job skipped
     assert results["101"][0]["POWER_W"] == 400.0
 
@@ -334,7 +330,7 @@ class _DiscoveryOnlyClient:
 
 
 def test_dcgm_for_job_prometheus_down(gpu_record):
-    assert dcgm_for_job(gpu_record, DEFAULT_SPECS, _RaisingClient(), None) == JobGpuData()
+    assert dcgm_for_job(gpu_record, dcgm.catalog().default_specs, _RaisingClient(), None) == JobGpuData()
 
 
 def test_discover_gpus_prometheus_down(gpu_record):
@@ -343,11 +339,12 @@ def test_discover_gpus_prometheus_down(gpu_record):
 
 def test_dcgm_for_job_no_uuids(gpu_record):
     client = FakeClient(gpus=[], values={})
-    assert dcgm_for_job(gpu_record, DEFAULT_SPECS, client, None) == JobGpuData()
+    assert dcgm_for_job(gpu_record, dcgm.catalog().default_specs, client, None) == JobGpuData()
 
 
 def test_dcgm_for_job_metric_error_keeps_gpu(gpu_record):
-    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, DEFAULT_SPECS, _DiscoveryOnlyClient(), None)
+    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, dcgm.catalog().default_specs,
+                                            _DiscoveryOnlyClient(), None)
     # Every metric query fails, so nothing Prometheus-derived survives; the GPU row
     # itself is kept, carrying only what the stored summary already knew.
     # GPU% and the GMEM columns survive because the jobstats summary supplies them.
@@ -359,7 +356,8 @@ def test_dcgm_for_job_metric_error_keeps_gpu(gpu_record):
 
 def test_dcgm_for_job_metric_error_on_a_running_job_yields_nothing(gpu_record):
     running = dataclasses.replace(gpu_record, state="RUNNING", stats={})
-    overall, per_gpu, _nodes = dcgm_for_job(running, DEFAULT_SPECS, _DiscoveryOnlyClient(), None)
+    overall, per_gpu, _nodes = dcgm_for_job(running, dcgm.catalog().default_specs,
+                                            _DiscoveryOnlyClient(), None)
     assert overall == {}
     # The model rides with the row even when no metric survived: it identifies the
     # card, and POWER_W's floor depends on which one it was.
@@ -376,7 +374,7 @@ def test_dcgm_for_job_metric_error_on_a_running_job_yields_nothing(gpu_record):
 ])
 def test_a_metric_answers_to_its_key_and_its_header(name, header):
     """Three forms per metric, derived from the catalog rather than listed, so a
-    metric added to METRICS is nameable at once."""
+    metric added to dcgm.catalog().metrics is nameable at once."""
     from jobscope.dcgm import spec_named
     assert spec_named(name).header == header
 
@@ -387,11 +385,11 @@ def test_an_unknown_name_resolves_to_nothing():
 
 
 def test_every_offered_name_actually_resolves():
-    """METRIC_NAMES is what an error message tells a user to choose from, so each
+    """The catalog's names are what an error message tells a user to choose from, so each
     one had better work."""
-    from jobscope.dcgm import METRIC_NAMES, spec_named
-    assert all(spec_named(n) is not None for n in METRIC_NAMES)
-    assert len(METRIC_NAMES) == len(ALL_SPECS)
+    from jobscope.dcgm import spec_named
+    assert all(spec_named(n) is not None for n in dcgm.catalog().names)
+    assert len(dcgm.catalog().names) == len(dcgm.catalog().all_specs)
 
 
 def test_specs_named_sorts_by_catalog_position():
@@ -422,9 +420,9 @@ def test_the_live_view_drops_counter_deltas():
 def test_the_built_in_lists_are_reproducible_by_name():
     """Which is what lets [metrics] express them, and what the shipped example
     config relies on."""
-    from jobscope.dcgm import KEY_SPECS, specs_named
+    from jobscope.dcgm import specs_named
     assert [s.header for s in specs_named(["gpu", "sm_act", "tensor", "dram", "power"])] \
-        == [s.header for s in KEY_SPECS]
+        == [s.header for s in dcgm.catalog().key_specs]
 
 
 # --- metric grouping --------------------------------------------------------
@@ -452,27 +450,27 @@ def test_the_delta_reducer_label_replaces_inside_both_halves():
 def test_group_key_splits_on_reducer_and_on_uuid_label():
     """Both matter: the reducer picks the function, and the label differs by family
     -- NVML uses lowercase uuid where DCGM uses uppercase UUID."""
-    assert group_key(SPEC_BY_HEADER["SM_ACT%"]) == ("avg", "UUID")
+    assert group_key(dcgm.catalog().spec_by_header["SM_ACT%"]) == ("avg", "UUID")
     assert group_key(spec_named("duty")) == ("avg", "uuid")           # NVML
     assert group_key(spec_named("duty_dcgm")) == ("avg", "UUID")      # same column
-    assert group_key(SPEC_BY_HEADER["PWRmax_W"]) == ("max", "UUID")
-    assert group_key(SPEC_BY_HEADER["ENERGY_kWh"]) == ("delta", "UUID")
+    assert group_key(dcgm.catalog().spec_by_header["PWRmax_W"]) == ("max", "UUID")
+    assert group_key(dcgm.catalog().spec_by_header["ENERGY_kWh"]) == ("delta", "UUID")
 
 
 def test_grouping_cuts_the_query_count(gpu_record):
     """The whole point. 7 default specs share 3 (reducer, uuid_label) groups, so a
     job costs 1 discovery + 3 instead of 1 + 7."""
     client = _client()
-    dcgm_for_job(gpu_record, DEFAULT_SPECS, client, None)
+    dcgm_for_job(gpu_record, dcgm.catalog().default_specs, client, None)
     assert client.grouped == 2      # avg/UUID and max/uuid; avg/uuid is a lone spec
-    assert len(client.queries) < 1 + len(DEFAULT_SPECS)
+    assert len(client.queries) < 1 + len(dcgm.catalog().default_specs)
 
 
 def test_grouped_and_per_spec_produce_identical_values(gpu_record):
     """Batching changes how values are fetched, never which samples reduce into
     them -- so the two paths must agree exactly, not approximately."""
-    grouped = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
-    per_spec = dcgm_for_job(gpu_record, DEFAULT_SPECS,
+    grouped = dcgm_for_job(gpu_record, dcgm.catalog().default_specs, _client(), None)
+    per_spec = dcgm_for_job(gpu_record, dcgm.catalog().default_specs,
                             FakeClient(gpus=[("UUID-A", "node01", "0"),
                                              ("UUID-B", "node01", "1")],
                                        values=_client().values,
@@ -485,7 +483,7 @@ def test_a_server_without_label_replace_falls_back_per_metric(gpu_record):
     client = FakeClient(gpus=[("UUID-A", "node01", "0"), ("UUID-B", "node01", "1")],
                         values={"DCGM_FI_PROF_SM_ACTIVE": {"UUID-A": 0.80, "UUID-B": 0.40}},
                         support_grouping=False)
-    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, DEFAULT_SPECS, client, None)
+    overall, per_gpu, _nodes = dcgm_for_job(gpu_record, dcgm.catalog().default_specs, client, None)
     assert overall["SM_ACT%"] == 60.0
     assert per_gpu[("node01", "0")]["SM_ACT%"] == 80.0
 
@@ -494,7 +492,7 @@ def test_one_series_backing_two_specs_is_not_lost(gpu_record):
     """DCGM_FI_DEV_POWER_USAGE feeds POWER_W (avg) and PWRmax_W (max). They land in
     different groups today, but the metric->specs mapping must stay one-to-many."""
     client = _client()
-    overall, _pg, _nodes = dcgm_for_job(gpu_record, ALL_SPECS, client, None)
+    overall, _pg, _nodes = dcgm_for_job(gpu_record, dcgm.catalog().all_specs, client, None)
     assert overall["POWER_W"] == 400.0        # mean(300, 500)
     assert overall["PWRmax_W"] == 500.0       # max(300, 500)
 
@@ -584,7 +582,7 @@ def test_the_fallback_query_is_windowed_and_anchored_at_the_job_s_end(gpu_record
 # instances.
 
 def _spec(header, agg="mean"):
-    return next(s for s in ALL_SPECS if s.header == header and s.agg == agg)
+    return next(s for s in dcgm.catalog().all_specs if s.header == header and s.agg == agg)
 
 
 def test_pool_uuids_uses_each_spec_s_own_agg():
@@ -633,7 +631,7 @@ def test_pool_and_derive_takes_the_ratio_of_the_pooled_halves():
 
 
 def test_dcgm_for_job_returns_a_figure_per_node(gpu_record):
-    overall, per_gpu, per_node = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
+    overall, per_gpu, per_node = dcgm_for_job(gpu_record, dcgm.catalog().default_specs, _client(), None)
     # conftest's gpu_record is one node with two GPUs.
     assert list(per_node) == ["node01"]
     assert set(per_node["node01"]) & set(overall), "the same headers at both levels"
@@ -642,7 +640,7 @@ def test_dcgm_for_job_returns_a_figure_per_node(gpu_record):
 def test_the_node_figure_equals_the_job_figure_on_a_single_node_job(gpu_record):
     """The two reductions must agree when the subset is everything -- the same property
     the renderer test asserts one level up."""
-    overall, _per_gpu, per_node = dcgm_for_job(gpu_record, DEFAULT_SPECS, _client(), None)
+    overall, _per_gpu, per_node = dcgm_for_job(gpu_record, dcgm.catalog().default_specs, _client(), None)
     for header, value in per_node["node01"].items():
         if isinstance(value, float) and header in overall:
             assert overall[header] == pytest.approx(value), header
@@ -657,14 +655,14 @@ def test_the_label_fallback_reaches_the_report_path_too(gpu_record, hpc_job):
     client = _two_mapping_client([], [("n1", "GPU-a", 2)])
     assert [g["uuid"] for g in discover_gpus(gpu_record, client, None)] == ["GPU-a"]
     # ...and the same job through the table path, which is what was broken.
-    overall, per_gpu, per_node = dcgm_for_job(gpu_record, DEFAULT_SPECS, client, None)
+    overall, per_gpu, per_node = dcgm_for_job(gpu_record, dcgm.catalog().default_specs, client, None)
     assert per_gpu, "the report path resolved no cards through the fallback"
     assert list(per_node) == ["n1"]
 
 
 # --- the ownership clip: an nvml card carries its owner in a label -----------------
 
-_NVML = [s for s in dcgm.METRICS if s.family == "nvml" and s.header == "GPU%"]
+_NVML = [s for s in dcgm.catalog().metrics if s.family == "nvml" and s.header == "GPU%"]
 
 
 def test_an_nvml_selector_is_clipped_to_the_job_that_owned_the_card(gpu_record):
@@ -687,7 +685,7 @@ def test_a_dcgm_selector_is_not_clipped(gpu_record):
     the join's -- so `and` would match nothing and blank the column rather than narrow
     it. The window alone has to bound those."""
     client = _client()
-    dcgm_for_job(gpu_record, [s for s in DEFAULT_SPECS if s.uuid_label == "UUID"],
+    dcgm_for_job(gpu_record, [s for s in dcgm.catalog().default_specs if s.uuid_label == "UUID"],
                  client, None)
     for q in client.queries:
         if "DCGM_FI_" in q:
@@ -782,7 +780,7 @@ def test_the_grouped_query_is_clipped_too(gpu_record):
     nvml/avg, so they share one label_replace query -- and that builder took no clip at
     all, which is the form the reported bug actually ran through.
     """
-    nvml_avg = [s for s in dcgm.METRICS
+    nvml_avg = [s for s in dcgm.catalog().metrics
                 if s.uuid_label == "uuid" and s.reducer == "avg"
                 and s.header in ("GPU%", "POWER_W", "TEMP_C")]
     assert len(nvml_avg) >= 2, "need a real group, or this measures the per-spec path"

@@ -2,7 +2,7 @@
 
 import pytest
 
-from jobscope import config as config_module
+from jobscope import config as config_module, cpu, dcgm
 from jobscope.config import (
     Config,
     Defaults,
@@ -488,22 +488,20 @@ def test_metrics_print_in_catalog_order_not_the_order_written(tmp_path):
 
 
 def test_extended_takes_all_or_a_list(tmp_path):
-    from jobscope.dcgm import ALL_SPECS
     path = tmp_path / "c.toml"
     path.write_text('[metrics]\nextended = "all"\n')
-    assert len(load_config(str(path)).metrics.extended) == len(ALL_SPECS)
+    assert len(load_config(str(path)).metrics.extended) == len(dcgm.catalog().all_specs)
     path.write_text('[metrics]\nextended = ["gpu", "temp"]\n')
     # The jobstats-backed trio is added back (see below), so TEMP_C is what to check.
     assert "TEMP_C" in [s.header for s in load_config(str(path)).metrics.extended]
 
 
 def test_an_unnamed_view_keeps_its_built_in_list(tmp_path):
-    from jobscope.dcgm import DEFAULT_SPECS, KEY_SPECS
     path = tmp_path / "c.toml"
     path.write_text('[metrics]\ntimeseries = ["gpu"]\n')
     cfg = load_config(str(path))
-    assert [s.header for s in cfg.metrics.summary] == [s.header for s in DEFAULT_SPECS]
-    assert [s.header for s in cfg.metrics.timeseries] != [s.header for s in KEY_SPECS]
+    assert [s.header for s in cfg.metrics.summary] == [s.header for s in dcgm.catalog().default_specs]
+    assert [s.header for s in cfg.metrics.timeseries] != [s.header for s in dcgm.catalog().key_specs]
 
 
 def test_the_jobstats_summary_backed_metrics_cannot_be_dropped_from_the_summary(tmp_path):
@@ -668,14 +666,14 @@ def test_site_overrides_reach_every_query(hermetic_config, tmp_path):
     """The point of the section: one edit, and all five query builders follow.
     Before this each had its own literal, so porting meant finding all of them --
     and missing one failed silently."""
-    from jobscope.cpu import SPEC_BY_KEY, host_query, host_query_many
+    from jobscope.cpu import host_query, host_query_many
     from jobscope.nvml import window_query
     path = tmp_path / "c.toml"
     path.write_text('[site]\nhost_label = "instance"\njobid_label = "slurm_job"\n'
                     'gpu_job_join = "gpu_job"\ncgroup_selector = "container=\'\'"\n')
     config_module.set_config(load_config(str(path)))
-    assert "slurm_job='7'" in SPEC_BY_KEY["cpu"].query("7", 300, 60)
-    assert "container=''" in SPEC_BY_KEY["cpu"].query("7", 300, 60)
+    assert "slurm_job='7'" in cpu.catalog().spec_by_key["cpu"].query("7", 300, 60)
+    assert "container=''" in cpu.catalog().spec_by_key["cpu"].query("7", 300, 60)
     assert "slurm_job='7'" in host_query("cgroup_cpus", "max", "7", 60)
     assert 'slurm_job=~"^(7)$"' in host_query_many("cgroup_cpus", "max", [7], 60)
     assert "gpu_job == 7" in window_query("nvidia_gpu_duty_cycle", "avg", "7", 60)
@@ -732,7 +730,7 @@ def test_a_site_can_name_a_series_and_get_it_in_the_extended_view(hermetic_confi
     assert spec is not None and spec.metric == "DCGM_FI_DEV_GPU_UTIL"
     assert spec.header == "GPU_UTIL%" and spec.decimals == 0
     # Reachable by every route a built-in is.
-    assert spec in dcgm.ALL_SPECS
+    assert spec in dcgm.catalog().all_specs
     assert "GPU_UTIL%" in [s.header for s in cfg.metrics.extended]
     assert metrics.spec_for("GPU_UTIL%") is not None
     assert "GPU_UTIL%" in config_module._known_percent_headers()
@@ -743,9 +741,9 @@ def test_a_site_metric_never_joins_the_default_view(hermetic_config, tmp_path):
     user sees -- or the queries every sweep pays for."""
     from jobscope import dcgm
     cfg = _define(tmp_path, '[metrics.dcgm.gpu_util]\nquery = "DCGM_FI_DEV_GPU_UTIL"\n')
-    assert dcgm.spec_named("gpu_util") not in dcgm.DEFAULT_SPECS
+    assert dcgm.spec_named("gpu_util") not in dcgm.catalog().default_specs
     assert "GPU_UTIL" not in [s.header for s in cfg.metrics.summary]
-    assert dcgm.spec_named("gpu_util") not in dcgm.KEY_SPECS
+    assert dcgm.spec_named("gpu_util") not in dcgm.catalog().key_specs
 
 
 def test_the_header_defaults_to_the_uppercased_name(hermetic_config, tmp_path):
@@ -781,20 +779,20 @@ def test_a_definition_overrides_a_builtin_of_the_same_name(hermetic_config, tmp_
     assert cpu.spec_named("cpu").metric == "container_cpu_usage_seconds_total"
     # And the override reaches the default view, which is where it matters.
     assert "container_cpu_usage_seconds_total" in \
-        cpu.DEFAULT_CGROUP_SPECS[0].query("7", 300, 60)
+        cpu.catalog().default_specs[0].query("7", 300, 60)
 
 
 def test_registration_replaces_rather_than_accumulates(hermetic_config, tmp_path):
     """Loading a config twice -- which `jobscope config` and the tests both do --
     must yield one copy of each metric, and dropping a table must drop the metric."""
     from jobscope import dcgm
-    before = len(dcgm.METRICS)
+    before = len(dcgm.catalog().metrics)
     _define(tmp_path, '[metrics.dcgm.gpu_util]\nquery = "DCGM_FI_DEV_GPU_UTIL"\n')
-    assert len(dcgm.METRICS) == before + 1
+    assert len(dcgm.catalog().metrics) == before + 1
     _define(tmp_path, '[metrics.dcgm.gpu_util]\nquery = "DCGM_FI_DEV_GPU_UTIL"\n')
-    assert len(dcgm.METRICS) == before + 1
+    assert len(dcgm.catalog().metrics) == before + 1
     _define(tmp_path, "[defaults]\ndays = 1\n")
-    assert len(dcgm.METRICS) == before and dcgm.spec_named("gpu_util") is None
+    assert len(dcgm.catalog().metrics) == before and dcgm.spec_named("gpu_util") is None
 
 
 def test_a_definition_needs_a_query(hermetic_config, tmp_path):

@@ -14,8 +14,10 @@ from typing import (
     Dict,
     FrozenSet,
     List,
+    Mapping,
     NamedTuple,
     Optional,
+    Sequence,
     Tuple,
 )
 
@@ -126,7 +128,7 @@ METRICS: List[MetricSpec] = [
                "default", uuid_label="uuid", family="nvml", provides="POWER_W",
                roles=frozenset({"worst", "cap"}), slug="POWER", tag="pw"),
     # OCC% sits here, right after the default group, so the extended catalog's
-    # column order keeps DEFAULT_SPECS as a contiguous prefix -- it is the first
+    # column order keeps the default specs a contiguous prefix -- it is the first
     # "all"-only metric rather than interspersed among the default ones.
     MetricSpec("occ", "OCC%", "DCGM_FI_PROF_SM_OCCUPANCY", 100, 1, "all"),
     MetricSpec("engine", "ENGINE%", "DCGM_FI_PROF_GR_ENGINE_ACTIVE", 100, 1, "all"),
@@ -247,66 +249,67 @@ def values_by_key(specs: List[MetricSpec], by_header: Dict[str, float]
     return {spec.key: by_header.get(spec.header) for spec in specs}
 
 
-# METRICS is the *candidates*; several may offer the same column from different
-# exporters, so its headers are deliberately not unique. Everything below is the
-# resolved view -- one winner per column under the active preference -- and that is
-# what has unique headers and what every consumer reads. See jobscope.source.
-PREFERENCE: Tuple[str, ...] = source.DEFAULT_PREFERENCE
-RESOLVED: source.Resolution = source.resolve(METRICS, PREFERENCE, source.JOBSTATS_COLUMNS)
-
-SPEC_BY_HEADER: Dict[str, MetricSpec] = {spec.header: spec for spec in RESOLVED.specs}
-DEFAULT_SPECS: List[MetricSpec] = [s for s in RESOLVED.specs if s.group == "default"]
-ALL_SPECS: List[MetricSpec] = list(RESOLVED.specs)
-
 # The --ts/--plot_ts/--eff default when --all-metrics is not given: a smaller,
-# curated set than DEFAULT_SPECS (which also carries the GPU memory pair) --
+# curated set than the default specs (which also carry the GPU memory pair) --
 # deliberately narrower, for the time-series family specifically. Named by *column*
 # rather than by key, because which key serves GPU% depends on the source.
 _KEY_SPEC_COLUMNS = ("GPU%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W")
-KEY_SPECS: List[MetricSpec] = [s for s in DEFAULT_SPECS if s.column in _KEY_SPEC_COLUMNS]
-
-# Quantities the jobstats summary in sacct already supplies, which the summary and detail views
-# render from it directly (GPU%, GMEM%, and GPU-MEM). Excluded from those views'
-# DCGM columns so a job does not get two columns for one number -- and for a
-# finished job they would be the very same number, see _prefer_stored.
-#
-# Derived from the resolution rather than written out, so that naming an exporter
-# ahead of the jobstats summary genuinely moves these: under the default preference this is
-# exactly the ("duty", "mem", "memtot") it used to be spelled as.
-JOBSTATS_BACKED_KEYS: Tuple[str, ...] = tuple(
-    s.key for s in RESOLVED.specs if s.column in RESOLVED.from_jobstats)
-GPU_SUMMARY_SPECS: List[MetricSpec] = [s for s in DEFAULT_SPECS
-                                       if s.column not in RESOLVED.from_jobstats]
-DCGM_HEADERS: List[str] = [spec.header for spec in GPU_SUMMARY_SPECS]
-
-# The column headers those keys produce, including the derived GMEM%. Renderers use
-# this to keep a jobstats-backed quantity out of the profiling block.
-DCGM_JOBSTATS_HEADERS: Tuple[str, ...] = tuple(
-    sorted(RESOLVED.from_jobstats, key=lambda h: [s.column for s in RESOLVED.specs].index(h))
-    + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(JOBSTATS_BACKED_KEYS)])
-
-# Position in METRICS, so a resolved selection can be put back into catalog order.
-_CATALOG_ORDER: Dict[str, int] = {spec.key: i for i, spec in enumerate(METRICS)}
-
-# The module globals set_preference() reassigns. Every one is a *view* of the catalog
-# under the current source preference, so `from .dcgm import <name>` elsewhere freezes it
-# at whatever the default preference produced at import time and never sees the rebuild.
-# That is not theoretical: report.py held DCGM_JOBSTATS_HEADERS by value, so
-# `--gpu-source dcgm` resolved GPU% to DCGM, said so on the Source line, and then
-# rendered the nvml value anyway. Read these as ``dcgm.<name>`` at call time;
-# tests/test_source.py enforces it.
-REBUILT_NAMES: Tuple[str, ...] = (
-    "RESOLVED", "SPEC_BY_HEADER", "SPEC_ALIASES", "METRIC_NAMES", "ALL_SPECS",
-    "DEFAULT_SPECS", "KEY_SPECS", "JOBSTATS_BACKED_KEYS", "GPU_SUMMARY_SPECS",
-    "DCGM_HEADERS", "DCGM_JOBSTATS_HEADERS",
-)
 
 
-def _alias_table() -> Dict[str, MetricSpec]:
+@dataclass(frozen=True)
+class GpuCatalog:
+    """The resolved GPU view: one winner per column, and everything derived from it.
+
+    ``metrics`` is the *candidates* -- several may offer the same column from
+    different exporters, so its headers are deliberately not unique. Every other
+    field is the resolved view under ``preference``, which is what has unique headers
+    and what every consumer reads. See :mod:`jobscope.source`.
+
+    One frozen object rather than the dozen module globals this replaces. Each of
+    those was a view of the catalog that ``set_preference()`` reassigned, so
+    ``from .dcgm import DEFAULT_SPECS`` took a binding once at import and never saw
+    the rebuild. That is not theoretical: report.py held ``DCGM_JOBSTATS_HEADERS``
+    that way, so ``--gpu-source dcgm`` resolved GPU% to DCGM, said so on the Source
+    line, and rendered the nvml value anyway. It cost an AST test to police.
+
+    There is nowhere for that bug to live now. No derived name is importable, and a
+    caller that does hold a catalog holds one whole consistent snapshot rather than
+    one stale field of a set that moved on without it.
+    """
+
+    metrics: Tuple[MetricSpec, ...]
+    preference: Tuple[str, ...]
+    resolved: source.Resolution
+    spec_by_header: Mapping[str, MetricSpec]
+    all_specs: Tuple[MetricSpec, ...]
+    default_specs: Tuple[MetricSpec, ...]
+    key_specs: Tuple[MetricSpec, ...]
+    # Quantities the jobstats summary in sacct already supplies, which the summary and
+    # detail views render from it directly (GPU%, GMEM%, and GPU-MEM). Excluded from
+    # those views' DCGM columns so a job does not get two columns for one number --
+    # and for a finished job they would be the very same number, see _prefer_stored.
+    #
+    # Derived from the resolution rather than written out, so that naming an exporter
+    # ahead of the jobstats summary genuinely moves these: under the default
+    # preference this is exactly the ("duty", "mem", "memtot") it was once spelled as.
+    jobstats_backed_keys: Tuple[str, ...]
+    gpu_summary_specs: Tuple[MetricSpec, ...]
+    headers: Tuple[str, ...]
+    # The column headers those keys produce, including the derived GMEM%. Renderers
+    # use this to keep a jobstats-backed quantity out of the profiling block.
+    jobstats_headers: Tuple[str, ...]
+    aliases: Mapping[str, MetricSpec]
+    names: Tuple[str, ...]
+    # Position in ``metrics``, so a resolved selection can be put back in catalog order.
+    order: Mapping[str, int]
+
+
+def _alias_table(metrics: Sequence[MetricSpec],
+                 resolved: source.Resolution) -> Dict[str, MetricSpec]:
     """Every name a config may call a metric by -> its spec.
 
     Derived from the catalog rather than spelled out, so a metric added to
-    ``METRICS`` is nameable immediately. Three forms per spec: its ``key``
+    ``metrics`` is nameable immediately. Three forms per spec: its ``key``
     (``duty``, ``smact``, ``power``), its lowercased ``header`` (``gpu%``,
     ``power_w``), and the header without a trailing ``%`` (``gpu``, ``sm_act``).
     That makes the short lowercase names ``[thresholds]`` already takes -- ``gpu``,
@@ -320,15 +323,15 @@ def _alias_table() -> Dict[str, MetricSpec]:
     claim ``gpu``.
 
     A collision within either kind would silently shadow one spec with another, so
-    it is an error at import rather than a mystery at render: the catalog is ours to
-    keep unambiguous.
+    it is an error when the catalog is built rather than a mystery at render: the
+    catalog is ours to keep unambiguous.
     """
     table: Dict[str, MetricSpec] = {}
-    for spec in METRICS:
+    for spec in metrics:
         if table.setdefault(spec.key, spec) is not spec:
             raise AssertionError("metric key %r is claimed by both %s and %s"
                                  % (spec.key, table[spec.key].header, spec.header))
-    for spec in RESOLVED.specs:
+    for spec in resolved.specs:
         lower = spec.header.lower()
         for alias in (lower, lower.rstrip("%")):
             claimed = table.get(alias)
@@ -340,51 +343,64 @@ def _alias_table() -> Dict[str, MetricSpec]:
     return table
 
 
-SPEC_ALIASES: Dict[str, MetricSpec] = _alias_table()
-# One canonical name per metric, to offer when a config gets one wrong. The header
-# without its "%" where there is one (``gpu``, ``sm_act``) and the key otherwise
-# (``power``, not ``power_w``; ``energy``, not ``energy_kwh``) -- the shorter and
-# more readable of the two forms in each case. Every alias still resolves.
-METRIC_NAMES: Tuple[str, ...] = tuple(
-    spec.header.lower()[:-1] if spec.header.endswith("%") else spec.key
-    for spec in METRICS)
+def _build(metrics: Sequence[MetricSpec],
+           preference: Sequence[str]) -> GpuCatalog:
+    """Resolve ``metrics`` under ``preference``. Pure -- nothing here reads state.
 
-# The built-in catalog, kept so a re-registration starts from it rather than from
-# whatever a previous config added. Site metrics are additive, not cumulative: two
-# loads of the same config must produce one copy of each metric, not two.
-_BUILTIN: Tuple[MetricSpec, ...] = tuple(METRICS)
-
-
-def _rebuild() -> None:
-    """Recompute the resolved view of ``METRICS``.
-
-    Runs after a site metric joins the catalog and after the source preference
-    changes, since both alter which candidate wins a column. A site metric always
-    joins ``group="all"``, so it cannot quietly widen what the default view
+    Called whenever a site metric joins the catalog and whenever the source
+    preference changes, since both alter which candidate wins a column. A site metric
+    always joins ``group="all"``, so it cannot quietly widen what the default view
     collects; a preference can change *where* a default column comes from, which is
     the point of naming one.
     """
-    global SPEC_BY_HEADER, ALL_SPECS, SPEC_ALIASES, METRIC_NAMES, _CATALOG_ORDER
-    global RESOLVED, DEFAULT_SPECS, KEY_SPECS, JOBSTATS_BACKED_KEYS, GPU_SUMMARY_SPECS
-    global DCGM_HEADERS, DCGM_JOBSTATS_HEADERS
-    RESOLVED = source.resolve(METRICS, PREFERENCE, source.JOBSTATS_COLUMNS)
-    order = [s.column for s in RESOLVED.specs]
-    SPEC_BY_HEADER = {spec.header: spec for spec in RESOLVED.specs}
-    ALL_SPECS = list(RESOLVED.specs)
-    DEFAULT_SPECS = [s for s in RESOLVED.specs if s.group == "default"]
-    KEY_SPECS = [s for s in DEFAULT_SPECS if s.column in _KEY_SPEC_COLUMNS]
-    JOBSTATS_BACKED_KEYS = tuple(s.key for s in RESOLVED.specs
-                             if s.column in RESOLVED.from_jobstats)
-    GPU_SUMMARY_SPECS = [s for s in DEFAULT_SPECS if s.column not in RESOLVED.from_jobstats]
-    DCGM_HEADERS = [spec.header for spec in GPU_SUMMARY_SPECS]
-    DCGM_JOBSTATS_HEADERS = tuple(
-        sorted(RESOLVED.from_jobstats, key=order.index)
-        + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(JOBSTATS_BACKED_KEYS)])
-    SPEC_ALIASES = _alias_table()
-    METRIC_NAMES = tuple(
-        spec.header.lower()[:-1] if spec.header.endswith("%") else spec.key
-        for spec in RESOLVED.specs)
-    _CATALOG_ORDER = {spec.key: i for i, spec in enumerate(METRICS)}
+    metrics = tuple(metrics)
+    preference = tuple(preference)
+    resolved = source.resolve(metrics, preference, source.JOBSTATS_COLUMNS)
+    order = [s.column for s in resolved.specs]
+    default_specs = tuple(s for s in resolved.specs if s.group == "default")
+    backed_keys = tuple(s.key for s in resolved.specs
+                        if s.column in resolved.from_jobstats)
+    summary_specs = tuple(s for s in default_specs
+                          if s.column not in resolved.from_jobstats)
+    return GpuCatalog(
+        metrics=metrics,
+        preference=preference,
+        resolved=resolved,
+        spec_by_header={spec.header: spec for spec in resolved.specs},
+        all_specs=tuple(resolved.specs),
+        default_specs=default_specs,
+        key_specs=tuple(s for s in default_specs if s.column in _KEY_SPEC_COLUMNS),
+        jobstats_backed_keys=backed_keys,
+        gpu_summary_specs=summary_specs,
+        headers=tuple(spec.header for spec in summary_specs),
+        jobstats_headers=tuple(
+            sorted(resolved.from_jobstats, key=order.index)
+            + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(backed_keys)]),
+        aliases=_alias_table(metrics, resolved),
+        # One canonical name per metric, to offer when a config gets one wrong. The
+        # header without its "%" where there is one (``gpu``, ``sm_act``) and the key
+        # otherwise (``power``, not ``power_w``) -- the shorter and more readable of
+        # the two forms in each case. Every alias still resolves.
+        names=tuple(spec.header.lower()[:-1] if spec.header.endswith("%") else spec.key
+                    for spec in resolved.specs),
+        order={spec.key: i for i, spec in enumerate(metrics)},
+    )
+
+
+# ``METRICS`` above is the built-in declaration and is never mutated, so a
+# re-registration always starts from a pristine set: site metrics are additive, not
+# cumulative, and two loads of the same config must produce one copy of each metric.
+_ACTIVE: GpuCatalog = _build(METRICS, source.DEFAULT_PREFERENCE)
+
+
+def catalog() -> GpuCatalog:
+    """The GPU catalog in force. Read it at call time, never hold the fields.
+
+    Holding the whole object is fine -- it is frozen, and a snapshot of a consistent
+    resolution. Holding one of its fields across a :func:`set_preference` is what the
+    dozen module globals this replaced made easy and this makes pointless.
+    """
+    return _ACTIVE
 
 
 def default_view(view: str, family: Optional[str] = None) -> List[MetricSpec]:
@@ -400,9 +416,10 @@ def default_view(view: str, family: Optional[str] = None) -> List[MetricSpec]:
     that turns out to publish none of a view's metrics still yields a report rather
     than an empty table.
     """
-    pool = {"summary": DEFAULT_SPECS, "timeseries": KEY_SPECS,
-            "extended": ALL_SPECS}[view]
-    family = family or RESOLVED.leading_exporter()
+    active = catalog()
+    pool = {"summary": active.default_specs, "timeseries": active.key_specs,
+            "extended": active.all_specs}[view]
+    family = family or active.resolved.leading_exporter()
     own = [spec for spec in pool if spec.family == family]
     return own or list(pool)
 
@@ -412,18 +429,18 @@ def set_preference(preference: Tuple[str, ...]) -> None:
 
     Separate from :func:`register` because the two are independent: a site names its
     series in ``[metrics.<family>]``, and names its order in ``[gpu] source``. Both
-    end in ``_rebuild``, and both have to run before :func:`jobscope.metrics.rebuild`
-    so the cross-family role view sees the same winners.
+    rebuild the catalog, and both have to run before :func:`jobscope.metrics.rebuild`
+    so the cross-family role view sees the same winners --
+    :func:`jobscope.config.build_catalogs` is what guarantees that order.
     """
-    global PREFERENCE
-    PREFERENCE = tuple(preference)
-    _rebuild()
+    global _ACTIVE
+    _ACTIVE = _build(_ACTIVE.metrics, preference)
 
 
 def register(extra: List[MetricSpec]) -> None:
     """Replace the site-defined additions to the GPU catalog with ``extra``.
 
-    Called once per config load. Resets to the built-ins first, so loading a config
+    Called once per config load, and always from the built-ins, so loading a config
     twice -- which tests and ``jobscope config`` both do -- does not accumulate
     duplicates, and dropping a metric from the file actually drops it.
 
@@ -433,10 +450,15 @@ def register(extra: List[MetricSpec]) -> None:
     :func:`_inherit`. Anything else is appended after the built-ins, so catalog order
     stays stable and site metrics sort last in every view that shows them.
     """
+    global _ACTIVE
+    _ACTIVE = _build(merged_metrics(extra), _ACTIVE.preference)
+
+
+def merged_metrics(extra: Sequence[MetricSpec]) -> Tuple[MetricSpec, ...]:
+    """The built-in catalog with ``extra`` overriding by key and appending the rest."""
     by_key = {spec.key: spec for spec in extra}
-    merged = [_inherit(builtin, by_key.pop(builtin.key, None)) for builtin in _BUILTIN]
-    METRICS[:] = merged + [spec for spec in extra if spec.key in by_key]
-    _rebuild()
+    merged = [_inherit(builtin, by_key.pop(builtin.key, None)) for builtin in METRICS]
+    return tuple(merged + [spec for spec in extra if spec.key in by_key])
 
 
 def _inherit(builtin: MetricSpec, override: Optional[MetricSpec]) -> MetricSpec:
@@ -457,7 +479,7 @@ def _inherit(builtin: MetricSpec, override: Optional[MetricSpec]) -> MetricSpec:
 
 def spec_named(name: str) -> Optional[MetricSpec]:
     """The spec ``name`` refers to, or None when the catalog has no such metric."""
-    return SPEC_ALIASES.get(str(name).strip().lower())
+    return catalog().aliases.get(str(name).strip().lower())
 
 
 def specs_named(names, running: bool = False) -> List[MetricSpec]:
@@ -478,14 +500,14 @@ def specs_named(names, running: bool = False) -> List[MetricSpec]:
     spelling of whichever is live -- asks for one column twice, from two exporters.
     The first named wins, so a list can still say which provider it means.
     """
+    order = catalog().order
     found = {}
     for name in names:
         spec = spec_named(name)
         if spec is None or (running and spec.reducer == "delta"):
             continue
         found.setdefault(spec.column, spec)
-    return [spec for spec in sorted(found.values(),
-                                    key=lambda s: _CATALOG_ORDER[s.key])]
+    return [spec for spec in sorted(found.values(), key=lambda s: order[s.key])]
 
 DESCRIPTIONS: Dict[str, str] = {
     "GPU%": "NVML's duty cycle: the fraction of the run during which at least one kernel was "
@@ -574,12 +596,29 @@ def format_value(spec: MetricSpec, value: Optional[float]) -> str:
 
 def format_by_header(header: str, value: Optional[float]) -> str:
     """Format a metric cell by header (summary/detail callers); see format_value."""
-    return format_value(SPEC_BY_HEADER[header], value)
+    return format_value(catalog().spec_by_header[header], value)
 
 
 def gpu_minor_key(minor):
     """Numeric sort key for a GPU minor number; falls back to string."""
     return int(minor) if str(minor).isdigit() else minor
+
+
+def job_model(per_gpu: dict) -> str:
+    """The GPU model a job ran on, or ``""`` when its cards disagree.
+
+    Slurm allocates from one partition, so in practice a job's GPUs are one model and
+    this is exact. When they are not there is no honest single floor -- the highest
+    over-flags, the lowest under-flags -- so it says nothing and the global value is
+    used instead of an invented rule.
+
+    Here rather than in the renderer that reads it, because ``MODEL_KEY`` is this
+    module's and because :mod:`jobscope.rows` has to answer the same question one
+    layer down.
+    """
+    models = {v.get(MODEL_KEY, "") for v in per_gpu.values() if isinstance(v, dict)}
+    models.discard("")
+    return models.pop() if len(models) == 1 else ""
 
 
 # Where a card's model rides in a per-GPU metric dict. Not a metric, so it is keyed
@@ -1045,14 +1084,15 @@ def _prefer_stored(record: JobRecord, specs: List[MetricSpec],
     with each other by construction.
 
     Only for the columns the jobstats summary actually *wins*. Naming an exporter ahead of it --
-    ``--gpu-source dcgm`` -- takes those columns out of ``RESOLVED.from_jobstats``, and
+    ``--gpu-source dcgm`` -- takes those columns out of ``resolved.from_jobstats``, and
     then the queried value is the answer and must not be overwritten by a stored one
     measured somewhere else. That is what makes the flag do what it says on a
     finished job rather than being quietly ignored.
     """
+    from_jobstats = catalog().resolved.from_jobstats
     by_column = {spec.column: spec for spec in specs}
     for field, column, agg in _STORED_FIELDS:
-        if column not in RESOLVED.from_jobstats:
+        if column not in from_jobstats:
             continue
         spec = by_column.get(column)
         if spec is None:

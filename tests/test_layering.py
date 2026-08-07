@@ -13,13 +13,19 @@ Layers, bottom up:
     prometheus                     the client
     summary, cpu, nvml, dcgm,         collectors -- turn a source into numbers
       slurm, running, timeseries,
-      extra_metric, job_ave_stats
+      extra_metric, job_ave_stats,
+      rows
     report, plot                   render -- turn numbers into text
     select, cli, probe             orchestration -- wire the above together
 
-Only two rules are enforced, because only two of them have ever been broken:
-a collector must not reach up into rendering, and rendering must not reach down
-into the client. The rest of the ordering is documentation.
+``rows`` is the newest and sits deliberately at the top of the collectors: it is what
+turns a scheduler record and a batch of exporter readings into the ``models.JobRow`` a
+renderer places. Rendering used to do that itself.
+
+Three rules are enforced, because only these three have ever been broken: a collector
+must not reach up into rendering, rendering must not reach down into the client, and
+rendering must not reach down into the scheduler's model or the storage format. The
+rest of the ordering is documentation.
 """
 
 import ast
@@ -32,7 +38,7 @@ SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "jobscope"
 LEAVES = {"errors", "models"}
 POLICY = {"config", "metrics", "job_eff", "source"}
 COLLECTORS = {"jobstats", "cpu", "nvml", "dcgm", "slurm", "running", "timeseries",
-              "extra_metric", "job_ave_stats"}
+              "extra_metric", "job_ave_stats", "rows"}
 RENDER = {"report", "plot"}
 
 # Empty, and the test below is what keeps it that way. report.py used to query inside
@@ -91,6 +97,36 @@ def test_no_render_module_collects():
     """The exemption this test guards is empty; it must stay that way."""
     offenders = {s for s in RENDER if "prometheus" in imports_of(s)}
     assert offenders == COLLECTS_WHILE_RENDERING == set()
+
+
+# What a renderer must not name: how a job is *stored* and how the scheduler *models*
+# it. Two formatters are allowed through -- jobstats.bytes_to_gb and the per-unit
+# header list -- because they are presentation, and the precision they encode belongs
+# beside the shape that defines it.
+STORAGE_NAMES = {"JobRecord", "Selection", "jobstats_metrics", "jobstats_detail",
+                 "jobstats_per_node", "jobstats_capacity", "decode_admin_comment",
+                 "narrow_stats", "gpu_ids_in", "gpu_count", "nodes_in"}
+
+
+@pytest.mark.parametrize("stem", sorted(RENDER))
+def test_the_render_layer_does_not_name_the_scheduler_or_the_storage(stem):
+    """A renderer takes rows, not records.
+
+    report.py used to call jobstats_metrics() on the gzipped base64 blob sacct stores
+    in AdminComment, mid-render, once per job -- so a test of a column or a footer had
+    to build one, and "how a job is stored" could not change without touching the
+    renderers. jobscope.rows does that now and the renderers place cells.
+
+    Names rather than modules, because the two formatters report.py still imports from
+    jobstats are fine: it is the *model* and the *decoding* that must not be here.
+    """
+    named = set()
+    for node in ast.walk(ast.parse((SRC / (stem + ".py")).read_text())):
+        if isinstance(node, ast.ImportFrom) and node.level == 1:
+            named |= {a.name for a in node.names}
+    assert not named & STORAGE_NAMES, (
+        "%s.py names %s -- take a models.JobRow instead"
+        % (stem, ", ".join(sorted(named & STORAGE_NAMES))))
 
 
 @pytest.mark.parametrize("stem", sorted(LEAVES))

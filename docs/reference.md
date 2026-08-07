@@ -181,7 +181,8 @@ name a running one, so it stays offered there. Nothing is hidden for being merel
 uninteresting, and the footer names every one that went.
 
 `jobscope --help` has no flags to narrow against, so it lists the modes and utilities
-and points at where the reporting flags live (`jobscope running -h`). `--help-all` is the
+and points at where the reporting flags live (`jobscope finished -h`, or `-h` after any
+command) and at `jobscope probe -h`. `--help-all` is the
 way back to all thirty, with their full text, from anywhere.
 
 

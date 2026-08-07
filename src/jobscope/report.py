@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from . import dcgm, metrics
+from .models import JobRow, ReportContext
+from .rows import overrides_for
 from .config import (
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
@@ -23,14 +25,10 @@ from .config import (
     Thresholds,
     parse_duration,
 )
-from .jobstats import (
-    GIB,
-    bytes_to_gb,
-    jobstats_capacity,
-    jobstats_detail,
-    jobstats_metrics,
-    jobstats_per_node,
-)
+# Two formatters, a constant and the per-unit column list -- not the storage helpers:
+# turning a stored summary into rows is jobscope.rows' job now, and
+# tests/test_layering.py holds it there.
+from .jobstats import GIB, UNIT_HEADERS, bytes_to_gb
 
 # A job running longer than this, and still on a Wasteful row, is the expensive
 # kind of waste: a short bad job costs little, whereas hours of idle hardware do
@@ -38,10 +36,10 @@ from .jobstats import (
 LONG_RUNNING = parse_duration(DEFAULT_LONG_RUNNING)
 from .cpu import CgroupSpec, chosen_specs
 
-# NOTE: names dcgm.set_preference() reassigns -- see dcgm.REBUILT_NAMES -- must NOT be
-# imported by value here. Such a binding is taken once at import and never sees the
-# rebuild, so --gpu-source would resolve one source, say so on the Source line, and then
-# render another's numbers. Read them as dcgm.X at call time; tests/test_source.py checks.
+# Functions and constants only: everything the source preference can move now lives on
+# the frozen dcgm.catalog(), read at call time. This import used to be able to take a
+# resolved view by value, which is how --gpu-source once resolved one source, said so on
+# the Source line, and rendered another's numbers.
 from .dcgm import (
     DESCRIPTIONS,
     MODEL_KEY,
@@ -52,6 +50,7 @@ from .dcgm import (
     format_by_header,
     format_number,
     gpu_minor_key,
+    job_model,
 )
 from .errors import JobscopeError
 from .job_eff import (
@@ -70,7 +69,6 @@ from .job_eff import (
     unceilinged,
 )
 from .running import Gpu, RunningJob, build_columns, job_sort_key
-from .slurm import JobRecord, Selection, format_window
 
 
 @dataclass(frozen=True)
@@ -134,9 +132,10 @@ def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
     is what lets `--all-metrics` widen the table without becoming a different view.
     The fixed columns are dropped from the block whatever source serves them -- one
     number deserves one column, and GPU%/GMEM% already have theirs. Deliberately NOT
-    ``dcgm.DCGM_JOBSTATS_HEADERS``: that set shrinks under ``--gpu-source dcgm`` (GPU%
-    stops being jobstats-backed), which would give GPU% a second column beside its fixed
-    one. Which source *fills* the fixed cell is settled in :meth:`SummaryRenderer.add`.
+    ``dcgm.catalog().jobstats_headers``: that set shrinks under ``--gpu-source dcgm``
+    (GPU% stops being jobstats-backed), which would give GPU% a second column beside its
+    fixed one. Which source *fills* the fixed cell is settled in
+    :meth:`SummaryRenderer.add`.
     """
     if specs is None:
         return list(SUMMARY_COLUMNS)
@@ -152,10 +151,6 @@ def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
     return out
 
 
-# The cells jobstats_detail / jobstats_per_node return, in their order: (node, unit, cpu%,
-# cpu-mem, gpu%, gpu-mem, gmem%). Genuinely positional, because both tuples are a fixed 7
-# -- see jobstats.py. The *profiling* block after it is not; see detail_columns().
-#
 # GPU and NODE are the two levels a detail row can be about, and they differ in one cell:
 # cell 1 is a card's minor number at gpu level and the count of cards pooled at node level,
 # because a pooled row has to say what it pooled. Everything else is identical, which is
@@ -167,36 +162,50 @@ JOB_LEVEL = "job"
 _UNIT_COLUMN = {GPU_LEVEL: Column("GPU", "{:<4}", "gpu", 1),
                 NODE_LEVEL: Column("#GPU", "{:<5}", "gpu", 1)}
 
-# Elapsed sits at row cell 7 -- before the profiling block -- while printing *last*.
-# Column.index decouples the two, and using it here is what keeps this cell's position
-# from depending on how many profiling columns there are. Appending it after the block
-# instead would make its index vary with --gpu-source, which is precisely the bug
-# detail_columns() exists to prevent. Group "id", so it shows in every view.
-# The cells jobstats_detail / jobstats_per_node produce, before the renderer appends
-# elapsed and the profiling block -- so elapsed's own cell is the one after them.
-_JOBSTATS_CELLS = 7
+# How each prefix cell is displayed. The *which* and the *order* come from
+# jobstats.UNIT_HEADERS -- the columns a stored summary can answer per unit -- so the row
+# builder and this column list cannot drift; only the width and the colour group are
+# stated here, because those are presentation and the row builder has no opinion on them.
+#
+# This set is fixed by the jobstats blob, not by jobscope's config: a site cannot add a
+# prefix column the way it adds a profiling one, because there is no per-node field in
+# the stored summary for it to come from. A site metric measured by an exporter reaches
+# the detail view through the profiling block instead -- see detail_gpu_headers.
+_PREFIX_DISPLAY = {
+    "CPU%":     ("{:<7}", "cpu"),
+    "CPU-MEM":  ("{:<16}", "cpu"),
+    "GPU%":     ("{:<7}", "gpu"),
+    "GPU-MEM":  ("{:<16}", "gpu"),
+    "GMEM%":    ("{:<7}", "gpu"),
+}
+
+# Positions in a detail row, named rather than repeated as literals. The two identity
+# cells come before the measured ones at both levels.
+_NODE_INDEX = 0
+_GPU_INDEX = 1
+_FIRST_CELL = 2
+
+# Elapsed sits at the cell after the prefix -- before the profiling block -- while
+# printing *last*. Column.index decouples the two, and using it here is what keeps this
+# cell's position from depending on how many profiling columns there are. Appending it
+# after the block instead would make its index vary with --gpu-source, which is precisely
+# the bug detail_columns() exists to prevent. Group "id", so it shows in every view.
+_JOBSTATS_CELLS = _FIRST_CELL + len(UNIT_HEADERS)
 _RUNTIME_INDEX = _JOBSTATS_CELLS
 _RUNTIME_COLUMN = Column("RUNTIME", "{:<12}", "id", _RUNTIME_INDEX)
 
 
 def detail_prefix(level: str = GPU_LEVEL) -> Tuple[Column, ...]:
-    """The identity and jobstats cells for ``level`` -- cells 0-6, without elapsed.
+    """The identity and jobstats cells for ``level``, without elapsed.
 
     Elapsed is not here because it is not a jobstats cell: :func:`detail_columns` appends
     it after the profiling block, which is where it prints.
     """
-    return (Column("NODE", "{:<16}", "id", 0),
-            _UNIT_COLUMN.get(level, _UNIT_COLUMN[GPU_LEVEL]),
-            Column("CPU%", "{:<7}", "cpu", 2),
-            Column("CPU-MEM", "{:<16}", "cpu", 3),
-            Column("GPU%", "{:<7}", "gpu", 4),
-            Column("GPU-MEM", "{:<16}", "gpu", 5),
-            Column("GMEM%", "{:<7}", "gpu", 6))
+    return ((Column("NODE", "{:<16}", "id", _NODE_INDEX),
+             _UNIT_COLUMN.get(level, _UNIT_COLUMN[GPU_LEVEL]))
+            + tuple(Column(header, *_PREFIX_DISPLAY[header], _FIRST_CELL + i)
+                    for i, header in enumerate(UNIT_HEADERS)))
 
-
-# Positions in a detail row, named rather than repeated as literals.
-_NODE_INDEX = 0
-_GPU_INDEX = 1
 
 # Where each prefix cell sits, read off the columns rather than restated, so a column
 # that moves takes its index with it. Used to fill a cell from an exporter by *name*.
@@ -210,12 +219,12 @@ def detail_gpu_headers() -> List[str]:
 
     One source of truth for two callers -- :func:`detail_columns`, which says where each
     cell goes, and :func:`extend_detail_row`, which puts it there. They used to be a
-    hand-written list of four and a live read of ``dcgm.DCGM_HEADERS``, and the two
+    hand-written list of four and a live read of the catalog's headers, and the two
     disagreed the moment anything moved a column off the jobstats summary.
 
-    ``DCGM_HEADERS`` is not "the dcgm columns": it is the default-group columns that
-    still need a query, i.e. whatever the summary did *not* win (see dcgm.py). So it
-    **grows** as an exporter is promoted -- four under the default order, five under
+    ``catalog().headers`` is not "the dcgm columns": it is the default-group columns
+    that still need a query, i.e. whatever the summary did *not* win (see dcgm.py). So
+    it **grows** as an exporter is promoted -- four under the default order, five under
     ``--gpu-source dcgm`` once GPU% stops being summary-backed, seven under ``nvml``
     which also takes the GPU-memory pair. A fixed four columns fed by a variable-length
     block printed every value one slot to the left of its own header and dropped the
@@ -227,12 +236,8 @@ def detail_gpu_headers() -> List[str]:
     one column. Which source *fills* those prefix cells is a separate question this does
     not answer -- they come from the stored summary either way (see
     :func:`extend_detail_row`).
-
-    Read through the module rather than by value: ``set_preference`` rebinds
-    ``DCGM_HEADERS``, so a ``from``-import would freeze whatever the default order
-    produced at import time -- see ``dcgm.REBUILT_NAMES`` and ``tests/test_source.py``.
     """
-    return [h for h in dcgm.DCGM_HEADERS if h not in FIXED_POSITION_HEADERS]
+    return [h for h in dcgm.catalog().headers if h not in FIXED_POSITION_HEADERS]
 
 
 def detail_columns(level: str = GPU_LEVEL) -> List[Column]:
@@ -394,19 +399,6 @@ def cell_value(cell) -> Optional[float]:
         return float(str(cell).rstrip("%"))
     except (TypeError, ValueError):      # "-", "", a hostname, "76.1GB/1400GB"
         return None
-
-
-def job_model(per_gpu: dict) -> str:
-    """The GPU model a job ran on, or ``""`` when its cards disagree.
-
-    Slurm allocates from one partition, so in practice a job's GPUs are one model and
-    this is exact. When they are not there is no honest single floor -- the highest
-    over-flags, the lowest under-flags -- so it says nothing and the global value is
-    used instead of an invented rule.
-    """
-    models = {v.get(MODEL_KEY, "") for v in per_gpu.values() if isinstance(v, dict)}
-    models.discard("")
-    return models.pop() if len(models) == 1 else ""
 
 
 # The built-in edges, for the callers that need *some* table to read numbers out of
@@ -586,21 +578,7 @@ def narrowing_pairs(nodename: Optional[str], gpu_ids) -> List[Tuple[str, str]]:
     return pairs
 
 
-def any_unfinished(records: Dict[str, JobRecord]) -> bool:
-    """Whether any record has not ended, so its ``[start, end]`` window is still filling.
-
-    The one place the question is asked of a set rather than a record. Two answers depend
-    on it and must not diverge: the ``Sampled`` line's span (:func:`sampled_pair`) and
-    whether the summary may weight by resource-time
-    (:attr:`RenderOptions.time_weighted`). Conservative on a mixed selection -- one
-    running job among finished ones means not every value is a settled runtime mean, and
-    a table cannot be half weighted by hours.
-    """
-    return any(record.unfinished for record in records.values())
-
-
-def context_pairs(selection: Selection, desc: str,
-                  records: Dict[str, JobRecord],
+def context_pairs(context: ReportContext,
                   specs: Optional[List] = None,
                   host_specs: Optional[List] = None,
                   average: bool = False) -> List[Tuple[str, str]]:
@@ -608,34 +586,24 @@ def context_pairs(selection: Selection, desc: str,
 
     With explicit JOBIDs the -u/-A/-p filters are bypassed, so show the jobs'
     actual owner(s) rather than the (misleading) default user, and drop the filter
-    lines.
+    lines. :func:`jobscope.rows.build_context` is what decides which case this is.
     """
-    if selection.jobids:
-        owners = sorted({r.user for r in records.values() if r.user})
-        user_val = ", ".join(owners) if owners else "(explicit job IDs)"
-        pairs = [("User", user_val), ("Select", desc)]
-        # Only an explicit-JOBID selection can name a job that has not ended, and it is
-        # the one case with real records in hand to ask -- a window selection is
-        # finished by construction, so it takes the branch below.
-        unfinished = any_unfinished(records)
+    if context.explicit_jobids:
+        user_val = ", ".join(context.owners) or "(explicit job IDs)"
+        pairs = [("User", user_val), ("Select", context.desc)]
         return (pairs + source_pair(specs, host_specs=host_specs)
-                + sampled_pair(specs, unfinished, average, host_specs))
-    # -a/--all-users leaves `user` unset, so say so rather than printing None.
-    pairs = [("User", selection.user or "(all users)")]
-    if selection.account:
-        pairs.append(("Account", selection.account))
-    if selection.partition:
-        pairs.append(("Partition", selection.partition))
-    pairs.append(("Select", desc))
-    if selection.days is not None or selection.lastn is not None:
-        # The dates behind "last 1 day" or "last 20 jobs", which the Select line does
-        # not show: a -D window is computed from the clock, and a bare -N reaches back
-        # the default lookback, so a reader could not otherwise tell what was scanned.
-        # Not for an explicit -S/-E, where the Select line already is the window.
-        pairs.append(("Window", format_window(*selection.window())))
+                + sampled_pair(specs, context.unfinished, average, host_specs))
+    pairs = [("User", context.user)]
+    if context.account:
+        pairs.append(("Account", context.account))
+    if context.partition:
+        pairs.append(("Partition", context.partition))
+    pairs.append(("Select", context.desc))
+    if context.window:
+        pairs.append(("Window", context.window))
     # A window selection holds only finished jobs, so the fold is unconditional there.
     return (pairs + source_pair(specs, host_specs=host_specs)
-            + sampled_pair(specs, False, average, host_specs))
+            + sampled_pair(specs, context.unfinished, average, host_specs))
 
 
 def gpu_source_line(specs: Optional[List] = None, have_jobstats: bool = True,
@@ -673,12 +641,13 @@ def gpu_source_line(specs: Optional[List] = None, have_jobstats: bool = True,
     if not specs and not host_specs:
         # --cpu with no host list either: nothing collected, so nothing to attribute.
         return ""
+    host, gpu = cpu.catalog(), dcgm.catalog()
     per_source: Dict[str, List[str]] = {}
     for resolution, wanted in (
-            (cpu.RESOLVED if have_jobstats else source_module.resolve(
-                cpu.CANDIDATES, cpu.PREFERENCE), host_specs),
-            (dcgm.RESOLVED if have_jobstats else source_module.resolve(
-                dcgm.METRICS, dcgm.PREFERENCE), specs)):
+            (host.resolved if have_jobstats else source_module.resolve(
+                host.candidates, host.preference), host_specs),
+            (gpu.resolved if have_jobstats else source_module.resolve(
+                gpu.metrics, gpu.preference), specs)):
         if not wanted:
             continue
         shown = {spec.column for spec in wanted}
@@ -840,7 +809,7 @@ def exporter_prefix_cells(values) -> Dict[str, str]:
     ``[host] source`` rather than to this preference, and no per-GPU map carries them.
     """
     out: Dict[str, str] = {}
-    from_jobstats = dcgm.RESOLVED.from_jobstats
+    from_jobstats = dcgm.catalog().resolved.from_jobstats
     duty = values.get("GPU%")
     if "GPU%" not in from_jobstats and duty is not None:
         # The column's own precision, plus the sign the prefix cells carry. jobstats_detail
@@ -860,16 +829,23 @@ def exporter_prefix_cells(values) -> Dict[str, str]:
     return out
 
 
-def detail_row_cells(row, values, runtime: str = "-") -> tuple:
-    """One rendered row: the jobstats cells, elapsed at 7, then the profiling block.
+def detail_row_cells(unit, values, runtime: str = "-") -> tuple:
+    """One rendered row: the prefix cells, elapsed at 7, then the profiling block.
 
     Elapsed goes in at a *fixed* cell, which is what lets its column index be a constant
     rather than a function of how wide the block is -- see :func:`detail_columns`. The
     block therefore starts at 8, not 7.
+
+    The prefix is laid out from :func:`detail_prefix`'s own Columns rather than from the
+    order a ``UnitRow`` happens to iterate in, so the cells follow the headers instead of
+    the two having to be kept in step by hand.
     """
-    cells = list(row)[:_JOBSTATS_CELLS]
-    for header, cell in exporter_prefix_cells(values).items():
-        cells[_PREFIX_INDEX[header]] = cell
+    by_header = dict(unit.cells)
+    by_header.update(exporter_prefix_cells(values))
+    cells = [""] * _JOBSTATS_CELLS
+    for col in detail_prefix(GPU_LEVEL):
+        cells[col.index] = by_header.get(col.header, "-")
+    cells[_NODE_INDEX], cells[_GPU_INDEX] = unit.node, unit.unit
     cells.append(runtime)
     return tuple(cells) + tuple(format_by_header(h, values.get(h))
                                 for h in detail_gpu_headers())
@@ -1330,7 +1306,7 @@ class SummaryRenderer:
             print(header_line, file=self.out)
             print("-" * len(header_line), file=self.out)
 
-    def _weights(self, record: Optional[JobRecord], gpus: int) -> Dict[str, float]:
+    def _weights(self, job: JobRow) -> Dict[str, float]:
         """How much this job counts toward the weighted mean, per column family.
 
         Each weight is the amount of the resource the column measures: cores for
@@ -1349,13 +1325,13 @@ class SummaryRenderer:
         out of the weighted row (and counted in ``unweighted``) rather than silently
         given a weight of zero or one.
         """
-        if record is None:
+        if not job.found:
             return {"cpu": 0.0, "mem": 0.0, "gpu": 0.0, "gmem": 0.0}
-        cores, memory = jobstats_capacity(record.stats)
+        cores, memory, gpus = job.cores, job.memory, job.gpus
         if not self.options.time_weighted:
             return {"cpu": float(cores), "mem": float(memory),
                     "gpu": float(gpus), "gmem": float(gpus)}
-        seconds = record.duration
+        seconds = job.duration
         if not seconds or seconds <= 0:
             self.unweighted += 1
             return {"cpu": 0.0, "mem": 0.0, "gpu": 0.0, "gmem": 0.0}
@@ -1446,46 +1422,35 @@ class SummaryRenderer:
             parts.append("%s < %g%s" % (_worst_slug(header), cutoff, unit))
         return ", ".join(parts)
 
-    def add(self, jobids: List[str], records: Dict[str, JobRecord],
-            dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
+    def add(self, rows: List[JobRow]) -> None:
         self._start()
         options = self.options
         do_dcgm = options.show_dcgm
         if options.view == "gpu":
-            jobids = [j for j in jobids if j in records and records[j].gpus]
-        self.count += len(jobids)
-        for jid in jobids:
-            record = records.get(jid)
+            rows = [r for r in rows if r.gpus]
+        self.count += len(rows)
+        for job in rows:
             row = {
-                "JOBID": jid,
-                "USER": record.user if record else "?",
-                "STATE": record.state if record else "?",
-                "NODE": record.nodes if record else "-",
-                "#GPU": str(record.gpus) if record and record.gpus else "-",
-                "RUNTIME": record.runtime if record else "-",
+                "JOBID": job.jobid,
+                "USER": job.user,
+                "STATE": job.state,
+                "NODE": job.nodes,
+                "#GPU": str(job.gpus) if job.gpus else "-",
+                "RUNTIME": job.runtime,
             }
-            gpus = record.gpus if record else 0
-            weights = self._weights(record, gpus)
-            job_metrics = jobstats_metrics(record.stats if record else None, gpus)
+            weights = self._weights(job)
             # Read before the summary block, not inside the DCGM one below: a column the
             # summary does not own has to be overridden *before* it is tallied, or the row
-            # would show the measured value and the footer average the summary's.
-            measured = dcgm_data.get(jid, ({}, {}))[0] if do_dcgm else {}
-            if not job_metrics.by_header:
+            # would show the measured value and the footer average the summary's. Which
+            # columns those are is rows.overrides_for's to decide, not a renderer's.
+            measured = overrides_for(job) if do_dcgm else {}
+            if not job.has_summary:
                 for col in JOBSTATS_HEADERS:
                     row[col] = "-"
             else:
                 for key, col in JOBSTATS_KEYS:
-                    value = job_metrics.value(col)
-                    # An exporter named ahead of the summary (--gpu-source dcgm) owns this
-                    # column, so the queried value is the answer. _prefer_stored applies
-                    # the same rule inside dcgm_for_job, but cannot settle it for a running
-                    # job: that summary is synthesized *after* the queries run, so it would
-                    # win by arriving later. Restricted to columns with a resolved spec,
-                    # which excludes the derived GMEM% -- its inputs stay jobstats-backed.
-                    if (col in dcgm.SPEC_BY_HEADER
-                            and col not in dcgm.RESOLVED.from_jobstats
-                            and measured.get(col) is not None):
+                    value = job.metrics.value(col)
+                    if col in measured:
                         value = measured[col]
                         # The block's own formatter, so an overridden cell reads exactly as
                         # it would in the profiling block (GPU% has no decimals).
@@ -1498,15 +1463,14 @@ class SummaryRenderer:
                         if weights[key]:
                             self.weighted[key][0] += value * weights[key]
                             self.weighted[key][1] += weights[key]
-                        if key == "gpu" and gpus:
+                        if key == "gpu" and job.gpus:
                             # Counted here rather than per allocation, so the footer
                             # total matches the GPUs actually behind the GPU figures.
-                            self.gpu_total += gpus
-                            self.gpu_counts.add(gpus)
+                            self.gpu_total += job.gpus
+                            self.gpu_counts.add(job.gpus)
             if do_dcgm:
-                overall = dcgm_data.get(jid, ({}, {}))[0]
                 for header in self.dcgm_headers:
-                    value = overall.get(header)
+                    value = job.measured.get(header)
                     row[header] = format_by_header(header, value)
                     if value is not None:
                         self.sums_dcgm[header][0] += value
@@ -1519,7 +1483,7 @@ class SummaryRenderer:
             # One value map for every graded metric, built once both the jobstats summary and
             # the DCGM values are in hand, and shared by the tallies and the waste
             # bookkeeping so the two cannot disagree about what a job scored.
-            if not job_metrics.by_header:
+            if not job.has_summary:
                 # No stored summary, so the job is only half measured: it has DCGM
                 # numbers but no CPU%/MEM%/GPU%/GMEM%. Feeding it to the DCGM tallies
                 # alone made their denominators disagree with the jobstats summary ones -- 117
@@ -1530,21 +1494,19 @@ class SummaryRenderer:
             else:
                 values = {}
                 for header in self.tallies:
-                    value = _jobstats_value(job_metrics, header)
+                    value = _jobstats_value(job.metrics, header)
                     if value is None and header in self.dcgm_headers and do_dcgm:
-                        value = dcgm_data.get(jid, ({}, {}))[0].get(header)
+                        value = job.measured.get(header)
                     if value is not None:
                         values[header] = value
-                model = job_model(JobGpuData(*dcgm_data.get(jid, ())).per_gpu)
-                self.models[jid] = model
-                self._last_values, self._last_model = values, model
+                self.models[job.jobid] = job.model
+                self._last_values, self._last_model = values, job.model
                 for header, tally in self.tallies.items():
-                    tally.add(jid, row["USER"], values.get(header),
-                              weights[tally.weight_key], row["RUNTIME"],
-                              record.duration if record else None, model=model)
-                self._note_waste(jid, row["USER"], values, weights,
-                                 row["RUNTIME"], record.duration if record else None,
-                                 model=model)
+                    tally.add(job.jobid, job.user, values.get(header),
+                              weights[tally.weight_key], job.runtime,
+                              job.duration, model=job.model)
+                self._note_waste(job.jobid, job.user, values, weights,
+                                 job.runtime, job.duration, model=job.model)
             if self.footer_only:
                 continue            # the caller printed its own, at its own granularity
             if options.csv:
@@ -2071,69 +2033,61 @@ class DetailRenderer:
                 print(fmt_context(label, value), file=self.out)
             print(file=self.out)
 
-    def _rows_for(self, jid: str, record: Optional[JobRecord],
-                  dcgm_data: Dict[str, Tuple[dict, dict]]):
-        stats = record.stats if record else None
+    def _rows_for(self, job: JobRow):
         node_level = self.level == NODE_LEVEL
-        rows = jobstats_per_node(stats) if node_level else jobstats_detail(stats)
+        units = job.node_rows if node_level else job.gpu_rows
         # Elapsed is per job, so it repeats down the block -- accepted for the reason
         # CPU% already repeats: a column is the only way a CSV reader gets it, and the
         # detail CSV carries JOBID and nothing else about the job.
-        runtime = record.runtime if record else "-"
-        # Widened through JobGpuData's field defaults, so a short tuple needs no arity
-        # guard and the fields can be read by the names they were given for.
-        found = JobGpuData(*dcgm_data.get(jid, ()))
         # Keyed by node at node level and by (node, minor) at gpu level, so the lookup key
-        # is the row's own first two cells either way.
+        # is the row's own identity either way.
         if not self.options.show_dcgm:
-            def values_for(_row):
+            def values_for(_unit):
                 return {}
         elif node_level:
-            def values_for(row):
-                return found.per_node.get(row[_NODE_INDEX], {})
+            def values_for(unit):
+                return job.per_node.get(unit.node, {})
         else:
-            def values_for(row):
-                return found.per_gpu.get((row[_NODE_INDEX], str(row[_GPU_INDEX])), {})
-        rows = [detail_row_cells(r, values_for(r), runtime) for r in rows]
-        self.nodes_seen.update(row[_NODE_INDEX] for row in rows)
+            def values_for(unit):
+                return job.per_gpu.get((unit.node, str(unit.unit)), {})
         if self.options.nodename:
-            rows = [row for row in rows if row[_NODE_INDEX] == self.options.nodename]
+            units = [u for u in units if u.node == self.options.nodename]
+        self.nodes_seen.update(u.node for u in
+                               (job.node_rows if node_level else job.gpu_rows))
+        rows = [detail_row_cells(u, values_for(u), job.runtime) for u in units]
         self.matched += len(rows)
         return rows
 
-    def add(self, jobids: List[str], records: Dict[str, JobRecord],
-            dcgm_data: Dict[str, Tuple[dict, dict]]) -> None:
+    def add(self, rows: List[JobRow]) -> None:
         self._start()
         options = self.options
         if options.view == "gpu":
-            jobids = [j for j in jobids if j in records and records[j].gpus]
-        self.count += len(jobids)
+            rows = [r for r in rows if r.gpus]
+        self.count += len(rows)
         if options.csv:
-            for jid in jobids:
-                record = records.get(jid)
-                for row in self._rows_for(jid, record, dcgm_data):
-                    self.writer.writerow([jid] + [row[c.index] for c in self.columns])
+            for job in rows:
+                for row in self._rows_for(job):
+                    self.writer.writerow([job.jobid]
+                                         + [row[c.index] for c in self.columns])
         else:
-            for jid in jobids:
-                record = records.get(jid)
-                print("Job %s  [%s]  %s" % (jid, record.state if record else "?",
-                                            record.name if record else "?"), file=self.out)
-                rows = self._rows_for(jid, record, dcgm_data)
-                if not rows:
+            for job in rows:
+                print("Job %s  [%s]  %s" % (job.jobid, job.state, job.name),
+                      file=self.out)
+                unit_rows = self._rows_for(job)
+                if not unit_rows:
                     print("  (no jobstats data)\n", file=self.out)
                     continue
                 header_line = self._header_line()
                 print("  " + header_line, file=self.out)
                 print("  " + "-" * len(header_line), file=self.out)
-                model = job_model(dcgm_data.get(jid, ({}, {}))[1])
-                for row in rows:
-                    print("  " + self._line(row, model), file=self.out)
+                for row in unit_rows:
+                    print("  " + self._line(row, job.model), file=self.out)
                 if self.aggregate is None:
-                    for line in self._unit_charts(rows):
+                    for line in self._unit_charts(unit_rows):
                         print(line, file=self.out)
                 print(file=self.out)
         if self.aggregate is not None:
-            self.aggregate.add(jobids, records, dcgm_data)
+            self.aggregate.add(rows)
         self.out.flush()
 
     def _unit_charts(self, rows) -> List[str]:
@@ -2195,26 +2149,23 @@ class DetailRenderer:
             self.aggregate.finish()
 
 
-def summarize(jobids: List[str], records: Dict[str, JobRecord],
-              dcgm_data: Dict[str, Tuple[dict, dict]], context: List[Tuple[str, str]],
+def summarize(rows: List[JobRow], context: List[Tuple[str, str]],
               options: RenderOptions, out=None) -> None:
     """One row per job: the stored metrics and, under --all-metrics, the profiling columns."""
     renderer = SummaryRenderer(context, options, out)
-    renderer.add(jobids, records, dcgm_data)
+    renderer.add(rows)
     renderer.finish()
 
 
-def detail(jobids: List[str], records: Dict[str, JobRecord],
-           dcgm_data: Dict[str, Tuple[dict, dict]], context: List[Tuple[str, str]],
+def detail(rows: List[JobRow], context: List[Tuple[str, str]],
            options: RenderOptions, out=None) -> None:
     """Per-node / per-GPU breakdown for each job."""
-    renderer = DetailRenderer(context, options, out, total=len(jobids))
-    renderer.add(jobids, records, dcgm_data)
+    renderer = DetailRenderer(context, options, out, total=len(rows))
+    renderer.add(rows)
     renderer.finish()
 
 
-def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
-                dcgm_data: Dict[str, Tuple[dict, dict]], specs: List[MetricSpec],
+def dcgm_report(rows: List[JobRow], specs: List[MetricSpec],
                 context: List[Tuple[str, str]], options: RenderOptions,
                 out=None) -> None:
     """One row per job, with the profiling block taken from ``specs``.
@@ -2224,7 +2175,7 @@ def dcgm_report(jobids: List[str], records: Dict[str, JobRecord],
     ``jobscope detail`` and in the ``--ts`` time series.
     """
     renderer = SummaryRenderer(context, options, out, specs=specs)
-    renderer.add(jobids, records, dcgm_data)
+    renderer.add(rows)
     renderer.finish()
 
 
@@ -2771,7 +2722,7 @@ def describe(out=None) -> None:
           " in sacct (no network);", file=out)
     print("the DCGM columns (gpu view) come from Prometheus. For the full per-GPU", file=out)
     print("GPU catalog, run 'jobscope describe --metrics' (or --all-metrics for all %d).\n"
-          % len(dcgm.ALL_SPECS), file=out)
+          % len(dcgm.catalog().all_specs), file=out)
     for header, source, text in SUMMARY_DESCRIPTIONS:
         print("  %-9s %s" % (header, source), file=out)
         for wrapped in textwrap.wrap(text, width=74):
@@ -2789,7 +2740,7 @@ def describe_dcgm(specs: List[MetricSpec], out=None, extended=None) -> None:
     """
     out = out or sys.stdout
     reducer_name = _REDUCER_NAME
-    widest = list(dcgm.ALL_SPECS if extended is None else extended)
+    widest = list(dcgm.catalog().all_specs if extended is None else extended)
     is_widest = {s.key for s in specs} >= {s.key for s in widest}
     # Hidden specs exist only to feed a derived column, so describe the column
     # instead -- what a reader sees in the table.
@@ -2990,7 +2941,7 @@ def verify_ladder(rows: List[dict], metrics: List[str], options: "RenderOptions"
           "flat-idle is the only", file=out)
     print("    shape that says nothing ever ran. Cutoffs: %s"
           % _cutoff_summary(thresholds, shown), file=out)
-    for source, columns in dcgm.RESOLVED.by_source():
+    for source, columns in dcgm.catalog().resolved.by_source():
         from_here = [c for c in columns if c in metrics]
         if from_here:
             print("  %s <- %s" % (" ".join(from_here), source), file=out)

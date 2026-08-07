@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from jobscope import cli
+from jobscope import cli, dcgm
 from jobscope import select as select_mod
 from jobscope.cli import build_parser, build_request, default_mode, main, resolve_argv
 from jobscope.errors import JobscopeError
@@ -277,8 +277,7 @@ def test_describe_dcgm_ext(capsys):
     main(["describe", "--metrics", "--all-metrics"])
     out = capsys.readouterr().out
     assert "DCGM GPU metrics" in out
-    from jobscope.dcgm import ALL_SPECS
-    assert "%d metrics" % len(ALL_SPECS) in out
+    assert "%d metrics" % len(dcgm.catalog().all_specs) in out
 
 
 def test_config_example(capsys):
@@ -706,7 +705,7 @@ def test_the_weighting_and_the_sampled_line_answer_from_one_fact(monkeypatch, fo
     from jobscope.report import averaging_note, sampled_pair
     argv = ["35244230"] + ([] if folded else ["--instant"])
     weighted = _options_for(argv, monkeypatch, folded=folded).time_weighted
-    sampled = sampled_pair(dcgm_mod.DEFAULT_SPECS, not folded, folded)[0][1]
+    sampled = sampled_pair(dcgm_mod.catalog().default_specs, not folded, folded)[0][1]
     instant = "most recent scrape" in sampled
     assert weighted is not instant, sampled
     assert ("most recent scrape" in averaging_note(weighted)) is instant
@@ -1125,9 +1124,8 @@ def test_cpu_and_dcgm_together_no_longer_conflict(monkeypatch, capsys):
 def test_ts_view_resolution_truth_table(monkeypatch, flags, expect_combined, expect_specs_name):
     """The one genuinely new piece of branching logic in this feature: which of
     cpu-only/gpu-only/combined --ts resolves to, and whether the GPU catalog is
-    KEY_SPECS (curated default) or ALL_SPECS (--all-metrics), for every
+    dcgm.catalog().key_specs (curated default) or dcgm.catalog().all_specs (--all-metrics), for every
     (--cpu, --all-metrics) combination."""
-    from jobscope.dcgm import ALL_SPECS, DEFAULT_SPECS, KEY_SPECS
     captured = {}
 
     def emit(request, cfg, timeout, workers, specs, step, options, out=None):
@@ -1137,8 +1135,10 @@ def test_ts_view_resolution_truth_table(monkeypatch, flags, expect_combined, exp
     monkeypatch.setattr(cli, "emit_timeseries", emit)
     main(["-j", "1", "--ts"] + flags)
     assert captured["combined"] == expect_combined
-    expected = {"key": KEY_SPECS, "all": ALL_SPECS, "default": DEFAULT_SPECS}[expect_specs_name]
-    assert captured["specs"] == expected
+    active = dcgm.catalog()
+    expected = {"key": active.key_specs, "all": active.all_specs,
+                "default": active.default_specs}[expect_specs_name]
+    assert captured["specs"] == list(expected)
 
 
 # --- which of the two band tables each view is graded by ---------------------
@@ -1847,7 +1847,8 @@ def test_the_front_door_says_where_the_reporting_flags_are(capsys):
     """It listed six subcommands and seven examples using -j, -p and --plot_ts, and showed
     none of those flags."""
     body = _help_text(["--help"], capsys)
-    assert "jobscope running -h" in body
+    assert "jobscope probe -h" in body
+    assert "jobscope finished -h" in body
     assert "narrowed to what that command can use" in body
 
 

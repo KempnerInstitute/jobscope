@@ -23,7 +23,7 @@ import re
 import sys
 from typing import List, Optional, Tuple
 
-from . import config, dcgm, plot, probe, report
+from . import config, dcgm, plot, probe, report, rows
 from .errors import JobscopeError
 from .report import (
     DetailRenderer,
@@ -172,9 +172,9 @@ _EPILOG = (
 _TOP_EPILOG = (
     _EPILOG + "\n"
     "\n"
-    "Reporting options are grouped by axis under the mode:\n"
-    "  jobscope running -h        the flags for a live report\n"
-    "  jobscope finished -h       the same, for a past window\n"
+    "Flags live under the command, grouped by axis under a mode:\n"
+    "  jobscope probe -h          check what this cluster exposes before reporting on it\n"
+    "  jobscope finished -h       the flags for a report over a past window\n"
     "  jobscope <anything> -h     narrowed to what that command can use")
 
 
@@ -1188,7 +1188,7 @@ def handle_report(args) -> None:
                 else DetailRenderer(selected.context, options, level=level, specs=specs,
                                     total=selected.total))
     for chunk_ids, records, dcgm_data in selected.chunks:
-        renderer.add(chunk_ids, records, dcgm_data)
+        renderer.add(rows.build_rows(chunk_ids, records, dcgm_data))
     renderer.finish()
 
 
@@ -1300,7 +1300,7 @@ def handle_config(args) -> None:
         specs = getattr(cfg.metrics, view)
         print("  %-11s %s" % (view, " ".join(s.header for s in specs)))
     print("  --per-gpu keeps its own fixed four: %s"
-          % " ".join(dcgm.DCGM_HEADERS))
+          % " ".join(dcgm.catalog().headers))
     print()
     print("[colors]")
     for role in config.COLOR_ROLES:

@@ -1,6 +1,6 @@
 """Tests for the sacct AdminComment blob decoder and metrics."""
 
-from jobscope import models
+from jobscope import jobstats, models
 from jobscope.jobstats import (
     GIB,
     bytes_to_gb,
@@ -91,18 +91,41 @@ def test_a_jobstats_summary_missing_its_memory_allocation_is_unknown_not_zero():
     assert got.value("MEM%") is None
 
 
+def _as_tuple(row):
+    """A UnitRow flattened to what it used to be, so these read as they always did.
+
+    The cells are keyed by header now -- see models.UnitRow -- but the *values* and the
+    print order are unchanged, and stating them positionally here is what says so.
+    """
+    return (row.node, row.unit) + tuple(row.cells[h] for h in jobstats.UNIT_HEADERS)
+
+
 def test_jobstats_detail_gpu_job():
     rows = jobstats_detail(GPU_STATS)
-    assert rows == [
+    assert [_as_tuple(r) for r in rows] == [
         ("node01", "0", "75.0%", "8GB/16GB", "90%", "48GB/80GB", "60.0%"),
         ("node01", "1", "75.0%", "8GB/16GB", "50%", "32GB/80GB", "40.0%"),
     ]
 
 
 def test_jobstats_detail_cpu_only():
-    assert jobstats_detail(CPU_STATS) == [
+    assert [_as_tuple(r) for r in jobstats_detail(CPU_STATS)] == [
         ("node02", "-", "50.0%", "4GB/8GB", "-", "-", "-"),
     ]
+
+
+def test_a_unit_row_is_addressed_by_header_not_by_position():
+    """The point of the change: a renderer asks for CPU% by name.
+
+    The seven-cell tuple this replaced was written down in the storage helpers, in the
+    renderer's _NODE_INDEX/_GPU_INDEX, and in a hand-kept prefix of seven Columns, and a
+    site could reconfigure none of them.
+    """
+    row = jobstats_detail(GPU_STATS)[0]
+    assert row.node == "node01" and row.unit == "0"
+    assert row.cells["GPU%"] == "90%"
+    assert row.cells["CPU-MEM"] == "8GB/16GB"
+    assert set(row.cells) == set(jobstats.UNIT_HEADERS)
 
 
 def test_jobstats_detail_empty():

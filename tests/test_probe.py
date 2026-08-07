@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from jobscope import config as config_module
+from jobscope import config as config_module, dcgm
 from jobscope import probe
 from jobscope.config import redact_url
 from jobscope.slurm import JobRecord
@@ -330,7 +330,7 @@ def test_the_output_is_a_loadable_config(gpu_record, monkeypatch, tmp_path,
     from jobscope import cpu
     assert cpu.spec_named("memsw_used_bytes").denom == "total_memory"
     # And the commented built-in stayed a built-in, not a duplicate.
-    assert len([s for s in dcgm.METRICS if s.key == "smact"]) == 1
+    assert len([s for s in dcgm.catalog().metrics if s.key == "smact"]) == 1
 
 
 def test_no_job_to_probe_yields_a_comment_not_a_crash(gpu_record):

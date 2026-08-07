@@ -23,7 +23,7 @@ itself, so ``denom`` names a summary field.
 """
 
 from dataclasses import dataclass, replace
-from typing import Dict, FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 from . import config, source
 from .jobstats import store_as
@@ -139,50 +139,72 @@ SLURM_SPECS: List[CgroupSpec] = [
                family="slurm", provides="MEM%", roles=frozenset({"memory"})),
 ]
 
-# Which source serves each host column. Only CPU% and MEM% have a choice -- the jobstats summary
-# records them, the cgroup exporter measures them, and Slurm accounts them -- so this
-# is a shorter question than the GPU one, but the same question, answered in the same
-# place. A cluster with no cgroup exporter (which is this one: probe's coverage line
-# reports 2 hosts of 439) resolves them to the jobstats summary, and the report now says so instead
-# of leaving it to be inferred from a dash.
-PREFERENCE: Tuple[str, ...] = source.DEFAULT_HOST_PREFERENCE
-# Every candidate for a host column, which is not the same list as the cgroup catalog:
-# slurm offers CPU%/MEM% without being a Prometheus family. Exposed because anything
-# re-resolving (the running view's provenance line, which asks "and without a jobstats summary?")
-# has to weigh the same candidates or it will name a source that did not win.
-CANDIDATES: List[CgroupSpec] = list(CGROUP_METRICS) + SLURM_SPECS
-RESOLVED: source.Resolution = source.resolve(
-    CANDIDATES, PREFERENCE, source.JOBSTATS_HOST_COLUMNS)
+@dataclass(frozen=True)
+class HostCatalog:
+    """The resolved host view: which source serves CPU%/MEM%, and the cgroup catalog.
 
-SPEC_BY_KEY: Dict[str, CgroupSpec] = {spec.key: spec for spec in CGROUP_METRICS}
-DEFAULT_CGROUP_SPECS: List[CgroupSpec] = [s for s in CGROUP_METRICS
-                                          if s.group == "default"]
-# Every header this module can produce, for the config's typo check.
-CGROUP_HEADERS: Tuple[str, ...] = tuple(spec.header for spec in CGROUP_METRICS)
-CGROUP_NAMES: Tuple[str, ...] = tuple(spec.key for spec in CGROUP_METRICS)
-_ORDER: Dict[str, int] = {spec.key: i for i, spec in enumerate(CGROUP_METRICS)}
+    The host counterpart of :class:`jobscope.dcgm.GpuCatalog`, and frozen for the same
+    reason -- see that class for the stale-binding bug the pair of them exist to make
+    unrepresentable.
 
-# See jobscope.dcgm.register for why the built-ins are kept separately.
-_BUILTIN: Tuple[CgroupSpec, ...] = tuple(CGROUP_METRICS)
+    Only CPU% and MEM% have a choice of source -- the jobstats summary records them,
+    the cgroup exporter measures them, and Slurm accounts them -- so this is a shorter
+    question than the GPU one, but the same question, answered the same way. A cluster
+    with no cgroup exporter (which is this one: probe's coverage line reports 2 hosts
+    of 439) resolves them to the jobstats summary, and the report says so instead of
+    leaving it to be inferred from a dash.
 
-
-def _rebuild() -> None:
-    """Recompute the tables derived from ``CGROUP_METRICS``.
-
-    ``DEFAULT_CGROUP_SPECS`` is rebuilt too, unlike the GPU side: a site can
-    legitimately *override* ``cpu`` or ``mem`` -- the two default cgroup metrics --
-    with a differently-named series from its own exporter, and the default view has
-    to pick that up or the override does nothing where it matters most.
+    ``candidates`` is not the same list as ``metrics``: slurm offers CPU%/MEM% without
+    being a Prometheus family. It is carried because anything re-resolving -- the
+    running view's provenance line, which asks "and without a jobstats summary?" --
+    has to weigh the same candidates or it will name a source that did not win.
     """
-    global SPEC_BY_KEY, DEFAULT_CGROUP_SPECS, CGROUP_HEADERS, CGROUP_NAMES, _ORDER
-    global RESOLVED, CANDIDATES
-    CANDIDATES = list(CGROUP_METRICS) + SLURM_SPECS
-    RESOLVED = source.resolve(CANDIDATES, PREFERENCE, source.JOBSTATS_HOST_COLUMNS)
-    SPEC_BY_KEY = {spec.key: spec for spec in CGROUP_METRICS}
-    DEFAULT_CGROUP_SPECS = [s for s in CGROUP_METRICS if s.group == "default"]
-    CGROUP_HEADERS = tuple(spec.header for spec in CGROUP_METRICS)
-    CGROUP_NAMES = tuple(spec.key for spec in CGROUP_METRICS)
-    _ORDER = {spec.key: i for i, spec in enumerate(CGROUP_METRICS)}
+
+    metrics: Tuple[CgroupSpec, ...]
+    preference: Tuple[str, ...]
+    candidates: Tuple[CgroupSpec, ...]
+    resolved: source.Resolution
+    spec_by_key: Mapping[str, CgroupSpec]
+    default_specs: Tuple[CgroupSpec, ...]
+    # Every header this module can produce, for the config's typo check.
+    headers: Tuple[str, ...]
+    names: Tuple[str, ...]
+    order: Mapping[str, int]
+
+
+def _build(metrics: Sequence[CgroupSpec],
+           preference: Sequence[str]) -> HostCatalog:
+    """Resolve ``metrics`` under ``preference``. Pure -- nothing here reads state.
+
+    ``default_specs`` is recomputed too, unlike the GPU side: a site can legitimately
+    *override* ``cpu`` or ``mem`` -- the two default cgroup metrics -- with a
+    differently-named series from its own exporter, and the default view has to pick
+    that up or the override does nothing where it matters most.
+    """
+    metrics = tuple(metrics)
+    preference = tuple(preference)
+    candidates = metrics + tuple(SLURM_SPECS)
+    return HostCatalog(
+        metrics=metrics,
+        preference=preference,
+        candidates=candidates,
+        resolved=source.resolve(candidates, preference, source.JOBSTATS_HOST_COLUMNS),
+        spec_by_key={spec.key: spec for spec in metrics},
+        default_specs=tuple(s for s in metrics if s.group == "default"),
+        headers=tuple(spec.header for spec in metrics),
+        names=tuple(spec.key for spec in metrics),
+        order={spec.key: i for i, spec in enumerate(metrics)},
+    )
+
+
+# ``CGROUP_METRICS`` above is the built-in declaration and is never mutated; see
+# jobscope.dcgm for why a re-registration must always start from a pristine set.
+_ACTIVE: HostCatalog = _build(CGROUP_METRICS, source.DEFAULT_HOST_PREFERENCE)
+
+
+def catalog() -> HostCatalog:
+    """The host catalog in force. Read it at call time; see :func:`jobscope.dcgm.catalog`."""
+    return _ACTIVE
 
 
 def set_preference(preference: Tuple[str, ...]) -> None:
@@ -192,9 +214,8 @@ def set_preference(preference: Tuple[str, ...]) -> None:
     because the two axes are independent: a cluster may have dcgm-exporter and no
     cgroup exporter, or the reverse.
     """
-    global PREFERENCE
-    PREFERENCE = tuple(preference)
-    _rebuild()
+    global _ACTIVE
+    _ACTIVE = _build(_ACTIVE.metrics, preference)
 
 
 def default_view(view: str, family: Optional[str] = None) -> List[CgroupSpec]:
@@ -207,15 +228,22 @@ def default_view(view: str, family: Optional[str] = None) -> List[CgroupSpec]:
     Takes ``family`` for signature parity with the GPU side so a caller can ask either
     without branching; there is only one host exporter, so it is accepted and ignored.
     """
-    return list(CGROUP_METRICS) if view == "extended" else list(DEFAULT_CGROUP_SPECS)
+    active = catalog()
+    return list(active.metrics if view == "extended" else active.default_specs)
 
 
 def register(extra: List[CgroupSpec]) -> None:
     """Replace the site-defined additions to the cgroup catalog with ``extra``."""
+    global _ACTIVE
+    _ACTIVE = _build(merged_metrics(extra), _ACTIVE.preference)
+
+
+def merged_metrics(extra: Sequence[CgroupSpec]) -> Tuple[CgroupSpec, ...]:
+    """The built-in catalog with ``extra`` overriding by key and appending the rest."""
     by_key = {spec.key: spec for spec in extra}
-    merged = [_inherit(builtin, by_key.pop(builtin.key, None)) for builtin in _BUILTIN]
-    CGROUP_METRICS[:] = merged + [spec for spec in extra if spec.key in by_key]
-    _rebuild()
+    merged = [_inherit(builtin, by_key.pop(builtin.key, None))
+              for builtin in CGROUP_METRICS]
+    return tuple(merged + [spec for spec in extra if spec.key in by_key])
 
 
 def _inherit(builtin: CgroupSpec, override: Optional[CgroupSpec]) -> CgroupSpec:
@@ -234,12 +262,13 @@ def _inherit(builtin: CgroupSpec, override: Optional[CgroupSpec]) -> CgroupSpec:
 
 def spec_named(name: str) -> Optional[CgroupSpec]:
     """The cgroup spec ``name`` refers to, by key or by header."""
+    active = catalog()
     text = str(name).strip().lower()
-    found = SPEC_BY_KEY.get(text)
+    found = active.spec_by_key.get(text)
     if found is not None:
         return found
     header = text.upper() if text.endswith("%") else text.upper() + "%"
-    return next((s for s in CGROUP_METRICS if s.header == header), None)
+    return next((s for s in active.metrics if s.header == header), None)
 
 
 def chosen_specs(specs: Optional[List[CgroupSpec]]) -> List[CgroupSpec]:
@@ -250,7 +279,7 @@ def chosen_specs(specs: Optional[List[CgroupSpec]]) -> List[CgroupSpec]:
     header a report writes and the queries a collector issues must name the same list,
     and two copies of that decision would eventually disagree by a column.
     """
-    return list(specs if specs is not None else DEFAULT_CGROUP_SPECS)
+    return list(specs if specs is not None else catalog().default_specs)
 
 
 def specs_named(names) -> List[CgroupSpec]:
@@ -261,12 +290,13 @@ def specs_named(names) -> List[CgroupSpec]:
     report, not of how a site listed them. Unknown names are the caller's to
     validate -- they are skipped here.
     """
+    order = catalog().order
     found = {}
     for name in names:
         spec = spec_named(name)
         if spec is not None:
             found[spec.key] = spec
-    return [found[key] for key in sorted(found, key=_ORDER.__getitem__)]
+    return [found[key] for key in sorted(found, key=order.__getitem__)]
 
 
 def _host_of(series: dict) -> str:
@@ -290,7 +320,7 @@ def host_series(raw_jobid: str, divisors: Dict[str, Dict[str, float]],
     caller decides how many specs are worth that.
     """
     series: Dict[str, Dict[int, Dict[str, float]]] = {}
-    for spec in (DEFAULT_CGROUP_SPECS if specs is None else specs):
+    for spec in chosen_specs(specs):
         try:
             found = client.query_range(spec.query(raw_jobid, step, sampling_period),
                                        start, end, step, timeout)

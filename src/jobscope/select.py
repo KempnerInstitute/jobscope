@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 
-from . import config, cpu, dcgm, jobstats, timeseries
+from . import config, cpu, dcgm, jobstats, rows, timeseries
 from .dcgm import JobGpuData, MetricSpec, compute_dcgm
 from .errors import JobscopeError
 from .job_ave_stats import (
@@ -40,7 +40,6 @@ from .report import (
     running_combined_timeseries,
     running_cpu_timeseries,
     running_timeseries,
-    any_unfinished,
     sampled_pair,
     source_pair,
 )
@@ -80,11 +79,12 @@ def jobstats_specs() -> List[MetricSpec]:
     """The metrics the reconstructed summary is built from -- enough for
     CPU%/MEM%/GPU%/GMEM% without the DCGM profiling block.
 
-    A function, not a module constant: both lists it reads are reassigned by
-    dcgm.set_preference(), so a value computed at import would freeze the default
-    preference and --gpu-source would pick a source the summary then ignored.
+    A function, not a module constant: dcgm.set_preference() replaces the catalog it
+    reads, so a value computed at import would freeze the default preference and
+    --gpu-source would pick a source the summary then ignored.
     """
-    return [s for s in dcgm.DEFAULT_SPECS if s.key in dcgm.JOBSTATS_BACKED_KEYS]
+    active = dcgm.catalog()
+    return [s for s in active.default_specs if s.key in active.jobstats_backed_keys]
 
 RUNNING = "running"
 FINISHED = "finished"
@@ -312,9 +312,10 @@ def _running_chunks(jobs: Dict[int, RunningJob], gpus: Dict[str, Gpu],
     # there: a running job is the case with no stored summary to fall back on, so it is
     # where a named slurm source has something to add and where a missing cgroup
     # exporter is the difference between a CPU% and a dash.
-    if "slurm" in cpu.PREFERENCE:
+    host = cpu.catalog()
+    if "slurm" in host.preference:
         apply_slurm_host(records, jobids, timeout,
-                         override=cpu.RESOLVED.source_of("CPU%") == "slurm")
+                         override=host.resolved.source_of("CPU%") == "slurm")
     _note_host_gap(records, jobids, host_specs)
 
 
@@ -425,7 +426,8 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
 
     if selection.jobids:
         records = fetch(jobids, timeout)
-        context = context_pairs(selection, desc, records, specs, host_specs,
+        context = context_pairs(rows.build_context(selection, desc, records),
+                                specs, host_specs,
                                 average=request.average) + narrowing
         # The only mode that can name a job which has not ended, and the only one holding
         # every record before the first chunk is yielded. A window selection takes the
@@ -435,10 +437,11 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
         # No cap here: this path queries per record either way (dcgm_for_job, once per
         # job), so `average` picks a windowed reduction over a bare selector and does not
         # change how many queries there are. Only the squeue path fans out.
-        folded = not any_unfinished(records) or request.average
+        folded = not rows.any_unfinished(records) or request.average
         chunks: Iterator[Tuple[List[str], Dict[str, JobRecord]]] = iter([(jobids, records)])
     else:
-        context = context_pairs(selection, desc, {}, specs, host_specs,
+        context = context_pairs(rows.build_context(selection, desc, {}),
+                                specs, host_specs,
                                 average=request.average) + narrowing
         folded = True       # a window selection holds only finished jobs
         chunks = fetch_chunks(jobids, timeout)
@@ -483,9 +486,10 @@ def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,
         # site has named it as a host source. After jobstats and Prometheus because it
         # is the coarsest of the three -- job totals rather than per-node series -- so
         # it should never displace a measurement that arrived.
-        if "slurm" in cpu.PREFERENCE:
+        host = cpu.catalog()
+        if "slurm" in host.preference:
             apply_slurm_host(records, chunk_ids, timeout,
-                             override=cpu.RESOLVED.source_of("CPU%") == "slurm")
+                             override=host.resolved.source_of("CPU%") == "slurm")
         _note_host_gap(records, chunk_ids, host_specs)
         yield chunk_ids, records, dcgm_data
 
@@ -595,7 +599,7 @@ def _note_gpu_series_gap(gpus, samples, specs) -> None:
     if not blind:
         return
     jobs_hit = {g.jobid for uuid, g in gpus.items() if not samples.get(uuid)}
-    leading = dcgm.RESOLVED.leading_exporter()
+    leading = dcgm.catalog().resolved.leading_exporter()
     other = "dcgm" if leading == "nvml" else "nvml"
     print("note: %d of %d job(s) have no GPU metrics -- no %s series covers their cards\n"
           "      on %s. They are absent from the series, and so from --stats and --eff\n"

@@ -1,14 +1,16 @@
 """Per-column source resolution.
 
-The policy these assert used to be three literals in ``dcgm.JOBSTATS_BACKED_KEYS`` plus a
+The policy these assert used to be three literals in ``JOBSTATS_BACKED_KEYS`` plus a
 hardcoded preference for the jobstats summary inside ``_prefer_stored``. It is now data, so the
 thing worth testing is that the data reproduces the old behaviour by default and
 changes only what a stated preference asks it to.
 """
 
+import dataclasses
+
 import pytest
 
-from jobscope import dcgm, source
+from jobscope import cpu, dcgm, source
 from jobscope.errors import JobscopeError
 
 
@@ -51,35 +53,35 @@ def test_an_unknown_source_is_named_not_ignored(bad):
 def test_the_default_order_reproduces_the_old_hardcoded_jobstats_list():
     """What JOBSTATS_BACKED_KEYS = ("duty", "mem", "memtot") used to say, by column."""
     dcgm.set_preference(source.DEFAULT_PREFERENCE)
-    assert dcgm.RESOLVED.from_jobstats == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB"}
-    assert dcgm.DCGM_HEADERS == ["SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"]
+    assert dcgm.catalog().resolved.from_jobstats == {"GPU%", "GMEM_GB", "GMEM_TOTAL_GB"}
+    assert dcgm.catalog().headers == ("SM_ACT%", "TENSOR%", "DRAM%", "POWER_W")
 
 
 def test_exactly_one_provider_wins_each_column():
-    for spec in (dcgm.ALL_SPECS):
-        assert len([s for s in dcgm.ALL_SPECS if s.column == spec.column]) == 1
+    for spec in (dcgm.catalog().all_specs):
+        assert len([s for s in dcgm.catalog().all_specs if s.column == spec.column]) == 1
 
 
 def test_naming_an_exporter_takes_the_column_off_jobstats():
     """The point of the flag: on a finished job it has to actually change where GPU%
     comes from, rather than being quietly overridden by the stored value."""
     dcgm.set_preference(source.parse_preference("dcgm"))
-    assert "GPU%" not in dcgm.RESOLVED.from_jobstats
-    assert dcgm.RESOLVED.source_of("GPU%") == "dcgm"
+    assert "GPU%" not in dcgm.catalog().resolved.from_jobstats
+    assert dcgm.catalog().resolved.source_of("GPU%") == "dcgm"
 
 
 def test_a_column_only_one_source_publishes_is_unaffected_by_the_order():
     """SM_ACT% has no nvml candidate, so asking for nvml cannot take it away."""
     dcgm.set_preference(source.parse_preference("nvml"))
-    assert dcgm.RESOLVED.source_of("SM_ACT%") == "dcgm"
+    assert dcgm.catalog().resolved.source_of("SM_ACT%") == "dcgm"
     dcgm.set_preference(source.parse_preference("dcgm"))
-    assert dcgm.RESOLVED.source_of("SM_ACT%") == "dcgm"
+    assert dcgm.catalog().resolved.source_of("SM_ACT%") == "dcgm"
 
 
 def test_without_a_jobstats_summary_the_column_falls_through_to_an_exporter():
     """A running job, or a finished one with no JS1:, must get the exporter answer
     rather than a no-data column."""
-    resolution = source.resolve(dcgm.METRICS, source.DEFAULT_PREFERENCE, jobstats_columns=())
+    resolution = source.resolve(dcgm.catalog().metrics, source.DEFAULT_PREFERENCE, jobstats_columns=())
     assert resolution.from_jobstats == frozenset()
     assert resolution.source_of("GPU%") in ("dcgm", "nvml")
 
@@ -87,8 +89,8 @@ def test_without_a_jobstats_summary_the_column_falls_through_to_an_exporter():
 def test_the_leading_exporter_skips_jobstats():
     """Per-source default views are per *exporter*: the jobstats summary has no catalog to take a
     default set from, serving three columns and nothing else."""
-    assert source.resolve(dcgm.METRICS, ("jobstats", "dcgm", "nvml")).leading_exporter() == "dcgm"
-    assert source.resolve(dcgm.METRICS, ("jobstats", "nvml", "dcgm")).leading_exporter() == "nvml"
+    assert source.resolve(dcgm.catalog().metrics, ("jobstats", "dcgm", "nvml")).leading_exporter() == "dcgm"
+    assert source.resolve(dcgm.catalog().metrics, ("jobstats", "nvml", "dcgm")).leading_exporter() == "nvml"
 
 
 # --- per-source default views ----------------------------------------------
@@ -116,7 +118,7 @@ def test_all_metrics_is_scoped_to_the_active_source():
 
 def test_provenance_groups_columns_by_source_in_preference_order():
     dcgm.set_preference(source.DEFAULT_PREFERENCE)
-    groups = dcgm.RESOLVED.by_source()
+    groups = dcgm.catalog().resolved.by_source()
     assert [name for name, _ in groups] == ["jobstats", "dcgm"]
     jobstats_columns = dict(groups)["jobstats"]
     # Catalog order, not set order -- from_jobstats is a frozenset.
@@ -129,7 +131,7 @@ def test_the_running_view_does_not_credit_a_jobstats_summary_it_cannot_have():
     that had nothing to give -- the same error as claiming a window not scanned."""
     from jobscope.report import gpu_source_line
     dcgm.set_preference(source.DEFAULT_PREFERENCE)
-    specs = dcgm.DEFAULT_SPECS
+    specs = dcgm.catalog().default_specs
     assert "jobstats" in gpu_source_line(specs, have_jobstats=True)
     assert "jobstats" not in gpu_source_line(specs, have_jobstats=False)
 
@@ -147,7 +149,7 @@ def test_a_finished_selection_says_the_numbers_are_folded():
     """One possible answer, so it is stated rather than implied -- the same reason the
     Source line names a source even when there is only one."""
     from jobscope.report import sampled_pair
-    (_label, text), = sampled_pair(dcgm.DEFAULT_SPECS, unfinished=False, average=False)
+    (_label, text), = sampled_pair(dcgm.catalog().default_specs, unfinished=False, average=False)
     assert text == "GPU metrics averaged over each job's whole runtime"
 
 
@@ -155,7 +157,7 @@ def test_an_unfinished_selection_says_scrape_and_names_the_alternative():
     """The line this whole thing exists for: two views of one running job reported
     different figures, and nothing on screen distinguished the questions."""
     from jobscope.report import sampled_pair
-    (_label, text), = sampled_pair(dcgm.DEFAULT_SPECS, unfinished=True, average=False)
+    (_label, text), = sampled_pair(dcgm.catalog().default_specs, unfinished=True, average=False)
     assert "most recent scrape" in text and "not averaged" in text
     assert "--runtime-avg" in text  # the other answer is reachable, and says how
 
@@ -164,7 +166,7 @@ def test_avg_makes_an_unfinished_selection_read_as_folded():
     """With --runtime-avg the two states are described identically, because they are computed
     identically -- the line must not keep claiming a scrape."""
     from jobscope.report import sampled_pair
-    (_label, text), = sampled_pair(dcgm.DEFAULT_SPECS, unfinished=True, average=True)
+    (_label, text), = sampled_pair(dcgm.catalog().default_specs, unfinished=True, average=True)
     assert text == "GPU metrics averaged over each job's whole runtime"
     assert "scrape" not in text
 
@@ -175,13 +177,13 @@ def test_the_host_caveat_appears_only_where_it_could_mislead():
     host columns are actually present, and only in the branch that could mislead."""
     from jobscope import cpu
     from jobscope.report import sampled_pair
-    (_l, with_host), = sampled_pair(dcgm.DEFAULT_SPECS, True, False,
-                                    host_specs=cpu.DEFAULT_CGROUP_SPECS)
-    (_l, gpu_only), = sampled_pair(dcgm.DEFAULT_SPECS, True, False)
+    (_l, with_host), = sampled_pair(dcgm.catalog().default_specs, True, False,
+                                    host_specs=cpu.catalog().default_specs)
+    (_l, gpu_only), = sampled_pair(dcgm.catalog().default_specs, True, False)
     assert "CPU%/MEM%" in with_host and "CPU%/MEM%" not in gpu_only
     # The folded branch makes no instant claim, so it needs no caveat either.
-    (_l, folded), = sampled_pair(dcgm.DEFAULT_SPECS, False, False,
-                                 host_specs=cpu.DEFAULT_CGROUP_SPECS)
+    (_l, folded), = sampled_pair(dcgm.catalog().default_specs, False, False,
+                                 host_specs=cpu.catalog().default_specs)
     assert "CPU%/MEM%" not in folded
 
 
@@ -202,15 +204,15 @@ def test_host_columns_have_their_own_axis():
                                    source.HOST_SOURCES) == ("cgroup", "jobstats", "slurm")
     with pytest.raises(JobscopeError):
         source.parse_preference("dcgm", "[host] source", source.HOST_SOURCES)
-    assert cpu.RESOLVED.source_of("CPU%") == "jobstats"
+    assert cpu.catalog().resolved.source_of("CPU%") == "jobstats"
 
 
 def test_the_host_preference_moves_cpu_and_mem():
     from jobscope import cpu
     cpu.set_preference(("cgroup", "jobstats"))
     try:
-        assert cpu.RESOLVED.source_of("CPU%") == "cgroup"
-        assert cpu.RESOLVED.from_jobstats == frozenset()
+        assert cpu.catalog().resolved.source_of("CPU%") == "cgroup"
+        assert cpu.catalog().resolved.from_jobstats == frozenset()
     finally:
         cpu.set_preference(source.DEFAULT_HOST_PREFERENCE)
 
@@ -219,7 +221,7 @@ def test_the_source_line_names_the_host_columns_first():
     """They print first in the table, so they read first here too."""
     from jobscope import cpu
     from jobscope.report import gpu_source_line
-    line = gpu_source_line(dcgm.DEFAULT_SPECS, host_specs=cpu.DEFAULT_CGROUP_SPECS)
+    line = gpu_source_line(dcgm.catalog().default_specs, host_specs=cpu.catalog().default_specs)
     assert line.index("CPU%") < line.index("GPU%")
     assert "MEM%" in line
 
@@ -315,37 +317,55 @@ def test_every_resolved_spec_agrees_with_its_uuid_label():
         MetricSpec("x", "X%", "nvidia_gpu_x", 1, 0, "all", family="nvml")
 
 
-# --- the rebuilt-name trap ---------------------------------------------------------
+# --- the rebuilt-name trap, and why it is now unreachable ---------------------------
 
-def test_no_module_holds_a_rebuilt_catalog_name_by_value():
+def test_the_catalog_exports_no_resolved_view_to_import_by_value():
     """`from .dcgm import DCGM_JOBSTATS_HEADERS` froze the default preference.
 
-    Every name in dcgm.REBUILT_NAMES is a view of the catalog under the current source
-    preference, reassigned by set_preference(). A by-value import is taken once and never
-    sees the rebuild, so --gpu-source resolved one source and the renderer used another --
-    which is exactly how GPU% came out of nvml while the Source line said dcgm.
+    A dozen module globals used to be views of the catalog under the current source
+    preference, reassigned by set_preference(). A by-value import was taken once and
+    never saw the rebuild, so --gpu-source resolved one source and the renderer used
+    another -- which is exactly how GPU% came out of nvml while the Source line said
+    dcgm. An AST test policed every module for those imports.
 
-    Structural rather than behavioural on purpose: it fails for a name nobody has written
-    a behavioural test for yet.
+    The views now live on a frozen catalog reached through catalog(), so there is no
+    name left to import by value and nothing to police. This asserts that: the module
+    must expose the declaration and the accessor, and no resolved view beside them.
+
+    The declaration itself is exempt, and safe to import by value, precisely because
+    it is *not* a view: it is the built-in list, register() no longer mutates it, and
+    the merge of a site's metrics over it lands on the catalog instead.
     """
-    import ast
-    import pathlib
+    from jobscope import cpu, dcgm
+    for module, declaration in ((dcgm, "METRICS"), (cpu, "CGROUP_METRICS")):
+        exported = {n for n in vars(module)
+                    if n.isupper() and not n.startswith("_") and n != declaration}
+        views = {f.name.upper() for f in dataclasses.fields(module.catalog())}
+        assert not exported & views, (
+            "%s exports a resolved view as a module global again: %s"
+            % (module.__name__, ", ".join(sorted(exported & views))))
+        assert declaration in vars(module)
 
+
+def test_a_held_catalog_is_a_consistent_snapshot_not_a_torn_one():
+    """Holding the object is safe in the way holding one of its fields never was.
+
+    set_preference() swaps the whole catalog rather than reassigning fields, so a
+    caller that kept a reference keeps every field as it was together -- the resolution
+    and the headers derived from it still agree. That is the property the old globals
+    could not offer: they moved one at a time, from the caller's point of view.
+    """
     from jobscope import dcgm
-    src = pathlib.Path(dcgm.__file__).parent
-    offenders = []
-    for path in sorted(src.glob("*.py")):
-        if path.name == "dcgm.py":
-            continue        # its own globals; the rebuild is what it does
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            # Module level only (col_offset 0). A function-local `from .dcgm import X`
-            # is evaluated per call and therefore sees the rebuild -- config.py uses
-            # several deliberately.
-            if (isinstance(node, ast.ImportFrom) and (node.module or "").endswith("dcgm")
-                    and node.col_offset == 0):
-                for alias in node.names:
-                    if alias.name in dcgm.REBUILT_NAMES:
-                        offenders.append("%s imports %s" % (path.name, alias.name))
-    assert not offenders, (
-        "read these as dcgm.<name> at call time instead: %s" % "; ".join(offenders))
+    before = dcgm.catalog()
+    dcgm.set_preference(("dcgm", "jobstats", "nvml"))
+    try:
+        after = dcgm.catalog()
+        assert after is not before
+        assert "GPU%" not in after.resolved.from_jobstats     # dcgm now serves it
+        assert "GPU%" in before.resolved.from_jobstats        # the snapshot is intact
+        for held in (before, after):
+            summary = {s.column for s in held.gpu_summary_specs}
+            assert not summary & held.resolved.from_jobstats
+            assert set(held.headers) == {s.header for s in held.gpu_summary_specs}
+    finally:
+        dcgm.set_preference(before.preference)

@@ -2,15 +2,9 @@
 
 import pytest
 
-from jobscope.cpu import (
-    CGROUP_METRICS,
-    DEFAULT_CGROUP_SPECS,
-    RATE_LOOKBACK_SCRAPES,
-    SPEC_BY_KEY,
-    host_series,
-    spec_named,
-    specs_named,
-)
+from jobscope import cpu
+
+from jobscope.cpu import RATE_LOOKBACK_SCRAPES, host_series, spec_named, specs_named
 
 
 class FakeClient:
@@ -47,8 +41,8 @@ RSS = "cgroup_memory_rss_bytes"
 
 def test_catalog_keys_and_headers_are_unique():
     """Both are lookup keys -- a duplicate would silently shadow an entry."""
-    keys = [spec.key for spec in CGROUP_METRICS]
-    headers = [spec.header for spec in CGROUP_METRICS]
+    keys = [spec.key for spec in cpu.catalog().metrics]
+    headers = [spec.header for spec in cpu.catalog().metrics]
     assert len(keys) == len(set(keys))
     assert len(headers) == len(set(headers))
 
@@ -56,18 +50,18 @@ def test_catalog_keys_and_headers_are_unique():
 def test_default_specs_are_the_two_the_summary_has_always_shown():
     """CPU%/MEM% are the only cgroup metrics a stored summary can reconstruct, so they
     are the only ones outside the opt-in `all` group."""
-    assert [spec.header for spec in DEFAULT_CGROUP_SPECS] == ["CPU%", "MEM%"]
-    assert all(spec.group == "default" for spec in DEFAULT_CGROUP_SPECS)
+    assert [spec.header for spec in cpu.catalog().default_specs] == ["CPU%", "MEM%"]
+    assert all(spec.group == "default" for spec in cpu.catalog().default_specs)
 
 
 def test_every_spec_names_a_denominator_that_is_a_jobstats_summary_field():
-    assert {spec.denom for spec in CGROUP_METRICS} == {"cpus", "total_memory"}
+    assert {spec.denom for spec in cpu.catalog().metrics} == {"cpus", "total_memory"}
 
 
 def test_spec_named_resolves_by_key_and_by_header():
-    assert spec_named("cpu") is SPEC_BY_KEY["cpu"]
-    assert spec_named("CPU%") is SPEC_BY_KEY["cpu"]
-    assert spec_named("cpu%") is SPEC_BY_KEY["cpu"]
+    assert spec_named("cpu") is cpu.catalog().spec_by_key["cpu"]
+    assert spec_named("CPU%") is cpu.catalog().spec_by_key["cpu"]
+    assert spec_named("cpu%") is cpu.catalog().spec_by_key["cpu"]
     assert spec_named("nonesuch") is None
 
 
@@ -81,7 +75,7 @@ def test_specs_named_returns_catalog_order_and_drops_duplicates():
 
 def test_a_counter_gets_a_rate_window_wider_than_the_display_step():
     """A range vector sized to exactly one scrape can contain 0-1 samples."""
-    spec = SPEC_BY_KEY["cpu"]
+    spec = cpu.catalog().spec_by_key["cpu"]
     assert spec.query("12345", step=60, sampling_period=60) == (
         "rate(cgroup_cpu_total_seconds{jobid='12345',step='',task=''}[240s])")
     assert "[240s]" in spec.query("12345", step=30, sampling_period=60)
@@ -90,16 +84,16 @@ def test_a_counter_gets_a_rate_window_wider_than_the_display_step():
 
 
 def test_the_rate_window_is_the_documented_multiple_of_the_scrape():
-    spec = SPEC_BY_KEY["cpu"]
+    spec = cpu.catalog().spec_by_key["cpu"]
     assert "[%ds]" % (RATE_LOOKBACK_SCRAPES * 60) in spec.query("1", 60, 60)
 
 
 def test_a_gauge_is_read_directly_with_no_rate():
-    assert SPEC_BY_KEY["mem"].query("12345", step=60, sampling_period=60) == (
+    assert cpu.catalog().spec_by_key["mem"].query("12345", step=60, sampling_period=60) == (
         "cgroup_memory_rss_bytes{jobid='12345',step='',task=''}")
 
 
-@pytest.mark.parametrize("spec", CGROUP_METRICS, ids=lambda s: s.key)
+@pytest.mark.parametrize("spec", cpu.catalog().metrics, ids=lambda s: s.key)
 def test_every_query_pins_the_job_level_cgroup(spec):
     """step/task pinned empty selects the job cgroup rather than a per-step one."""
     query = spec.query("12345", step=60, sampling_period=60)
@@ -117,7 +111,7 @@ def test_host_series_divides_each_sample_by_its_hosts_own_divisor():
     series = host_series("12345", {"nodeA": {"cpus": 4, "total_memory": 8e9}},
                          start=1000, end=1060, step=60, sampling_period=60,
                          client=client, timeout=None)
-    # Exact: DEFAULT_CGROUP_SPECS is CPU%/MEM% and nothing else, so a third default
+    # Exact: cpu.catalog().default_specs is CPU%/MEM% and nothing else, so a third default
     # metric should break this test rather than slip in unnoticed.
     assert series["nodeA"][1000] == {"CPU%": 12.5, "MEM%": 50.0}
     assert series["nodeA"][1060] == {"CPU%": 25.0, "MEM%": 100.0}
@@ -126,7 +120,7 @@ def test_host_series_divides_each_sample_by_its_hosts_own_divisor():
 def test_host_series_defaults_to_the_default_group_only():
     client = FakeClient({CPU_SECS: {"nodeA": [(1000, 1.0)]}})
     host_series("12345", {"nodeA": {"cpus": 4}}, 1000, 1060, 60, 60, client, None)
-    assert len(client.calls) == len(DEFAULT_CGROUP_SPECS)
+    assert len(client.calls) == len(cpu.catalog().default_specs)
 
 
 def test_host_series_honours_a_widened_spec_list():

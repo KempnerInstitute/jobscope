@@ -73,15 +73,16 @@ def _clear_hostlist_caches() -> None:
 def hermetic_config():
     """Pin the process-wide config to known defaults so tests never read ~/.config.
 
-    Three pieces of module state get reset with it, all installed by a config load:
+    Two other pieces of state get reset with it, both installed by a config load:
 
     * The palette -- ``report._SGR`` is set by ``cli._apply_config``, so a test that
       runs a command with a configured ``[colors]`` would otherwise leave every
       later test painting in its colours.
-    * The metric catalogs -- ``[metrics.<family>.<name>]`` appends to ``dcgm.METRICS``
-      and ``cpu.CGROUP_METRICS`` at load time, so a test defining a site metric would
-      otherwise leak it into every test after it, and into the catalog-shape
-      assertions in particular.
+    * The metric catalogs -- ``[metrics.<family>.<name>]`` definitions land on
+      ``dcgm.catalog()`` and ``cpu.catalog()``, so a test defining a site metric
+      would otherwise leak it into every test after it, and into the catalog-shape
+      assertions in particular. One slot each, replaced wholesale;
+      ``register_metrics({})`` puts back the built-ins under the current preference.
     """
     config_module.set_config(DEFAULT_CONFIG)
     report.set_palette(DEFAULT_CONFIG.palette)

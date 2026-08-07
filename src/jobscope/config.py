@@ -621,8 +621,8 @@ def _all_headers() -> frozenset:
     *not* a percentage -- POWER_W being the case that ships.
     """
     from .cpu import CGROUP_METRICS
-    from .dcgm import ALL_SPECS, DERIVED_COLUMNS
-    return frozenset([s.header for s in ALL_SPECS]
+    from .dcgm import DERIVED_COLUMNS, catalog
+    return frozenset([s.header for s in catalog().all_specs]
                      + [d.header for d in DERIVED_COLUMNS]
                      + [s.header for s in CGROUP_METRICS])
 
@@ -795,7 +795,8 @@ class Metrics:
         # Deferred so config stays importable without dcgm (which reaches
         # prometheus, and so back to config) -- see _known_percent_headers.
         from . import cpu as cpu_module
-        from .dcgm import ALL_SPECS, JOBSTATS_BACKED_KEYS, default_view, specs_named
+        from .dcgm import catalog, default_view, specs_named
+        gpu_catalog = catalog()
         # Per leading source, not one list for both: see dcgm.default_view. The
         # nvidia exporter publishes no profiling metrics, so leading with it must not
         # leave a summary asking for four columns it will render as "-".
@@ -815,7 +816,8 @@ class Metrics:
         # Compared by column rather than by key: a list that named the other
         # provider of GPU% already has that column, and adding this one too would
         # print it twice from two exporters.
-        required = [spec for spec in ALL_SPECS if spec.key in JOBSTATS_BACKED_KEYS]
+        required = [spec for spec in gpu_catalog.all_specs
+                    if spec.key in gpu_catalog.jobstats_backed_keys]
         for name in ("summary", "extended"):
             listed = getattr(self, name)
             missing = [s for s in required if s.column not in {x.column for x in listed}]
@@ -1035,22 +1037,17 @@ def load_config(path: Optional[str] = None,
     thr = data.get("thresholds") or {}
     dfl = data.get("defaults") or {}
 
-    # Before anything resolves a metric name: [metrics.<family>.<name>] tables add
-    # to the catalogs, and both the view selections below and [thresholds]' typo
-    # check have to be able to see what a site just defined. Unconditional, because
-    # a config that *removes* a definition has to un-register it too.
-    register_metrics(data.get("metrics") or {})
-
-    # And before any of those names is *resolved*: the preference decides which
-    # candidate wins each column, so a name looked up before this would resolve
-    # against the previous load's source order. Unconditional for the same reason as
-    # registration -- dropping [gpu] has to restore the default order.
+    # Before anything resolves a metric name. [metrics.<family>.<name>] tables add to
+    # the catalogs and the preference decides which candidate wins each column, so the
+    # view selections below and [thresholds]' typo check both need this to have
+    # happened -- and to have happened in the right order. build_catalogs owns that
+    # order; see its docstring for what each half-applied state looks like.
     gpu_section = _gpu(data.get("gpu") or {})
     host_section = _host(data.get("host") or {})
     if gpu_source:
         from .source import parse_preference
         gpu_section = Gpu(source=parse_preference(gpu_source, "--gpu-source"))
-    _apply_preference(gpu_section.source, host_section.source)
+    build_catalogs(data.get("metrics") or {}, gpu_section.source, host_section.source)
 
     stale = [key for key in LEGACY_THRESHOLD_KEYS if key in thr]
     if stale:
@@ -1346,10 +1343,10 @@ def _builtin_named(family: str, name: str):
     that cannot be attributed to a card.
     """
     if family == "cgroup":
-        from .cpu import _BUILTIN
-        return next((spec for spec in _BUILTIN if spec.key == name), None)
-    from .dcgm import _BUILTIN
-    return next((spec for spec in _BUILTIN
+        from .cpu import CGROUP_METRICS
+        return next((spec for spec in CGROUP_METRICS if spec.key == name), None)
+    from .dcgm import METRICS
+    return next((spec for spec in METRICS
                  if spec.key == name and spec.family == family), None)
 
 
@@ -1470,30 +1467,8 @@ def _host(table: Mapping) -> "Host":
     return Host(source=parse_preference(table["source"], "[host] source", HOST_SOURCES))
 
 
-def _apply_preference(gpu_pref: Tuple[str, ...], host_pref: Tuple[str, ...]) -> None:
-    """Install both source orders, then recompute everything derived from them.
-
-    In this order: each catalog re-resolves which candidate serves each of its
-    columns, and ``metrics`` then recomputes the cross-family role view over the
-    winners. Skipping the last step leaves role lookups keyed to the previous order's
-    headers, which is the confusing kind of half-applied.
-    """
-    from . import cpu, dcgm
-    from . import metrics as metrics_module
-    dcgm.set_preference(gpu_pref)
-    cpu.set_preference(host_pref)
-    metrics_module.rebuild()
-
-
-def register_metrics(table: Mapping) -> None:
-    """Install the ``[metrics.<family>.<name>]`` definitions into the catalogs.
-
-    Must run *before* the view selections are resolved, since those have to be able
-    to name what was just defined. Registration replaces rather than accumulates, so
-    loading a config twice yields one copy of each metric and removing a table from
-    the file removes the metric.
-    """
-    from . import cpu, dcgm
+def _site_specs(table: Mapping) -> Tuple[list, list]:
+    """``[metrics.<family>.<name>]`` tables -> (gpu specs, cgroup specs)."""
     definitions = _definitions(table)
     stray = sorted(set(definitions) - set(FAMILIES))
     if stray:
@@ -1516,11 +1491,53 @@ def register_metrics(table: Mapping) -> None:
                 cgroup.append(_cgroup_spec(name, body))
             else:
                 gpu.append(_gpu_spec(family, name, body))
-    dcgm.register(gpu)
-    cpu.register(cgroup)
-    # The cross-family views read the catalogs at import, so they need telling.
+    return gpu, cgroup
+
+
+def build_catalogs(table: Mapping, gpu_pref: Tuple[str, ...],
+                   host_pref: Tuple[str, ...]) -> None:
+    """Install the site metrics and both source orders, in the one order that works.
+
+    Three steps that have to happen together, and used to be three calls a caller
+    could interleave or forget:
+
+    1. ``[metrics.<family>.<name>]`` definitions join the catalogs, so the view
+       selections and ``[thresholds]``' typo check can name what a site just defined.
+    2. Each family re-resolves which candidate serves each of its columns under the
+       new preference. A name looked up before this resolves against the previous
+       order.
+    3. ``metrics`` recomputes the cross-family role view over the winners.
+
+    Skipping step 3 leaves role lookups keyed to the previous order's headers; running
+    it before step 2 keys them to the previous order's winners. Both are the confusing
+    kind of half-applied -- a site metric that renders correctly everywhere and has no
+    role, no label, and no name in ``probe``. Doing all three here is what makes that
+    unreachable rather than merely documented.
+
+    Every step is unconditional: a config that *removes* a definition has to
+    un-register it, and dropping ``[gpu]`` has to restore the default order.
+    """
+    from . import cpu, dcgm
     from . import metrics as metrics_module
+    gpu_specs, cgroup_specs = _site_specs(table)
+    dcgm.register(gpu_specs)
+    cpu.register(cgroup_specs)
+    dcgm.set_preference(gpu_pref)
+    cpu.set_preference(host_pref)
     metrics_module.rebuild()
+
+
+def register_metrics(table: Mapping) -> None:
+    """Install the ``[metrics.<family>.<name>]`` definitions, keeping the source order.
+
+    :func:`build_catalogs` is what a config load calls; this is the narrower door for
+    a caller that is only changing the definitions -- the test suite resetting the
+    catalogs between cases, mostly. Registration replaces rather than accumulates, so
+    loading a config twice yields one copy of each metric and removing a table from
+    the file removes the metric.
+    """
+    from . import cpu, dcgm
+    build_catalogs(table, dcgm.catalog().preference, cpu.catalog().preference)
 
 
 def _metrics(table: Mapping) -> Metrics:
@@ -1539,9 +1556,10 @@ def _metrics(table: Mapping) -> Metrics:
     """
     from . import cpu as cpu_module
     from . import dcgm as dcgm_module
-    from .dcgm import ALL_SPECS, METRIC_NAMES, spec_named, specs_named
+    from .dcgm import spec_named, specs_named
+    gpu_catalog = dcgm_module.catalog()
     families = _definitions(table)
-    leading = dcgm_module.RESOLVED.leading_exporter()
+    leading = gpu_catalog.resolved.leading_exporter()
     per_source = {view: names for view, names in (families.get(leading) or {}).items()
                   if view in VIEWS}
     table = {k: v for k, v in table.items() if k not in families}
@@ -1559,7 +1577,7 @@ def _metrics(table: Mapping) -> Metrics:
             if names.strip().lower() != "all":
                 raise JobscopeError('[metrics] %s = %r must be a list of metric names'
                                     ' or the string "all"' % (view, names))
-            resolved[view] = tuple(ALL_SPECS)
+            resolved[view] = tuple(gpu_catalog.all_specs)
             resolved["host_" + view] = tuple(cpu_module.default_view("extended"))
             continue
         if not isinstance(names, (list, tuple)):
@@ -1591,7 +1609,8 @@ def _metrics(table: Mapping) -> Metrics:
             raise JobscopeError(
                 "[metrics] %s names no metric %s; the catalog is %s"
                 % (view, ", ".join(repr(n) for n in strays),
-                   ", ".join(tuple(METRIC_NAMES) + cpu_module.CGROUP_NAMES)))
+                   ", ".join(tuple(gpu_catalog.names)
+                                + tuple(cpu_module.catalog().names))))
         if not names:
             raise JobscopeError("[metrics] %s is empty; omit it to keep the built-in"
                                 " list, or name at least one metric" % view)
@@ -1634,8 +1653,9 @@ def _known_percent_headers() -> frozenset:
     dropped from a config with a note saying it was unknown.
     """
     from .cpu import CGROUP_METRICS
-    from .dcgm import ALL_SPECS, columns_for
-    return frozenset([header for _key, header, _dec in columns_for(ALL_SPECS)
+    from .dcgm import catalog, columns_for
+    return frozenset([header for _key, header, _dec
+                      in columns_for(catalog().all_specs)
                       if header.endswith("%")]
                      + [spec.header for spec in CGROUP_METRICS
                         if spec.header.endswith("%")])

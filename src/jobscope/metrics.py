@@ -37,10 +37,10 @@ a ceiling -- so the role went with it rather than lingering as a description of
 something the code no longer does.
 """
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass
+from typing import List, Mapping, Optional, Sequence, Tuple
 
-from . import dcgm
-from .cpu import CGROUP_METRICS
+from . import cpu, dcgm
 
 WORST = "worst"
 RESOURCE = "resource"
@@ -50,42 +50,67 @@ CAP = "cap"
 ROLES: Tuple[str, ...] = (WORST, RESOURCE, MEMORY, CAP)
 
 
-def _catalog() -> List:
+@dataclass(frozen=True)
+class Catalog:
     """Every metric jobscope knows, GPU families first then host, in catalog order.
 
     Order matters and is not alphabetical: it is the order columns and Worst rows
-    print in, and reproducing the old hand-written tuples exactly is what makes
-    this a substitution rather than a change. GPU before host, because
-    ``WORST_METRICS`` read ``GPU%, SM_ACT%, POWER_W, CPU%``.
+    print in, and reproducing the old hand-written tuples exactly is what made this a
+    substitution rather than a change. GPU before host, because ``WORST_METRICS`` read
+    ``GPU%, SM_ACT%, POWER_W, CPU%``.
 
-    Reads ``dcgm.ALL_SPECS`` -- the *resolved* candidates, one per column -- rather
-    than ``dcgm.METRICS``, which holds every candidate and so has ``GPU%`` twice
-    once two exporters offer it. Roles are a property of the column, so asking a
-    duplicated header for its roles has no single answer. Via the module rather
-    than a ``from`` import because ``_rebuild`` rebinds that name.
+    Frozen and rebuilt wholesale for the reason :class:`jobscope.dcgm.GpuCatalog` is:
+    this view changes when either family's catalog does, and a half-applied cross-family
+    view is the confusing kind of half-broken -- a site metric that renders fine but has
+    no role lookup and no label, and that ``probe`` still calls unnamed.
     """
-    return list(dcgm.ALL_SPECS) + list(dcgm.DERIVED_COLUMNS) + list(CGROUP_METRICS)
+
+    specs: Tuple = ()
+    by_header: Mapping[str, object] = None       # type: ignore[assignment]
+    position: Mapping[str, int] = None           # type: ignore[assignment]
 
 
-CATALOG: List = _catalog()
+def _build() -> Catalog:
+    """The cross-family view over whatever the two family catalogs now hold.
 
-# Header -> spec, across every family. Flat because headers are unique catalog-wide
-# (there is a test), so a caller never has to know which family it is asking about.
-_BY_HEADER: Dict[str, object] = {spec.header: spec for spec in CATALOG}
+    Reads ``dcgm.catalog().all_specs`` -- the *resolved* candidates, one per column --
+    rather than the raw declaration, which holds every candidate and so has ``GPU%``
+    twice once two exporters offer it. Roles are a property of the column, so asking a
+    duplicated header for its roles has no single answer.
+    """
+    specs = (tuple(dcgm.catalog().all_specs) + tuple(dcgm.DERIVED_COLUMNS)
+             + tuple(cpu.catalog().metrics))
+    return Catalog(
+        specs=specs,
+        # Header -> spec, across every family. Flat because headers are unique
+        # catalog-wide (there is a test), so a caller never has to know which family
+        # it is asking about.
+        by_header={spec.header: spec for spec in specs},
+        position={spec.header: i for i, spec in enumerate(specs)},
+    )
+
+
+_ACTIVE: Catalog = _build()
+
+
+def catalog() -> Catalog:
+    """The cross-family catalog in force; see :func:`jobscope.dcgm.catalog`."""
+    return _ACTIVE
 
 
 def rebuild() -> None:
-    """Recompute the cross-family view after the catalogs change.
+    """Recompute the cross-family view after either family catalog changes.
 
     ``[metrics.<family>.<name>]`` can add or replace entries at config-load time,
     which is after this module was imported. Without this the site metric would be
     invisible here -- no role lookup, no ``label``, and ``probe`` would still call
-    it unnamed -- while working perfectly everywhere else, which is the confusing
-    kind of half-broken.
+    it unnamed -- while working perfectly everywhere else.
+
+    Must run *after* both families have resolved, which is what
+    :func:`jobscope.config.build_catalogs` exists to guarantee.
     """
-    global CATALOG, _BY_HEADER
-    CATALOG = _catalog()
-    _BY_HEADER = {spec.header: spec for spec in CATALOG}
+    global _ACTIVE
+    _ACTIVE = _build()
 
 
 def spec_for(header: str) -> Optional[object]:
@@ -96,12 +121,13 @@ def spec_for(header: str) -> Optional[object]:
     about. That is the point: ``report`` should not import ``cpu`` to ask whether
     ``CPU%`` counts as memory.
     """
-    return _BY_HEADER.get(header)
+    return catalog().by_header.get(header)
 
 
 def with_role(role: str) -> List:
     """Every spec carrying ``role``, in catalog order."""
-    return [spec for spec in CATALOG if role in getattr(spec, "roles", frozenset())]
+    return [spec for spec in catalog().specs
+            if role in getattr(spec, "roles", frozenset())]
 
 
 def headers_with_role(role: str) -> Tuple[str, ...]:
@@ -156,7 +182,7 @@ def in_catalog_order(headers) -> List[str]:
     incidental. Anything user-facing -- the "best of ..." line, a heading's criteria
     -- should read in the same order as the table beside it.
     """
-    position = {spec.header: i for i, spec in enumerate(CATALOG)}
+    position = catalog().position
     known = [h for h in headers if h in position]
     unknown = [h for h in headers if h not in position]
     return sorted(known, key=position.__getitem__) + unknown

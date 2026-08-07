@@ -4,15 +4,9 @@ import io
 
 import pytest
 
-from jobscope import timeseries as ts
+from jobscope import dcgm, timeseries as ts
 from jobscope.cpu import host_stats_many
-from jobscope.dcgm import (
-    ALL_SPECS,
-    DEFAULT_SPECS,
-    SPEC_BY_HEADER,
-    spec_named,
-    window_query,
-)
+from jobscope.dcgm import spec_named, window_query
 from jobscope.errors import JobscopeError
 from jobscope.job_ave_stats import synthesize_stats
 from jobscope.jobstats import GIB, jobstats_metrics
@@ -256,7 +250,7 @@ def test_total_memory_is_queried_but_not_shown():
 def test_extended_catalog_excludes_delta_reduced_counters():
     # A delta needs two points, so it is meaningless in an instant snapshot.
     assert all(s.reducer != "delta" for s in extended_running_specs())
-    assert any(s.reducer == "delta" for s in ALL_SPECS), "fixture assumes one exists"
+    assert any(s.reducer == "delta" for s in dcgm.catalog().all_specs), "fixture assumes one exists"
 
 
 def test_specs_for_maps_the_view_names():
@@ -271,7 +265,7 @@ def test_live_and_dcgm_render_identical_columns():
     same eye (and the same script) reads both.
     """
     from jobscope.dcgm import columns_for
-    assert build_columns(default_running_specs()) == columns_for(DEFAULT_SPECS)
+    assert build_columns(default_running_specs()) == columns_for(dcgm.catalog().default_specs)
 
 
 def test_gmem_percent_is_per_gpu_and_handles_a_missing_total():
@@ -287,7 +281,7 @@ def test_gmem_percent_is_per_gpu_and_handles_a_missing_total():
 def test_clip_applies_to_nvidia_metrics_only():
     # By provider, not by column: which source serves GPU% depends on the preference,
     # and the whole point of this test is that the two providers clip differently.
-    duty, smact = spec_named("duty"), SPEC_BY_HEADER["SM_ACT%"]
+    duty, smact = spec_named("duty"), dcgm.catalog().spec_by_header["SM_ACT%"]
     # Same exporter as nvidia_gpu_jobId, so `and` can match on identical labels.
     assert clip_to_job(duty, 42) == "nvidia_gpu_jobId == 42"
     # DCGM carries different labels, so `and` never matches; the window alone bounds it.
@@ -305,7 +299,7 @@ def test_clipped_window_query_is_well_formed():
 
 
 def test_unclipped_window_query_is_unchanged():
-    smact = SPEC_BY_HEADER["SM_ACT%"]
+    smact = dcgm.catalog().spec_by_header["SM_ACT%"]
     assert window_query(smact, ["GPU-a"], 900) == window_query(
         smact, ["GPU-a"], 900, clip=None)
 
@@ -893,8 +887,7 @@ def test_dcgm_label_names_are_read_not_nvml_s(hpc_job):
 def test_per_node_pooled_reduces_across_uuids_on_one_host():
     """Pooled from the UUID-keyed metrics, not from per_gpu_by_node_minor's output --
     that keys by (node, minor), which MIG siblings share."""
-    from jobscope.dcgm import DEFAULT_SPECS
-    smact = next(s for s in DEFAULT_SPECS if s.header == "SM_ACT%")
+    smact = next(s for s in dcgm.catalog().default_specs if s.header == "SM_ACT%")
     gpus = {"GPU-a": Gpu("GPU-a", 1, "n1", 0, "GPU 0", "H200"),
             "GPU-b": Gpu("GPU-b", 1, "n1", 1, "GPU 1", "H200"),
             "GPU-c": Gpu("GPU-c", 1, "n2", 0, "GPU 0", "H200")}
@@ -907,8 +900,7 @@ def test_per_node_pooled_reduces_across_uuids_on_one_host():
 
 def test_per_node_pooled_keeps_mig_siblings_apart():
     """Two instances of one card share (node, minor); reducing per_gpu would see one."""
-    from jobscope.dcgm import DEFAULT_SPECS
-    smact = next(s for s in DEFAULT_SPECS if s.header == "SM_ACT%")
+    smact = next(s for s in dcgm.catalog().default_specs if s.header == "SM_ACT%")
     gpus = {"MIG-a": Gpu("MIG-a", 1, "n1", 0, "MIG 0.0", "A100"),
             "MIG-b": Gpu("MIG-b", 1, "n1", 0, "MIG 0.1", "A100")}
     metrics = {1: {"MIG-a": {smact.key: 10.0}, "MIG-b": {smact.key: 30.0}}}
@@ -918,8 +910,8 @@ def test_per_node_pooled_keeps_mig_siblings_apart():
 def test_a_mixed_model_node_reports_no_model_so_the_power_floor_is_global():
     """POWER_W's floor is per architecture and a mixed node has no single answer, so
     empty -- which falls back to the global floor -- is the honest reading."""
-    from jobscope.dcgm import DEFAULT_SPECS, MODEL_KEY
-    smact = next(s for s in DEFAULT_SPECS if s.header == "SM_ACT%")
+    from jobscope.dcgm import MODEL_KEY
+    smact = next(s for s in dcgm.catalog().default_specs if s.header == "SM_ACT%")
     same = {"a": Gpu("a", 1, "n1", 0, "GPU 0", "H200"),
             "b": Gpu("b", 1, "n1", 1, "GPU 1", "H200")}
     mixed = {"a": Gpu("a", 1, "n1", 0, "GPU 0", "H200"),

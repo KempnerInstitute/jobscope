@@ -7,9 +7,8 @@ old table -- so if a role is added to the wrong spec, the test says which.
 
 import pytest
 
-from jobscope import dcgm, metrics
-from jobscope.cpu import CGROUP_METRICS
-from jobscope.dcgm import DERIVED_COLUMNS, METRICS
+from jobscope import cpu, dcgm, metrics
+from jobscope.dcgm import DERIVED_COLUMNS
 
 # --- the tables it replaces -------------------------------------------------
 
@@ -110,23 +109,23 @@ def test_headers_are_unique_across_every_family():
     Asserted over the *resolved* GPU catalog rather than the candidates. Two
     exporters may both offer GPU%, and jobscope.source picks one -- so a duplicate
     here would mean resolution failed to, which is the bug this guards."""
-    headers = [s.header for s in dcgm.ALL_SPECS] + [d.header for d in DERIVED_COLUMNS] \
-        + [c.header for c in CGROUP_METRICS]
+    headers = [s.header for s in dcgm.catalog().all_specs] + [d.header for d in DERIVED_COLUMNS] \
+        + [c.header for c in cpu.catalog().metrics]
     assert len(headers) == len(set(headers))
 
 
 def test_a_column_offered_by_two_exporters_resolves_to_one():
     """The reason the above is about ALL_SPECS: GPU% has an nvml and a dcgm candidate,
     and exactly one of them may be live at a time."""
-    candidates = [s for s in METRICS if s.column == "GPU%"]
+    candidates = [s for s in dcgm.catalog().metrics if s.column == "GPU%"]
     assert {s.family for s in candidates} == {"nvml", "dcgm"}
-    assert len([s for s in dcgm.ALL_SPECS if s.column == "GPU%"]) == 1
+    assert len([s for s in dcgm.catalog().all_specs if s.column == "GPU%"]) == 1
 
 
 def test_every_role_used_in_the_catalog_is_a_declared_one():
     """A typo in a spec's roles would otherwise be a role nothing ever matches."""
     used = set()
-    for spec in metrics.CATALOG:
+    for spec in metrics.catalog().specs:
         used |= set(getattr(spec, "roles", frozenset()))
     assert used <= set(metrics.ROLES), "undeclared role(s): %s" % (used - set(metrics.ROLES))
 
@@ -138,7 +137,7 @@ def test_every_declared_role_is_actually_carried_by_something():
 
 
 def test_the_catalog_spans_all_three_sources():
-    headers = {s.header for s in metrics.CATALOG}
+    headers = {s.header for s in metrics.catalog().specs}
     assert {"SM_ACT%", "GPU%", "GMEM%", "CPU%"} <= headers
 
 

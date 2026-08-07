@@ -923,7 +923,8 @@ def _coverage_series():
     host coverage to report. Same for the stored summary -- noted in prose instead.
     """
     from . import cpu, dcgm
-    columns = {spec.column for spec in dcgm.DEFAULT_SPECS}
+    host, gpu = cpu.catalog(), dcgm.catalog()
+    columns = {spec.column for spec in gpu.default_specs}
     by_family: Dict[str, List[Tuple[str, str, bool]]] = {}
 
     def winner(resolution, column: str) -> str:
@@ -939,22 +940,24 @@ def _coverage_series():
                 return spec.family
         return ""
 
-    for spec in cpu.CANDIDATES:
+    for spec in host.candidates:
         if spec.column in ("CPU%", "MEM%") and spec.metric:
             by_family.setdefault(spec.family, []).append(
-                (spec.metric, spec.column, winner(cpu.RESOLVED, spec.column) == spec.family))
-    for spec in dcgm.METRICS:
+                (spec.metric, spec.column,
+                 winner(host.resolved, spec.column) == spec.family))
+    for spec in gpu.metrics:
         if spec.column in columns and spec.metric:
             by_family.setdefault(spec.family, []).append(
                 (spec.metric, spec.column,
-                 winner(dcgm.RESOLVED, spec.column) == spec.family))
+                 winner(gpu.resolved, spec.column) == spec.family))
     return by_family
 
 
 def _column_order(columns) -> List[str]:
     """``columns`` in the order the table prints them, not alphabetically."""
     from . import cpu, dcgm
-    order = [s.column for s in cpu.RESOLVED.specs] + [s.column for s in dcgm.ALL_SPECS]
+    order = ([s.column for s in cpu.catalog().resolved.specs]
+             + [s.column for s in dcgm.catalog().all_specs])
     rank = {c: i for i, c in enumerate(order)}
     return sorted(columns, key=lambda c: rank.get(c, len(rank)))
 
@@ -1037,7 +1040,7 @@ def report_column_coverage(out, client, timeout: Optional[float],
     print("", file=out)
     _cont(out, "* serving that column now. Unmarked rows are what another --gpu-source "
                "would read.")
-    stored = sorted(dcgm.RESOLVED.from_jobstats)
+    stored = sorted(dcgm.catalog().resolved.from_jobstats)
     if stored:
         _cont(out, "jobstats also serves %s for a *finished* job -- stored per job in "
                    "sacct," % ", ".join(stored))
@@ -1122,7 +1125,7 @@ def _report_sources(out) -> None:
     """
     from . import config as config_module
     from . import dcgm
-    resolution = dcgm.RESOLVED
+    resolution = dcgm.catalog().resolved
     _line(out, "sources", "preference %s" % ", ".join(resolution.preference))
     for name, columns in resolution.by_source():
         shown = list(columns)[:6]

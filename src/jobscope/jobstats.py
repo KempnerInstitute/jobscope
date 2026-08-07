@@ -14,7 +14,7 @@ import json
 import re
 from typing import List, Optional, Tuple
 
-from .models import JobMetrics, Measure
+from .models import JobMetrics, Measure, UnitRow
 
 GIB = 1024 ** 3
 
@@ -22,7 +22,19 @@ GIB = 1024 ** 3
 # column came from where -- jobstats and Prometheus do not always agree.
 SOURCE = "jobstats"
 
-DetailRow = Tuple[str, str, str, str, str, str, str]
+# The headers a per-unit row from here fills, in the order the detail views print
+# them. Named rather than positional -- see models.UnitRow for what that replaced.
+CPU_CELL = "CPU%"
+CPU_MEM_CELL = "CPU-MEM"
+GPU_CELL = "GPU%"
+GPU_MEM_CELL = "GPU-MEM"
+GMEM_CELL = "GMEM%"
+UNIT_HEADERS: Tuple[str, ...] = (CPU_CELL, CPU_MEM_CELL, GPU_CELL, GPU_MEM_CELL,
+                                 GMEM_CELL)
+
+# What a unit with no GPU entries shows for the GPU half. Spelled once because both
+# row builders have a branch for it and they must agree.
+_NO_GPU = {GPU_CELL: "-", GPU_MEM_CELL: "-", GMEM_CELL: "-"}
 
 # The precision each field is stored at. jobstats writes byte counts as integers and
 # utilization to one decimal, and :func:`jobstats_detail` renders utilization with %g on
@@ -76,12 +88,12 @@ def _node_cells(info: dict, runtime: int) -> Tuple[str, str]:
                        bytes_to_gb(info.get("total_memory", 0))))
 
 
-def jobstats_per_node(stats: dict) -> List[DetailRow]:
-    """One row per node, in the same 7-cell shape :func:`jobstats_detail` returns.
+def jobstats_per_node(stats: dict) -> List[UnitRow]:
+    """One row per node, in the same shape :func:`jobstats_detail` returns.
 
-    ``(node, gpu count, cpu%, cpu-mem, gpu%, gpu-mem, gmem%)`` -- the per-GPU row with its
-    second cell changed from a minor number to how many cards were pooled, because a pooled
-    row has to say what it pooled. ``RUNTIME`` is not here; the renderer appends it.
+    The per-GPU row with its ``unit`` changed from a minor number to how many cards were
+    pooled, because a pooled row has to say what it pooled. ``RUNTIME`` is not here; the
+    renderer appends it.
 
     ``cpu%`` and ``cpu-mem`` are copied, not aggregated: the summary already records them
     per node, which is exactly why they repeat on every GPU row in the detail view.
@@ -96,26 +108,28 @@ def jobstats_per_node(stats: dict) -> List[DetailRow]:
     A node with no GPU entries yields a count of ``0`` and dashes for the GPU cells,
     mirroring :func:`jobstats_detail`'s branch for the same case.
     """
-    rows: List[DetailRow] = []
+    rows: List[UnitRow] = []
     if not stats or "nodes" not in stats:
         return rows
     runtime = stats.get("total_time", 0) or 0
     for node, info in stats["nodes"].items():
         eff_cell, cpu_mem = _node_cells(info, runtime)
+        host = {CPU_CELL: eff_cell, CPU_MEM_CELL: cpu_mem}
         util = info.get("gpu_utilization") or {}
         used_by_gpu = info.get("gpu_used_memory") or {}
         total_by_gpu = info.get("gpu_total_memory") or {}
         cards = list(util or total_by_gpu)
         if not cards:
-            rows.append((node, "0", eff_cell, cpu_mem, "-", "-", "-"))
+            rows.append(UnitRow(node, "0", dict(host, **_NO_GPU)))
             continue
         used = sum(used_by_gpu.get(g, 0) for g in cards)
         total = sum(total_by_gpu.get(g, 0) for g in cards)
         mean_util = sum(util.values()) / len(util) if util else 0
-        rows.append((node, str(len(cards)), eff_cell, cpu_mem,
-                     "%g%%" % round(mean_util, 1),
-                     "%s/%s" % (bytes_to_gb(used), bytes_to_gb(total)),
-                     "%.1f%%" % (100 * used / total if total else 0)))
+        rows.append(UnitRow(node, str(len(cards)), dict(
+            host,
+            **{GPU_CELL: "%g%%" % round(mean_util, 1),
+               GPU_MEM_CELL: "%s/%s" % (bytes_to_gb(used), bytes_to_gb(total)),
+               GMEM_CELL: "%.1f%%" % (100 * used / total if total else 0)})))
     return rows
 
 
@@ -252,17 +266,18 @@ def jobstats_metrics(stats: dict, gpus: Optional[int] = None) -> JobMetrics:
     return JobMetrics(found, source=SOURCE)
 
 
-def jobstats_detail(stats: dict) -> List[DetailRow]:
+def jobstats_detail(stats: dict) -> List[UnitRow]:
     """Per-node / per-GPU rows matching jobstats' Detailed Utilization layout.
 
-    Each row is ``(node, gpu, cpu%, cpu-mem, gpu%, gpu-mem, gmem%)``.
+    One :class:`~jobscope.models.UnitRow` per card, its ``unit`` the GPU's minor number.
     """
-    rows: List[DetailRow] = []
+    rows: List[UnitRow] = []
     if not stats or "nodes" not in stats:
         return rows
     runtime = stats.get("total_time", 0) or 0
     for node, info in stats["nodes"].items():
         eff_cell, cpu_mem = _node_cells(info, runtime)
+        host = {CPU_CELL: eff_cell, CPU_MEM_CELL: cpu_mem}
         gpu_util = info.get("gpu_utilization") or {}
         gpu_used = info.get("gpu_used_memory", {})
         gpu_total = info.get("gpu_total_memory", {})
@@ -270,10 +285,11 @@ def jobstats_detail(stats: dict) -> List[DetailRow]:
             for gpu in sorted(gpu_util or gpu_total, key=str):
                 used, total = gpu_used.get(gpu, 0), gpu_total.get(gpu, 0)
                 gmem = 100 * used / total if total else 0
-                rows.append((node, str(gpu), eff_cell, cpu_mem,
-                             "%g%%" % gpu_util.get(gpu, 0),
-                             "%s/%s" % (bytes_to_gb(used), bytes_to_gb(total)),
-                             "%.1f%%" % gmem))
+                rows.append(UnitRow(node, str(gpu), dict(
+                    host,
+                    **{GPU_CELL: "%g%%" % gpu_util.get(gpu, 0),
+                       GPU_MEM_CELL: "%s/%s" % (bytes_to_gb(used), bytes_to_gb(total)),
+                       GMEM_CELL: "%.1f%%" % gmem})))
         else:
-            rows.append((node, "-", eff_cell, cpu_mem, "-", "-", "-"))
+            rows.append(UnitRow(node, "-", dict(host, **_NO_GPU)))
     return rows

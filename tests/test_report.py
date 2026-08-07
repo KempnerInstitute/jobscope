@@ -7,8 +7,10 @@ import re
 
 import pytest
 
-from jobscope import plot, report
-from jobscope.dcgm import DEFAULT_SPECS, GPU_SUMMARY_SPECS
+from jobscope.rows import build_context, build_rows
+
+from jobscope import models, plot, report
+from jobscope.dcgm import catalog as gpu_catalog
 from jobscope.errors import JobscopeError
 from jobscope.jobstats import GIB, jobstats_metrics
 from jobscope.report import (
@@ -27,9 +29,15 @@ from jobscope.slurm import JobRecord, Selection
 CTX = [("User", "alice"), ("Select", "x")]
 
 
-def _render(func, *args):
+def _render(func, jobids, records, dcgm_data, *rest):
+    """Build the rows the way select.py does, then render them.
+
+    summarize/detail/dcgm_report take a list of models.JobRow now. The tests still
+    say what they mean in scheduler terms -- these records, this dcgm_data -- so the
+    one build_rows call lives here rather than in every case.
+    """
     out = io.StringIO()
-    func(*args, out=out)
+    func(build_rows(jobids, records, dcgm_data), *rest, out=out)
     return out.getvalue()
 
 
@@ -78,7 +86,8 @@ def test_cols_for_views():
 
 
 def test_context_pairs_explicit_ids(gpu_record):
-    pairs = context_pairs(Selection(user="alice", jobids=["100"]), "1 job ID(s)", {"100": gpu_record})
+    pairs = context_pairs(build_context(Selection(user="alice", jobids=["100"]),
+                                        "1 job ID(s)", {"100": gpu_record}))
     # No GPU specs collected, so no provenance line -- see _source_pair.
     assert pairs == [("User", "alice"), ("Select", "1 job ID(s)")]
 
@@ -87,7 +96,7 @@ def test_the_window_line_names_the_dates_behind_a_day_count():
     """"last 1 day" does not say which day, and a -D window moves with the clock."""
     from jobscope.select import FINISHED, Request, sacct_selection
     selection = sacct_selection(Request(mode=FINISHED, days=1, user="alice"))
-    pairs = dict(context_pairs(selection, "last 1 day, completed", {}))
+    pairs = dict(context_pairs(build_context(selection, "last 1 day, completed", {})))
     assert pairs["Select"] == "last 1 day, completed"
     window = pairs["Window"]
     assert " .. " in window and "now" not in window
@@ -100,7 +109,7 @@ def test_the_window_line_names_the_dates_behind_a_day_count():
 def test_a_bare_lastn_also_reports_its_window():
     from jobscope.select import FINISHED, Request, sacct_selection
     selection = sacct_selection(Request(mode=FINISHED, lastn=3, user="alice"))
-    pairs = dict(context_pairs(selection, "last 3 jobs, completed", {}))
+    pairs = dict(context_pairs(build_context(selection, "last 3 jobs, completed", {})))
     assert " .. " in pairs["Window"]
 
 
@@ -109,18 +118,19 @@ def test_an_explicit_window_is_not_repeated():
     from jobscope.select import FINISHED, Request, sacct_selection
     selection = sacct_selection(Request(mode=FINISHED, starttime="2026-07-15",
                                         endtime="2026-07-20", user="alice"))
-    pairs = dict(context_pairs(selection, "2026-07-15 00:00 .. 2026-07-20 00:00", {}))
+    pairs = dict(context_pairs(build_context(selection, "2026-07-15 00:00 .. 2026-07-20 00:00", {})))
     assert "Window" not in pairs
 
 
 def test_explicit_job_ids_have_no_window():
     from jobscope.slurm import Selection
-    pairs = dict(context_pairs(Selection(user="alice", jobids=["1"]), "1 job ID(s)", {}))
+    pairs = dict(context_pairs(build_context(Selection(user="alice", jobids=["1"]), "1 job ID(s)", {})))
     assert "Window" not in pairs
 
 
 def test_context_pairs_selection():
-    pairs = context_pairs(Selection(user="bob", account="kempner", partition="gpu"), "last 1 day", {})
+    pairs = context_pairs(build_context(
+        Selection(user="bob", account="kempner", partition="gpu"), "last 1 day", {}))
     assert [p[0] for p in pairs] == ["User", "Account", "Partition", "Select"]
 
 
@@ -177,7 +187,7 @@ def test_dcgm_report_is_one_row_per_job(gpu_record):
     overall = {"SM_ACT%": 60.0, "POWER_W": 400.0}
     dcgm_data = {"100": (overall, {})}
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
-    csv_text = _render(dcgm_report, ["100"], {"100": gpu_record}, dcgm_data, DEFAULT_SPECS, CTX,
+    csv_text = _render(dcgm_report, ["100"], {"100": gpu_record}, dcgm_data, gpu_catalog().default_specs, CTX,
                        options)
     columns, rows = plot.parse_csv(io.StringIO(csv_text))
     assert columns == ["JOBID", "USER", "STATE", "NODE", "CPU%", "MEM%", "#GPU", "GPU%", "GMEM%",
@@ -190,7 +200,6 @@ def test_dcgm_report_is_one_row_per_job(gpu_record):
 
 def test_dcgm_ext_only_widens_the_profiling_block(gpu_record):
     """--ext must not become a different view: identity and jobstats columns are fixed."""
-    from jobscope.dcgm import ALL_SPECS
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
 
     def headers(specs):
@@ -198,7 +207,7 @@ def test_dcgm_ext_only_widens_the_profiling_block(gpu_record):
                        CTX, options)
         return plot.parse_csv(io.StringIO(text))[0]
 
-    default, extended = headers(DEFAULT_SPECS), headers(ALL_SPECS)
+    default, extended = headers(gpu_catalog().default_specs), headers(gpu_catalog().all_specs)
     assert default[:9] == extended[:9]              # identity + jobstats unchanged
     assert extended[-1] == default[-1] == "RUNTIME"
     assert len(extended) > len(default)
@@ -219,11 +228,11 @@ def test_every_per_job_view_shares_one_column_set(gpu_record):
 
     records, data = {"100": gpu_record}, {"100": ({}, {})}
     assert header(summarize, ["100"], records, data) == \
-        header(dcgm_report, ["100"], records, data, DEFAULT_SPECS)
+        header(dcgm_report, ["100"], records, data, gpu_catalog().default_specs)
     # live renders through the same SummaryRenderer, so it cannot diverge: the
     # columns are a pure function of the spec list both are handed.
-    assert [c.header for c in summary_columns(DEFAULT_SPECS)] == \
-        [c.header for c in summary_columns(GPU_SUMMARY_SPECS)]
+    assert [c.header for c in summary_columns(gpu_catalog().default_specs)] == \
+        [c.header for c in summary_columns(gpu_catalog().gpu_summary_specs)]
 
 
 class _TimeseriesClient:
@@ -241,7 +250,7 @@ class _TimeseriesClient:
 def test_dcgm_timeseries_csv(gpu_record):
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True)
     text = _render_ts("dcgm", ["100"], {"100": gpu_record}, _TimeseriesClient(),
-                      options, specs=DEFAULT_SPECS)
+                      options, specs=gpu_catalog().default_specs)
     columns, rows = plot.parse_csv(io.StringIO(text))
     assert columns[:6] == ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU"]
     assert [r["SM_ACT%"] for r in rows] == ["80.0", "60.0"]
@@ -332,7 +341,7 @@ def test_combined_timeseries_csv(gpu_record):
     """
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True, combined=True)
     text = _render_ts("combined", ["100"], {"100": gpu_record},
-                      _CombinedTimeseriesClient(), options, specs=DEFAULT_SPECS)
+                      _CombinedTimeseriesClient(), options, specs=gpu_catalog().default_specs)
     columns, rows = plot.parse_csv(io.StringIO(text))
     assert columns[:6] == ["JOBID", "USER", "EPOCH", "TIME", "NODE", "GPU"]
     assert columns[-2:] == ["CPU%", "MEM%"]
@@ -345,7 +354,7 @@ def _render_stream(renderer_cls, context, options, chunks, **kw):
     out = io.StringIO()
     renderer = renderer_cls(context, options, out, **kw)
     for jobids, records, dcgm_data in chunks:
-        renderer.add(jobids, records, dcgm_data)
+        renderer.add(build_rows(jobids, records, dcgm_data))
     renderer.finish()
     return out.getvalue()
 
@@ -414,7 +423,7 @@ def test_a_single_job_still_emits_its_stat_rows_in_csv():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="gpu", csv=True, header=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     labels = [ln.split(",")[0] for ln in out.getvalue().splitlines()]
     assert "StatGPU%" in labels
@@ -598,7 +607,7 @@ def _footers(records, show_dcgm=False, dcgm_data=None, specs=None, **kw):
                            csv=True, header=True,
                            time_weighted=kw.get("time_weighted", False)),
         out, specs=specs)
-    renderer.add(list(records), records, dcgm_data or {})
+    renderer.add(build_rows(list(records), records, dcgm_data or {}))
     renderer.finish()
     rows = {r.split(",")[0]: r.split(",") for r in out.getvalue().splitlines()}
     header = rows["JOBID"]
@@ -648,12 +657,11 @@ def test_sum_and_max_metrics_fall_back_to_the_plain_mean():
     reported as the plain per-job figure rather than left blank, because the row
     they sit in is now the table's only footer.
     """
-    from jobscope.dcgm import ALL_SPECS
     records = {"1": _gpu_job("1", {"0": 0.0}),
                "2": _gpu_job("2", {"0": 100.0, "1": 100.0})}
     dcgm = {"1": ({"SM_ACT%": 10.0, "ENERGY_kWh": 1.0, "PWRmax_W": 300.0}, {}),
             "2": ({"SM_ACT%": 90.0, "ENERGY_kWh": 8.0, "PWRmax_W": 500.0}, {})}
-    pooled = _footers(records, show_dcgm=True, dcgm_data=dcgm, specs=ALL_SPECS)["UsedPerGPU"]
+    pooled = _footers(records, show_dcgm=True, dcgm_data=dcgm, specs=gpu_catalog().all_specs)["UsedPerGPU"]
     assert pooled["SM_ACT%"] == "63.3"          # (10*1 + 90*2)/3, pooled over GPUs
     assert pooled["ENERGY_kWh"] == "4.500"      # (1 + 8)/2, the per-job mean
     assert pooled["PWRmax_W"] == "400"          # (300 + 500)/2, likewise
@@ -688,7 +696,7 @@ def _stat_rows(records, **kw):
                            color=kw.get("color", False),
                            time_weighted=kw.get("time_weighted", False)),
         out, specs=kw.get("specs"))
-    renderer.add(list(records), records, kw.get("dcgm_data") or {})
+    renderer.add(build_rows(list(records), records, kw.get("dcgm_data") or {}))
     renderer.finish()
     lines = out.getvalue().splitlines()
     start = next(i for i, ln in enumerate(lines) if ln.startswith("METRIC"))
@@ -723,7 +731,7 @@ def _eff_bars(records, **kw):
                            show_dcgm=kw.get("show_dcgm", False),
                            time_weighted=kw.get("time_weighted", False)),
         out, specs=kw.get("specs"))
-    renderer.add(list(records), records, kw.get("dcgm_data") or {})
+    renderer.add(build_rows(list(records), records, kw.get("dcgm_data") or {}))
     renderer.finish()
     bars = {}
     for line in out.getvalue().splitlines():
@@ -743,7 +751,7 @@ def _sections(records, **kw):
                            plot_avgeff=kw.get("plot_avgeff", True),
                            time_weighted=kw.get("time_weighted", False)),
         out, specs=kw.get("specs"))
-    renderer.add(list(records), records, kw.get("dcgm_data") or {})
+    renderer.add(build_rows(list(records), records, kw.get("dcgm_data") or {}))
     renderer.finish()
     found, current = [], None
     for line in out.getvalue().splitlines():
@@ -764,14 +772,14 @@ def test_rows_reach_the_screen_before_the_summary(capsys):
     """
     out = io.StringIO()
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
-    renderer.add(["1"], {"1": _gpu_job("1", {"0": 90.0})}, {})
+    renderer.add(build_rows(["1"], {"1": _gpu_job("1", {"0": 90.0})}, {}))
     after_first = out.getvalue()
     assert any(ln.startswith("1 ") or ln.startswith("1\t") or ln.split()[:1] == ["1"]
                for ln in after_first.splitlines() if ln.strip()), after_first
     assert "Summary by metric" not in after_first
     assert "\u2588" not in after_first          # nor the efficiency bars
 
-    renderer.add(["2"], {"2": _gpu_job("2", {"0": 10.0})}, {})
+    renderer.add(build_rows(["2"], {"2": _gpu_job("2", {"0": 10.0})}, {}))
     renderer.finish()
     whole = out.getvalue()
     assert whole.startswith(after_first), "an earlier row must not be rewritten"
@@ -789,8 +797,8 @@ def test_each_add_flushes_so_a_pipe_sees_the_rows(monkeypatch):
 
     out = Watched()
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
-    renderer.add(["1"], {"1": _gpu_job("1", {"0": 90.0})}, {})
-    renderer.add(["2"], {"2": _gpu_job("2", {"0": 10.0})}, {})
+    renderer.add(build_rows(["1"], {"1": _gpu_job("1", {"0": 90.0})}, {}))
+    renderer.add(build_rows(["2"], {"2": _gpu_job("2", {"0": 10.0})}, {}))
     assert len(flushes) >= 2 and flushes == sorted(flushes)
 
 
@@ -840,7 +848,7 @@ def test_each_rule_spans_its_own_sections_widest_visible_line():
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="gpu", header=True, color=True,
                            thresholds=_thresholds()), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     lines = out.getvalue().splitlines()
     for i, line in enumerate(lines):
@@ -861,7 +869,7 @@ def test_noheader_drops_the_section_furniture_but_keeps_the_data():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=False), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     text = out.getvalue()
     assert "1. Summary by metric" not in text and "---" not in text
@@ -873,7 +881,7 @@ def test_csv_gets_no_section_furniture():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, csv=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     text = out.getvalue()
     for furniture in ("1. ", "2. ", "3. ", "\u2588", "\u2591", "---"):
@@ -913,7 +921,7 @@ def test_power_gets_a_table_row_but_no_bar():
     """
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
     dcgm = {j: ({"POWER_W": 300.0, "SM_ACT%": 40.0}, {}) for j in records}
-    bars = _eff_bars(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
+    bars = _eff_bars(records, show_dcgm=True, dcgm_data=dcgm, specs=gpu_catalog().default_specs)
     assert "SM_ACT%" in bars and "POWER_W" not in bars
     assert "POWER_W" in _power_stats(300.0)
 
@@ -931,7 +939,7 @@ def test_the_bars_are_tinted_by_band_and_only_when_colour_is_on():
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="gpu", header=True, plot_avgeff=True, color=True,
                            thresholds=_thresholds()), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     bar = [ln for ln in out.getvalue().splitlines() if "\u2588" in ln][0]
     assert report._SGR["green"] in bar          # 95% is green at a cutoff of 10
@@ -945,14 +953,14 @@ def test_no_bars_in_csv_or_under_no_plot():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, plot_avgeff=False), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     assert "\u2588" not in out.getvalue()
 
     # And they are there without asking, now that they are the default.
     shown = io.StringIO()
     default = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), shown)
-    default.add(list(records), records, {})
+    default.add(build_rows(list(records), records, {}))
     default.finish()
     assert "\u2588" in shown.getvalue()
 
@@ -967,7 +975,7 @@ def _finish(records, view="all", **kw):
     dcgm_data = kw.pop("dcgm_data", None)
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view=view, header=kw.pop("header", True), **kw), out)
-    renderer.add(list(records), records, dcgm_data or {})
+    renderer.add(build_rows(list(records), records, dcgm_data or {}))
     renderer.finish()
     return out.getvalue()
 
@@ -1070,7 +1078,7 @@ def test_the_bar_title_obeys_noheader():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="gpu", header=False, plot_avgeff=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     text = out.getvalue()
     assert "Avg efficiency" not in text and "\u2588" in text
@@ -1088,7 +1096,7 @@ def test_the_stat_table_carries_a_legend():
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
     out = io.StringIO()
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     text = out.getvalue()
     # "at or below": the boundary is inclusive -- exactly 10.0 bands inefficient,
@@ -1149,7 +1157,7 @@ def test_the_summary_says_how_it_averaged(folded, expected, absent):
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, time_weighted=folded), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     line = _averaging_line(out.getvalue())
     for phrase in expected:
@@ -1165,8 +1173,8 @@ def test_the_note_and_the_used_label_cannot_disagree():
         out = io.StringIO()
         renderer = report.SummaryRenderer(
             CTX, RenderOptions(view="all", header=True, time_weighted=folded), out)
-        renderer.add(["1", "2"], {"1": _gpu_job("1", {"0": 90.0}),
-                                  "2": _gpu_job("2", {"0": 10.0})}, {})
+        renderer.add(build_rows(["1", "2"], {"1": _gpu_job("1", {"0": 90.0}),
+                                  "2": _gpu_job("2", {"0": 10.0})}, {}))
         renderer.finish()
         text = out.getvalue()
         assert unit in text
@@ -1180,7 +1188,7 @@ def test_a_single_job_is_not_described_as_pooled():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, time_weighted=True), out)
-    renderer.add(["1"], {"1": _gpu_job("1", {"0": 90.0})}, {})
+    renderer.add(build_rows(["1"], {"1": _gpu_job("1", {"0": 90.0})}, {}))
     renderer.finish()
     text = out.getvalue()
     line = _averaging_line(text)
@@ -1214,7 +1222,7 @@ def test_a_single_job_verdict_says_what_it_graded(folded, caveated):
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, time_weighted=folded), out)
-    renderer.add(["1"], {"1": _gpu_job("1", {"0": 90.0})}, {})
+    renderer.add(build_rows(["1"], {"1": _gpu_job("1", {"0": 90.0})}, {}))
     renderer.finish()
     text = out.getvalue()
     assert "Efficiency:" in text and "Graded by" in text      # the premise
@@ -1237,7 +1245,7 @@ def test_noheader_drops_both_averaging_notes():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=False), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     text = out.getvalue()
     assert not any(o in text for o in _AVERAGING_OPENERS)
@@ -1314,7 +1322,7 @@ def test_the_legend_is_suppressed_with_noheader_and_in_csv():
                     RenderOptions(view="all", header=True, csv=True)):
         out = io.StringIO()
         renderer = report.SummaryRenderer(CTX, options, out)
-        renderer.add(list(records), records, {})
+        renderer.add(build_rows(list(records), records, {}))
         renderer.finish()
         assert "RED<" not in out.getvalue()
 
@@ -1346,7 +1354,7 @@ def test_the_default_view_reports_both_resources():
         out = io.StringIO()
         renderer = report.SummaryRenderer(
             CTX, RenderOptions(view=view, header=True), out)
-        renderer.add(list(records), records, {})
+        renderer.add(build_rows(list(records), records, {}))
         renderer.finish()
         return out.getvalue()
 
@@ -1366,7 +1374,7 @@ def test_the_totals_line_reconciles_with_its_own_percentage():
     records = {"a": _gpu_job("a", {"0": 90.0}), "b": _gpu_job("b", {"0": 80.0})}
     out = io.StringIO()
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="gpu", header=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     # ALLOC and IDLE are gone; USED still reconciles with its own percentage.
     assert _stat_rows(records, view="gpu")["GPU%"]["USED"] == "1.7 (85%)"   # 1.7/2 = 85%
@@ -1377,24 +1385,23 @@ def test_the_used_cell_is_the_share_that_did_work():
                "busy": _gpu_job("busy", {"0": 100.0})}
     out = io.StringIO()
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     assert _stat_rows(records)["GPU%"]["USED"] == "1 (25%)"    # 1 of 4 GPUs busy
 
 
 def test_every_graded_column_gets_a_row_in_column_order():
     """The set follows the view, so the block cannot drift from the table above it."""
-    from jobscope.dcgm import ALL_SPECS
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
     dcgm = {j: ({"SM_ACT%": 50.0, "OCC%": 20.0, "TENSOR%": 1.0, "DRAM%": 8.0,
                  "ENGINE%": 30.0}, {})
             for j in records}
-    rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
+    rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=gpu_catalog().default_specs)
     assert list(rows) == ["CPU%", "MEM%", "GPU%", "GMEM%",
                           "SM_ACT%", "TENSOR%", "DRAM%"]
     # --dcgm widens the table, so it widens the block too. ENGINE% is only in the
     # extended catalog, so it can only appear there.
-    wide = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=ALL_SPECS)
+    wide = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=gpu_catalog().all_specs)
     assert list(wide)[:7] == list(rows)
     assert "ENGINE%" in wide and "ENGINE%" not in rows
     assert "OCC%" in wide and "OCC%" not in rows
@@ -1412,7 +1419,7 @@ def test_a_job_with_no_stored_summary_votes_in_no_tally():
     blank = dataclasses.replace(_gpu_job("blank", {"0": 5.0}), stats={})
     records = {"good": good, "blank": blank}
     dcgm = {j: ({"SM_ACT%": 5.0}, {}) for j in records}
-    rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
+    rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=gpu_catalog().default_specs)
     # One denominator everywhere: only the jobstats summary-having job voted.
     for metric in ("GPU%", "SM_ACT%"):
         good, ok, bad = _counts(rows[metric])
@@ -1422,8 +1429,8 @@ def test_a_job_with_no_stored_summary_votes_in_no_tally():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, show_dcgm=True), out,
-        specs=DEFAULT_SPECS)
-    renderer.add(list(records), records, dcgm)
+        specs=gpu_catalog().default_specs)
+    renderer.add(build_rows(list(records), records, dcgm))
     renderer.finish()
     text = out.getvalue()
     assert "blank" in text and "no-jobstats=1" in text
@@ -1448,7 +1455,7 @@ def test_a_metric_no_job_reported_is_omitted():
     """A row of zeros would read as "nothing used it", not "nothing measured it"."""
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
     dcgm = {j: ({"SM_ACT%": 50.0}, {}) for j in records}    # OCC%/TENSOR%/DRAM% absent
-    rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=DEFAULT_SPECS)
+    rows = _stat_rows(records, show_dcgm=True, dcgm_data=dcgm, specs=gpu_catalog().default_specs)
     assert "SM_ACT%" in rows
     assert "OCC%" not in rows and "TENSOR%" not in rows and "DRAM%" not in rows
 
@@ -1485,7 +1492,7 @@ def test_the_band_cells_are_tinted_and_idle_takes_the_pooled_grade():
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="gpu", header=True, color=True,
                            thresholds=_thresholds()), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     line = [ln for ln in out.getvalue().splitlines() if ln.startswith("GPU%")][0]
     # The red band cell, plus IDLE -- pooled utilization is 3%, well under the cutoff.
@@ -1501,7 +1508,7 @@ def test_the_table_is_plain_in_csv_mode_and_when_color_is_off():
                     RenderOptions(view="gpu", header=True, color=True, csv=True)):
         out = io.StringIO()
         renderer = report.SummaryRenderer(CTX, options, out)
-        renderer.add(list(records), records, {})
+        renderer.add(build_rows(list(records), records, {}))
         renderer.finish()
         assert "\033" not in out.getvalue()
 
@@ -1514,7 +1521,7 @@ def test_worst_ranks_by_wasted_resource_not_by_size():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, time_weighted=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     lines = out.getvalue().splitlines()
     i = next(idx for idx, ln in enumerate(lines) if ln.startswith("Wasteful GPU"))
@@ -1550,7 +1557,7 @@ def _worst_lines(records, view="all", time_weighted=True):
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view=view, header=True, time_weighted=time_weighted), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     return _wasteful_blocks(out.getvalue())
 
@@ -1651,7 +1658,7 @@ def test_wasteful_headings_state_their_own_criteria():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, time_weighted=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     text = out.getvalue()
     assert "Wasteful GPU (" in text and "GPU < 2%" in text
@@ -1674,7 +1681,7 @@ def test_a_custom_wasteful_cutoff_changes_membership_and_the_heading():
         renderer = report.SummaryRenderer(
             CTX, RenderOptions(view="all", header=True, time_weighted=True,
                               thresholds=thresholds), out)
-        renderer.add(list(records), records, {})
+        renderer.add(build_rows(list(records), records, {}))
         renderer.finish()
         return out.getvalue()
 
@@ -1699,9 +1706,9 @@ def test_the_power_heading_states_watts_not_percent():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, show_dcgm=True, time_weighted=True),
-        out, specs=DEFAULT_SPECS)
-    renderer.add(list(records), records,
-                 {j: ({"POWER_W": 50.0, "SM_ACT%": 90.0}, {}) for j in records})
+        out, specs=gpu_catalog().default_specs)
+    renderer.add(build_rows(list(records), records,
+                 {j: ({"POWER_W": 50.0, "SM_ACT%": 90.0}, {}) for j in records}))
     renderer.finish()
     assert "POWER < 100W" in out.getvalue()
 
@@ -1718,10 +1725,10 @@ def _worst_with_power(records, watts, **kw):
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view=kw.get("view", "all"), header=True, show_dcgm=True,
                            time_weighted=kw.get("time_weighted", True)),
-        out, specs=DEFAULT_SPECS)
+        out, specs=gpu_catalog().default_specs)
     dcgm = {j: ({"POWER_W": watts[j], "SM_ACT%": kw.get("sm", {}).get(j, 50.0)}, {})
             for j in records}
-    renderer.add(list(records), records, dcgm)
+    renderer.add(build_rows(list(records), records, dcgm))
     renderer.finish()
     return _wasteful_blocks(out.getvalue())
 
@@ -1763,7 +1770,7 @@ def _worst_block(records, **kw):
                            worst_jobs=kw.get("worst_jobs", report.DEFAULT_WORST_JOBS),
                            long_running=kw.get("long_running",
                                                report.LONG_RUNNING)), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     lines, keep = [], False
     for line in out.getvalue().splitlines():
@@ -1856,9 +1863,9 @@ def _power_stats(watts):
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", header=True, show_dcgm=True, time_weighted=True),
-        out, specs=DEFAULT_SPECS)
-    renderer.add(list(records), records,
-                 {j: ({"POWER_W": watts, "SM_ACT%": 40.0}, {}) for j in records})
+        out, specs=gpu_catalog().default_specs)
+    renderer.add(build_rows(list(records), records,
+                 {j: ({"POWER_W": watts, "SM_ACT%": 40.0}, {}) for j in records}))
     renderer.finish()
     lines = out.getvalue().splitlines()
     start = next(i for i, ln in enumerate(lines) if ln.startswith("METRIC"))
@@ -1925,7 +1932,7 @@ def test_no_worst_line_when_nothing_is_red():
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 80.0})}
     out = io.StringIO()
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     # No label at all, not merely the old "Worst:" spelling.
     assert "Wasteful" not in out.getvalue()
@@ -1936,7 +1943,7 @@ def test_the_block_follows_the_cpu_view_to_cores():
     records = {"1": _gpu_job("1", {"0": 90.0}), "2": _gpu_job("2", {"0": 10.0})}
     out = io.StringIO()
     renderer = report.SummaryRenderer(CTX, RenderOptions(view="cpu", header=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     text = out.getvalue()
     assert list(_stat_rows(records, view="cpu")) == ["CPU%", "MEM%"]
@@ -1981,7 +1988,7 @@ def _tw_footers(records, **kw):
         CTX, RenderOptions(view="all", csv=True, header=True, time_weighted=True,
                            show_dcgm=kw.get("show_dcgm", False)),
         out, specs=kw.get("specs"))
-    renderer.add(list(records), records, kw.get("dcgm_data") or {})
+    renderer.add(build_rows(list(records), records, kw.get("dcgm_data") or {}))
     renderer.finish()
     rows = {r.split(",")[0]: r.split(",") for r in out.getvalue().splitlines()}
     return {label: dict(zip(rows["JOBID"], cells)) for label, cells in rows.items()}
@@ -2057,7 +2064,7 @@ def test_plot_skips_the_time_weighted_footer():
     out = io.StringIO()
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", csv=True, header=True, time_weighted=True), out)
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     _, rows = plot.parse_csv(io.StringIO(out.getvalue()))
     assert {r["JOBID"] for r in rows} == {"a", "b"}
@@ -2431,7 +2438,7 @@ def _ts_nodes(nodename, gpu_record):
     options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
                             nodename=nodename)
     text = _render_ts("dcgm", ["100"], {"100": gpu_record}, _TwoNodeTimeseriesClient(),
-                      options, specs=DEFAULT_SPECS)
+                      options, specs=gpu_catalog().default_specs)
     _cols, rows = plot.parse_csv(io.StringIO(text))
     return [r["NODE"] for r in rows]
 
@@ -2458,9 +2465,9 @@ def test_a_failed_timeseries_filter_writes_no_header(gpu_record):
     # comes afterwards, from the filter that matched no node, which is what leaves
     # the header unwritten rather than written-then-regretted.
     report.dcgm_timeseries(
-        ts.finished_gpu(["100"], {"100": gpu_record}, DEFAULT_SPECS,
+        ts.finished_gpu(["100"], {"100": gpu_record}, gpu_catalog().default_specs,
                         _TwoNodeTimeseriesClient(), None, match=match),
-        DEFAULT_SPECS, options, out=out)
+        gpu_catalog().default_specs, options, out=out)
     assert out.getvalue() == ""
     with pytest.raises(JobscopeError):
         match.check()
@@ -2472,7 +2479,7 @@ def test_the_timeseries_header_is_unchanged_by_the_filter(gpu_record):
         options = RenderOptions(view="all", show_dcgm=True, csv=True, header=True,
                                 nodename=nodename)
         text = _render_ts("dcgm", ["100"], {"100": gpu_record},
-                          _TwoNodeTimeseriesClient(), options, specs=DEFAULT_SPECS)
+                          _TwoNodeTimeseriesClient(), options, specs=gpu_catalog().default_specs)
         return text.splitlines()[0]
 
     assert header("node01") == header(None)
@@ -3099,7 +3106,7 @@ def test_the_band_keys_and_the_csv_schema_do_not_follow_the_palette():
     try:
         report.set_palette(Palette(colors={"wasteful": "cyan", "inefficient": "cyan",
                                           "average": "magenta", "good": "magenta"}))
-        renderer.add(list(records), records, {})
+        renderer.add(build_rows(list(records), records, {}))
         renderer.finish()
     finally:
         report.set_palette(Palette())
@@ -3166,7 +3173,7 @@ def test_the_summary_profiling_block_follows_the_configured_metrics():
     renderer = report.SummaryRenderer(
         CTX, RenderOptions(view="all", show_dcgm=True, header=True), out,
         specs=specs_named(["gpu", "sm_act", "power", "mem", "memtot"]))
-    renderer.add(list(records), records, dcgm)
+    renderer.add(build_rows(list(records), records, dcgm))
     renderer.finish()
     header = next(ln for ln in out.getvalue().splitlines() if ln.startswith("JOBID"))
     assert "SM_ACT%" in header and "POWER_W" in header
@@ -3187,7 +3194,7 @@ def test_the_detail_view_keeps_its_fixed_columns_whatever_metrics_say():
     renderer = report.DetailRenderer(
         CTX, RenderOptions(view="all", show_dcgm=True, header=True))
     renderer.out = out
-    renderer.add(list(records), records, {})
+    renderer.add(build_rows(list(records), records, {}))
     renderer.finish()
     text = out.getvalue()
     for header in ("SM_ACT%", "TENSOR%", "DRAM%", "POWER_W"):
@@ -3224,7 +3231,7 @@ def _detail_cells(name, preference, csv=False, color=False):
                             color=color, thresholds=_thresholds())
     out = io.StringIO()
     renderer = report.DetailRenderer(CTX, options, out)
-    renderer.add(["1"], records, {"1": ({}, {("n1", "0"): dict(_PROFILING_VALUES)})})
+    renderer.add(build_rows(["1"], records, {"1": ({}, {("n1", "0"): dict(_PROFILING_VALUES)})}))
     renderer.finish()
     return renderer.columns, out.getvalue()
 
@@ -3324,7 +3331,7 @@ def test_an_empty_query_leaves_the_stored_cell_rather_than_blanking_it(preferenc
     out = io.StringIO()
     renderer = report.DetailRenderer(
         CTX, RenderOptions(view="all", show_dcgm=True, header=True), out)
-    renderer.add(["1"], records, {"1": ({}, {("n1", "0"): {"SM_ACT%": 22.0}})})
+    renderer.add(build_rows(["1"], records, {"1": ({}, {("n1", "0"): {"SM_ACT%": 22.0}})}))
     renderer.finish()
     assert _cell(renderer.columns, out.getvalue(), "GPU%") == "50%"
 
@@ -3366,8 +3373,8 @@ def test_a_long_float_duty_cycle_is_rounded_to_the_column(preference):
     out = io.StringIO()
     renderer = report.DetailRenderer(
         CTX, RenderOptions(view="all", show_dcgm=True, header=True), out)
-    renderer.add(["1"], records,
-                 {"1": ({}, {("n1", "0"): {"GPU%": 57.888888888}})})
+    renderer.add(build_rows(["1"], records,
+                 {"1": ({}, {("n1", "0"): {"GPU%": 57.888888888}})}))
     renderer.finish()
     assert _cell(renderer.columns, out.getvalue(), "GPU%") == "58%"
 
@@ -3388,7 +3395,7 @@ def test_no_column_is_offered_twice_or_addressed_past_the_row(name, preference):
     columns, _text = _detail_cells(name, preference)
     headers = [c.header for c in columns]
     assert len(headers) == len(set(headers)), headers
-    row = report.detail_row_cells(("n1", "0", "-", "-", "-", "-", "-"),
+    row = report.detail_row_cells(models.UnitRow("n1", "0"),
                                    {("n1", "0"): dict(_PROFILING_VALUES)})
     assert max(c.index for c in columns) < len(row)
 
@@ -3563,9 +3570,9 @@ def _gpuid_rows(gpu_ids, nodename=None):
     out = io.StringIO()
     match = ts.UnitFilter(nodename, gpu_ids)
     report.dcgm_timeseries(
-        ts.finished_gpu(["100"], {"100": _four_gpu_record()}, DEFAULT_SPECS,
+        ts.finished_gpu(["100"], {"100": _four_gpu_record()}, gpu_catalog().default_specs,
                         _FourGpuClient(), None, match=match),
-        DEFAULT_SPECS, options, out=out)
+        gpu_catalog().default_specs, options, out=out)
     match.check()
     _cols, rows = plot.parse_csv(io.StringIO(out.getvalue()))
     return sorted({r["GPU"] for r in rows})
@@ -3629,7 +3636,7 @@ def _per_node_rows(stats, dcgm_data=None, csv=False, level="node", runtime="01:0
                             thresholds=_thresholds())
     out = io.StringIO()
     renderer = report.DetailRenderer(CTX, options, out, level=level)
-    renderer.add(["1"], {"1": record}, dcgm_data or {})
+    renderer.add(build_rows(["1"], {"1": record}, dcgm_data or {}))
     renderer.finish()
     text = out.getvalue()
     if csv:
@@ -3716,7 +3723,7 @@ def test_elapsed_survives_a_view_with_no_profiling_block():
     out = io.StringIO()
     renderer = report.DetailRenderer(
         CTX, RenderOptions(view="cpu", show_dcgm=False, header=True), out, level="node")
-    renderer.add(["1"], {"1": record}, {})
+    renderer.add(build_rows(["1"], {"1": record}, {}))
     renderer.finish()
     text = out.getvalue()
     assert "RUNTIME" in text and "01:00:00" in text
@@ -3770,7 +3777,7 @@ def test_a_single_node_at_node_level_charts_by_node_not_by_card():
         r = report.DetailRenderer(
             CTX, RenderOptions(view="all", header=True, plot_avgeff=True,
                                thresholds=_thresholds()), out, level=level)
-        r.add(["1"], {"1": record}, {})
+        r.add(build_rows(["1"], {"1": record}, {}))
         r.finish()
         return out.getvalue()
 
@@ -3976,7 +3983,7 @@ def _detail_out(records, total, level=report.NODE_LEVEL, **kw):
         CTX, RenderOptions(view="all", header=True, show_dcgm=kw.get("show_dcgm", False),
                            csv=kw.get("csv", False)),
         out, level=level, specs=kw.get("specs"), total=total)
-    renderer.add(list(records), records, kw.get("dcgm_data") or {})
+    renderer.add(build_rows(list(records), records, kw.get("dcgm_data") or {}))
     renderer.finish()
     return out.getvalue()
 
@@ -4014,7 +4021,7 @@ def test_the_aggregate_equals_the_per_job_views_summary():
 
     out = io.StringIO()
     per_job = report.SummaryRenderer(CTX, RenderOptions(view="all", header=True), out)
-    per_job.add(list(records), records, {})
+    per_job.add(build_rows(list(records), records, {}))
     per_job.finish()
 
     def sections(text):
@@ -4032,3 +4039,79 @@ def test_the_aggregate_stays_out_of_the_csv():
     text = _detail_out(records, total=2, csv=True)
     for prefix in ("Stat", "Worst", "Jobs"):
         assert not any(ln.startswith(prefix) for ln in text.splitlines()), (prefix, text)
+
+
+# --- the CSV column contract, pinned ------------------------------------------------
+#
+# jobscope plot parses this output (plot.parse_csv), so the header row and its order are
+# a public interface, not an implementation detail. The tests above check that each cell
+# lands under its own header; these check that the set of headers is what it was. Read
+# through parse_csv rather than by splitting, so they assert against the actual consumer.
+
+def test_the_summary_csv_header_row_is_fixed():
+    """--all-metrics widens the profiling block and nothing else moves."""
+    records = {"1": _gpu_job("1", {"0": 90.0})}
+    out = io.StringIO()
+    renderer = report.SummaryRenderer(
+        CTX, RenderOptions(view="all", show_dcgm=True, csv=True, header=True), out)
+    renderer.add(build_rows(list(records), records, {"1": ({"SM_ACT%": 40.0}, {})}))
+    renderer.finish()
+    columns, _rows = plot.parse_csv(io.StringIO(out.getvalue()))
+    assert columns == ["JOBID", "USER", "STATE", "NODE", "CPU%", "MEM%", "#GPU", "GPU%",
+                       "GMEM%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME"]
+
+
+@pytest.mark.parametrize("level, unit", [("gpu", "GPU"), ("node", "#GPU")])
+def test_the_detail_csv_header_row_is_fixed(level, unit):
+    """Both levels share a renderer and differ in exactly one cell -- see report.py's
+    note on why cell 1 is a card's minor number at gpu level and a count at node level.
+
+    RUNTIME prints last while occupying row cell 7, so this also pins that the display
+    order and Column.index stay decoupled.
+    """
+    record = _gpu_job("1", {"0": 90.0, "1": 50.0})
+    out = io.StringIO()
+    renderer = report.DetailRenderer(
+        CTX, RenderOptions(view="all", show_dcgm=True, csv=True, header=True),
+        out, level=level)
+    renderer.add(build_rows(["1"], {"1": record},
+                 {"1": ({}, {("n1", "0"): dict(_PROFILING_VALUES),
+                             ("n1", "1"): dict(_PROFILING_VALUES)})}))
+    renderer.finish()
+    columns, _rows = plot.parse_csv(io.StringIO(out.getvalue()))
+    assert columns == ["JOBID", "NODE", unit, "CPU%", "CPU-MEM", "GPU%", "GPU-MEM",
+                       "GMEM%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME"]
+
+
+@pytest.mark.parametrize("name", ["jobstats", "dcgm", "nvml"])
+def test_the_detail_csv_header_row_survives_every_source_order(name, preference):
+    """Promoting an exporter moves which source *fills* the prefix cells; it must not
+    move the cells. This is the CSV half of the by-header assertions above."""
+    _columns, text = _detail_cells(name, preference, csv=True)
+    columns, rows = plot.parse_csv(io.StringIO(text))
+    assert columns == ["JOBID", "NODE", "GPU", "CPU%", "CPU-MEM", "GPU%", "GPU-MEM",
+                       "GMEM%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME"]
+    assert len(rows) == 1
+
+
+def test_the_detail_prefix_follows_the_per_unit_header_list():
+    """One list drives both the cells a row carries and the columns that print them.
+
+    They used to be two hand-kept lists -- jobstats built a 7-tuple in one order and
+    detail_prefix wrote out seven Columns in another -- with nothing tying them
+    together but the fact that both were correct at the time.
+    """
+    from jobscope.jobstats import UNIT_HEADERS
+    prefix = report.detail_prefix("gpu")
+    assert [c.header for c in prefix] == ["NODE", "GPU"] + list(UNIT_HEADERS)
+    # Contiguous from 0, so the runtime cell that follows can be a constant index.
+    assert [c.index for c in prefix] == list(range(len(prefix)))
+    assert report._RUNTIME_INDEX == len(prefix)
+
+
+def test_the_two_detail_levels_differ_in_exactly_one_column():
+    """Which is what lets them share a renderer -- see report.py's note on cell 1."""
+    gpu = report.detail_prefix("gpu")
+    node = report.detail_prefix("node")
+    differ = [(a.header, b.header) for a, b in zip(gpu, node) if a != b]
+    assert differ == [("GPU", "#GPU")]
