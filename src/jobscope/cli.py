@@ -1188,7 +1188,9 @@ def handle_report(args) -> None:
                 else DetailRenderer(selected.context, options, level=level, specs=specs,
                                     total=selected.total))
     for chunk_ids, records, dcgm_data in selected.chunks:
-        renderer.add(rows.build_rows(chunk_ids, records, dcgm_data))
+        # `level` travels with the call so a summary sweep does not build the per-unit
+        # rows only a detail view reads -- see jobscope.rows.
+        renderer.add(rows.build_rows(chunk_ids, records, dcgm_data, level))
     renderer.finish()
 
 

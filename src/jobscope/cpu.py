@@ -235,10 +235,10 @@ def default_view(view: str, family: Optional[str] = None) -> List[CgroupSpec]:
 def register(extra: List[CgroupSpec]) -> None:
     """Replace the site-defined additions to the cgroup catalog with ``extra``."""
     global _ACTIVE
-    _ACTIVE = _build(merged_metrics(extra), _ACTIVE.preference)
+    _ACTIVE = _build(_merged_metrics(extra), _ACTIVE.preference)
 
 
-def merged_metrics(extra: Sequence[CgroupSpec]) -> Tuple[CgroupSpec, ...]:
+def _merged_metrics(extra: Sequence[CgroupSpec]) -> Tuple[CgroupSpec, ...]:
     """The built-in catalog with ``extra`` overriding by key and appending the rest."""
     by_key = {spec.key: spec for spec in extra}
     merged = [_inherit(builtin, by_key.pop(builtin.key, None))

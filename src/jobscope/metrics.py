@@ -65,21 +65,20 @@ class Catalog:
     no role lookup and no label, and that ``probe`` still calls unnamed.
     """
 
-    specs: Tuple = ()
-    by_header: Mapping[str, object] = None       # type: ignore[assignment]
-    position: Mapping[str, int] = None           # type: ignore[assignment]
+    specs: Tuple
+    by_header: Mapping[str, object]
+    position: Mapping[str, int]
 
 
-def _build() -> Catalog:
-    """The cross-family view over whatever the two family catalogs now hold.
+def _build(gpu, host) -> Catalog:
+    """The cross-family view over two family catalogs.
 
-    Reads ``dcgm.catalog().all_specs`` -- the *resolved* candidates, one per column --
-    rather than the raw declaration, which holds every candidate and so has ``GPU%``
-    twice once two exporters offer it. Roles are a property of the column, so asking a
-    duplicated header for its roles has no single answer.
+    Reads ``gpu.all_specs`` -- the *resolved* candidates, one per column -- rather than
+    the raw declaration, which holds every candidate and so has ``GPU%`` twice once two
+    exporters offer it. Roles are a property of the column, so asking a duplicated
+    header for its roles has no single answer.
     """
-    specs = (tuple(dcgm.catalog().all_specs) + tuple(dcgm.DERIVED_COLUMNS)
-             + tuple(cpu.catalog().metrics))
+    specs = tuple(gpu.all_specs) + tuple(dcgm.DERIVED_COLUMNS) + tuple(host.metrics)
     return Catalog(
         specs=specs,
         # Header -> spec, across every family. Flat because headers are unique
@@ -90,27 +89,30 @@ def _build() -> Catalog:
     )
 
 
-_ACTIVE: Catalog = _build()
+# (gpu catalog, host catalog, the view over them). Memoised on the *identity* of its
+# two inputs rather than invalidated by hand: both are frozen and replaced wholesale,
+# so `is not` is an exact staleness test and there is no rebuild() for a caller to
+# forget. That matters more here than anywhere else -- this view depends on two
+# catalogs that move independently, so an explicit invalidation would have to be
+# sequenced correctly against both, which is the ordering rule build_catalogs exists
+# to remove rather than one it should add.
+#
+# The race between two threads both finding it stale is benign: the derivation is pure
+# and the tuple assignment atomic, so the loser recomputes an equal value.
+_CACHE = None
 
 
 def catalog() -> Catalog:
-    """The cross-family catalog in force; see :func:`jobscope.dcgm.catalog`."""
-    return _ACTIVE
+    """The cross-family catalog for whatever the family catalogs now hold.
 
-
-def rebuild() -> None:
-    """Recompute the cross-family view after either family catalog changes.
-
-    ``[metrics.<family>.<name>]`` can add or replace entries at config-load time,
-    which is after this module was imported. Without this the site metric would be
-    invisible here -- no role lookup, no ``label``, and ``probe`` would still call
-    it unnamed -- while working perfectly everywhere else.
-
-    Must run *after* both families have resolved, which is what
-    :func:`jobscope.config.build_catalogs` exists to guarantee.
+    Derived on demand; see :func:`jobscope.dcgm.catalog` for the frozen-snapshot rule
+    the families follow.
     """
-    global _ACTIVE
-    _ACTIVE = _build()
+    global _CACHE
+    gpu, host = dcgm.catalog(), cpu.catalog()
+    if _CACHE is None or _CACHE[0] is not gpu or _CACHE[1] is not host:
+        _CACHE = (gpu, host, _build(gpu, host))
+    return _CACHE[2]
 
 
 def spec_for(header: str) -> Optional[object]:

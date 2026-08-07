@@ -120,16 +120,16 @@ def jobstats_per_node(stats: dict) -> List[UnitRow]:
         total_by_gpu = info.get("gpu_total_memory") or {}
         cards = list(util or total_by_gpu)
         if not cards:
-            rows.append(UnitRow(node, "0", dict(host, **_NO_GPU)))
+            rows.append(UnitRow(node, "0", {**host, **_NO_GPU}))
             continue
         used = sum(used_by_gpu.get(g, 0) for g in cards)
         total = sum(total_by_gpu.get(g, 0) for g in cards)
         mean_util = sum(util.values()) / len(util) if util else 0
-        rows.append(UnitRow(node, str(len(cards)), dict(
-            host,
-            **{GPU_CELL: "%g%%" % round(mean_util, 1),
-               GPU_MEM_CELL: "%s/%s" % (bytes_to_gb(used), bytes_to_gb(total)),
-               GMEM_CELL: "%.1f%%" % (100 * used / total if total else 0)})))
+        rows.append(UnitRow(node, str(len(cards)), {
+            **host,
+            GPU_CELL: "%g%%" % round(mean_util, 1),
+            GPU_MEM_CELL: "%s/%s" % (bytes_to_gb(used), bytes_to_gb(total)),
+            GMEM_CELL: "%.1f%%" % (100 * used / total if total else 0)}))
     return rows
 
 
@@ -285,11 +285,11 @@ def jobstats_detail(stats: dict) -> List[UnitRow]:
             for gpu in sorted(gpu_util or gpu_total, key=str):
                 used, total = gpu_used.get(gpu, 0), gpu_total.get(gpu, 0)
                 gmem = 100 * used / total if total else 0
-                rows.append(UnitRow(node, str(gpu), dict(
-                    host,
-                    **{GPU_CELL: "%g%%" % gpu_util.get(gpu, 0),
-                       GPU_MEM_CELL: "%s/%s" % (bytes_to_gb(used), bytes_to_gb(total)),
-                       GMEM_CELL: "%.1f%%" % gmem})))
+                rows.append(UnitRow(node, str(gpu), {
+                    **host,
+                    GPU_CELL: "%g%%" % gpu_util.get(gpu, 0),
+                    GPU_MEM_CELL: "%s/%s" % (bytes_to_gb(used), bytes_to_gb(total)),
+                    GMEM_CELL: "%.1f%%" % gmem}))
         else:
-            rows.append(UnitRow(node, "-", dict(host, **_NO_GPU)))
+            rows.append(UnitRow(node, "-", {**host, **_NO_GPU}))
     return rows

@@ -7,6 +7,7 @@ import json
 import pytest
 
 from jobscope import config as config_module
+from jobscope import source
 from jobscope import report, running, slurm
 from jobscope.jobstats import GIB
 from jobscope.slurm import JobRecord
@@ -58,6 +59,17 @@ DEFAULT_CONFIG = config_module.Config(
 )
 
 
+def _reset_catalogs() -> None:
+    """Built-in metrics under the built-in source order -- a complete catalog reset.
+
+    Both halves matter: resetting the definitions while keeping whatever preference the
+    last test named leaves the next one resolving columns to a source it never asked
+    for, which is why test_source.py used to carry its own restore fixture.
+    """
+    config_module.build_catalogs({}, source.DEFAULT_PREFERENCE,
+                                 source.DEFAULT_HOST_PREFERENCE)
+
+
 def _clear_hostlist_caches() -> None:
     """Forget memoised node-list expansions between tests.
 
@@ -78,20 +90,21 @@ def hermetic_config():
     * The palette -- ``report._SGR`` is set by ``cli._apply_config``, so a test that
       runs a command with a configured ``[colors]`` would otherwise leave every
       later test painting in its colours.
-    * The metric catalogs -- ``[metrics.<family>.<name>]`` definitions land on
-      ``dcgm.catalog()`` and ``cpu.catalog()``, so a test defining a site metric
-      would otherwise leak it into every test after it, and into the catalog-shape
-      assertions in particular. One slot each, replaced wholesale;
-      ``register_metrics({})`` puts back the built-ins under the current preference.
+    * The metric catalogs -- both the ``[metrics.<family>.<name>]`` definitions and
+      the ``[gpu]``/``[host]`` source order land on ``dcgm.catalog()`` and
+      ``cpu.catalog()``, so a test that defines a site metric or names a source would
+      otherwise leak it into every test after it, and into the catalog-shape
+      assertions in particular. One slot each, replaced wholesale, so putting back
+      the built-ins under the default order is the whole reset.
     """
+    _reset_catalogs()
     config_module.set_config(DEFAULT_CONFIG)
     report.set_palette(DEFAULT_CONFIG.palette)
-    config_module.register_metrics({})
     _clear_hostlist_caches()
     yield
     config_module.reset_config()
     report.set_palette(config_module.Palette())
-    config_module.register_metrics({})
+    _reset_catalogs()
     _clear_hostlist_caches()
 
 

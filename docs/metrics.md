@@ -1,21 +1,15 @@
 # How jobscope gathers its metrics
 
-Reference for the data pipeline behind every column: where each number comes
-from, how it is reduced over time and across GPUs, and which source wins when two
-could answer. Read this when a number looks wrong, when two views disagree, or
-before adding a metric.
+Where each number comes from, how it is reduced over time and across GPUs, and which
+source wins when two could answer. Read this when a number looks wrong, when two views
+disagree, or before adding a metric.
 
-Companion documents: `jobscope describe` (column reference) and `jobscope describe
---all-metrics` (the full metric catalog). `--per-gpu` and `--ts` give per-GPU rows, and `--plot_ts` charts that series in
-place of writing it. Both time-series flags take an optional window (`--ts 1h`),
-which narrows the range queries to the end of the run rather than filtering rows,
-and `--ts --stats` reduces the series to min/mean/max/last per GPU per metric
-without querying anything further -- `--stats node` and `--stats job`
-pool the same samples over a host's GPUs and over the whole job. `--eff`
-turns those means into a verdict per job -- wasteful / inefficient / needs
-improvement / average / good, from each job's *best* %-metric, with `GMEM%`
-excluded and a `POWER_W` reading below the floor capping the verdict at
-inefficient however busy the percentages look.
+What the report *prints* and how to read it is [`reference.md`](reference.md); site
+setup is [`admin.md`](admin.md).
+
+1. [Two sources](#1-two-sources-one-preference-order) · 2. [The exporters](#2-the-two-exporters) · 3. [Finding a job's GPUs](#3-finding-a-jobs-gpus)
+4. [Reduction](#4-reduction-time-then-gpus) · 5. [Running jobs](#5-reconstructing-the-summary-for-a-running-job) · 6. [Why windows disagree](#6-why-a-recomputed-window-can-disagree)
+7. [Reading the columns](#7-reading-the-columns-correctly) · 8. [MIG](#8-mig) · 9. [Verifying by hand](#9-verifying-a-number-by-hand) · 10. [Limits](#10-known-limits)
 
 ---
 
@@ -28,11 +22,10 @@ Everything jobscope prints comes from one of two places.
 | **The jobstats summary** | `sacct` `AdminComment` | one bulk `sacct` call, no network | CPU%, MEM%, GPU%, GMEM% |
 | **Prometheus** | DCGM + NVML exporters | HTTP query API | everything else, and all live data |
 
-**The jobstats summary** is what jobstats stores when a job *ends*: `JS1:` followed by
-base64-encoded gzipped JSON. Decoded (`jobscope/jobstats.py`) it holds, per node,
-`total_time` (CPU-seconds), `cpus`, `used_memory`, `total_memory`, and the per-GPU
-maps `gpu_utilization` / `gpu_used_memory` / `gpu_total_memory`, plus a top-level
-`total_time` (elapsed wall seconds).
+The summary is what jobstats stores when a job *ends*: `JS1:` followed by base64-encoded
+gzipped JSON holding, per node, `total_time` (CPU-seconds), `cpus`, `used_memory`,
+`total_memory`, and the per-GPU maps `gpu_utilization` / `gpu_used_memory` /
+`gpu_total_memory`, plus a top-level `total_time` (elapsed wall seconds).
 
 ```json
 { "total_time": 12161,
@@ -48,72 +41,43 @@ GPU maps are keyed by `minor_number` **as a string**.
 
 ### Preference order
 
-The rule is one source of truth per number, chosen by job state:
+One source of truth per number, chosen by job state:
 
 | job state | CPU% / MEM% / GPU% / GMEM% / GMEM_GB | other DCGM columns |
 |---|---|---|
 | finished, summary present | **the jobstats summary**, always | Prometheus |
 | finished, summary absent or `JS1:Short` | blank | Prometheus |
-| running | **Prometheus, shaped as a summary** (§5) | Prometheus |
+| running | **Prometheus, shaped as a summary** ([§5](#5-reconstructing-the-summary-for-a-running-job)) | Prometheus |
+
+**A finished job's utilization is never recomputed.** The summary is what Slurm
+recorded, so every view reports the same number, and re-deriving it would reintroduce
+the boundary disagreement in [§6](#6-why-a-recomputed-window-can-disagree).
+
+A site can override this per column with `[gpu] source` / `[host] source` — see
+[`admin.md`](admin.md).
 
 ### One column set, one renderer
 
-Every per-job report renders through `SummaryRenderer`, one row per job, so a job
-reads the same either side of its end:
-
-```
-JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  RUNTIME
-```
-
-Reports differ only in how jobs are selected (`sacct` versus `squeue`, behind
-`jobscope/select.py`) and how wide the profiling block is (`--all-metrics`). Because the
-columns are a pure function of the spec list the renderer is handed, the modes
-cannot drift apart.
-
-`select.resolve` is what makes that true: it yields the same
-`(jobids, records, dcgm_data)` chunks from either source, so no renderer knows
+Every per-job report renders one row per job, so a job reads the same either side of
+its end. Reports differ only in how jobs are selected (`sacct` versus `squeue`) and how
+wide the profiling block is. Both paths yield the same chunks, so no renderer knows
 which it got. Two details let the squeue side pass for the sacct side:
 
-- `running.running_records` synthesizes the summary Slurm has not written yet (§5), so a
-  running job looks like a record with stored stats.
-- `cpu.host_stats_many` batches the `cgroup_*` queries across every selected
-  job -- four queries in total rather than four per job. Those series are per-job
-  and do not exist outside their job's lifetime, so one shared window (the longest
-  job's) cannot pull another job's samples in. Per-job round trips made a
-  cluster-wide running view unusable: 8000 running jobs meant 32000 queries.
+- Running-job records synthesize the summary Slurm has not written yet ([§5](#5-reconstructing-the-summary-for-a-running-job)).
+- The `cgroup_*` queries are batched across every selected job — four queries total
+  rather than four per job. Per-job round trips made a cluster-wide running view
+  unusable: 8000 running jobs meant 32,000 queries.
 
-`NODE` is the node count and `#GPU` the allocated GPU count. Under `running`,
-`STATE` is always `RUNNING`, and `CPU%`/`MEM%` are cumulative in both modes --
-CPU-seconds over elapsed x cores, and peak RSS, neither of which has an
-instantaneous form -- while the GPU columns follow the instant-versus-`--runtime-avg`
-choice.
-
-**Per-GPU output** is `--per-gpu` and the `--ts` time series, which stay one row
-per GPU. `--per-gpu` closes each job block with the efficiency chart repeated per
-node -- or per GPU once a single node is in play, that being the only thing left that
-distinguishes the rows. A node's value is the mean over its GPU rows, which within a
-node is the pooled figure; `CPU%` is already a per-node number repeated on each row,
-so averaging returns it unchanged. `--nodename=NODE` narrows the rows to one node,
-in both views -- for `--ts` before the range queries are issued, so the skipped
-nodes are never fetched. `--ts` keys by UUID throughout, so it is the accurate view on a MIG node;
-`--per-gpu` keys by `(node, minor)` like the summary does, which MIG siblings share.
-
-`GMEM%` is derived (`GMEM_GB / GMEM_TOTAL_GB`) rather than queried, and
-`GMEM_TOTAL_GB` is fetched only to feed it, so it is not a column of its own. The
-summary and detail views omit `GPU%` and the `GMEM` columns from their *DCGM* set
-because they already render those from the summary -- one number, one column.
-
-A finished job's utilization is never recomputed. That is deliberate: the summary is
-what Slurm recorded, so every view reports the same number, and re-deriving it
-would reintroduce the disagreement described in §6.
+`GMEM%` is derived (`GMEM_GB / GMEM_TOTAL_GB`) rather than queried, and `GMEM_TOTAL_GB`
+is fetched only to feed it. The summary and detail views omit `GPU%` and the `GMEM`
+columns from their *DCGM* set because they already render those from the summary — one
+number, one column.
 
 ---
 
 ## 2. The two exporters
 
-Both run on every GPU compute node. An agent on each node scrapes its own
-exporters (`url` label reads `http://localhost:<port>/metrics`) and remote-writes
-to Prometheus.
+Both run on every GPU compute node, scraped locally and remote-written to Prometheus.
 
 | | port | prefix | GPU UUID label | carries `minor_number`? |
 |---|---|---|---|---|
@@ -122,23 +86,16 @@ to Prometheus.
 
 Three consequences, all of which the code works around:
 
-- **The label case differs.** `DCGM_FI_PROF_SM_ACTIVE{UUID=...}` matches;
-  `{uuid=...}` returns nothing. `MetricSpec.uuid_label` records which to use.
-- **A PromQL `and` cannot join across them.** `and` requires identical label sets,
-  and `DCGM_FI_*` adds `Hostname`, `device`, `gpu`, `pci_bus_id`, `modelName`. So
-  the runtime clip in §4 applies to `nvidia_*` metrics only.
+- **The label case differs.** `DCGM_FI_PROF_SM_ACTIVE{UUID=...}` matches; `{uuid=...}`
+  returns nothing.
+- **A PromQL `and` cannot join across them.** `and` requires identical label sets, and
+  `DCGM_FI_*` adds `Hostname`, `device`, `gpu`, `pci_bus_id`, `modelName`. So the
+  ownership clip in [§4](#the-ownership-clip) applies to `nvidia_*` metrics only.
 - **Only NVML knows the Slurm GPU number.** The DCGM `gpu` label is *not*
-  `minor_number`. Everything is therefore joined on UUID.
-
-The full NVML set is small — `duty_cycle`, `memory_total_bytes`,
-`memory_used_bytes`, `jobId`, `jobUid`, `num_devices`, `ecc_errors`,
-`fanspeed_percent`, `temperature_celsius`, `power_usage_milliwatts`,
-`last_error` — and dcgm-exporter supplies the ~33 `DCGM_FI_*` series behind the
-profiling columns.
+  `minor_number`. Everything is joined on UUID.
 
 Host CPU and memory come from a third set, `cgroup_*`, which unlike the GPU series
-carries a real `jobid` **label**: `cgroup_cpus`, `cgroup_cpu_total_seconds`,
-`cgroup_memory_rss_bytes`, `cgroup_memory_total_bytes`.
+carries a real `jobid` **label**.
 
 ---
 
@@ -146,8 +103,8 @@ carries a real `jobid` **label**: `cgroup_cpus`, `cgroup_cpu_total_seconds`,
 
 ### The job ID is a metric value, not a label
 
-`nvidia_gpu_jobId` reports the owning job as its **sample value**, so there is no
-label to filter on:
+`nvidia_gpu_jobId` reports the owning job as its **sample value**, so there is no label
+to filter on:
 
 ```
 nvidia_gpu_jobId{uuid="GPU-bab5106b-...", minor_number="0", host="holygpu8a10302"}  3.4853925e+07
@@ -155,25 +112,22 @@ nvidia_gpu_jobId{uuid="GPU-bab5106b-...", minor_number="0", host="holygpu8a10302
 
 It is exposed in scientific notation, hence parsed as `int(float(...))`.
 
-Two strategies follow from that, and the difference matters:
+Two strategies follow, and the difference matters:
 
-- **Historical** (`jobscope/dcgm.py`) filters server-side per job:
-  `max_over_time((nvidia_gpu_jobId{slurm_cluster=...} == <raw>)[<duration>s:])`
-  evaluated at the job's end. Correct for a job whose window is known.
-- **Running** (`jobscope/running.py`) issues one *unwindowed* instant query for all of
-  `nvidia_gpu_jobId` and filters client-side by value. This is not an
-  optimization — a single GPU can host a dozen jobs in a day, so any windowed
-  lookup would hand the same GPU to every job that touched it. One query returns
-  ~2100 series in about 0.2 s regardless of how many jobs are selected.
+- **Historical** filters server-side per job, evaluated at the job's end. Correct for a
+  job whose window is known.
+- **Running** issues one *unwindowed* instant query for all of `nvidia_gpu_jobId` and
+  filters client-side. Not an optimization — a single GPU can host a dozen jobs in a
+  day, so any windowed lookup would hand the same GPU to every job that touched it. One
+  query returns ~2100 series in about 0.2 s however many jobs are selected.
 
 ### Raw versus display job IDs
 
-**Every Prometheus series keys on the raw per-element job ID**, which differs from
-the ID users type for array jobs:
+**Every Prometheus series keys on the raw per-element job ID**, which differs from the
+ID users type for array jobs:
 
 ```
 sacct -j 34843528_6 -o JobID,JobIDRaw
-JobID       | JobIDRaw
 34843528_6  | 34843629      <- what Prometheus stores
 ```
 
@@ -183,35 +137,26 @@ JobID       | JobIDRaw
 | `%A` | **raw per-element ID** | `34843629` | `34622920` |
 | `%F` | array parent | `34843528` | `34622920` |
 
-`%A` equals `%i` for non-array jobs, so one `squeue` call serves both. `sacct`
-provides the same thing as `JobIDRaw` (`JobRecord.jobid_raw`). Using the display
-ID, or stripping it to the array parent, matches nothing.
-
-This applies to `cgroup_*` too, despite its having a real `jobid` label: array
-element `36410890_2` appears as `jobid="36410916"`.
+Using the display ID, or stripping it to the array parent, matches nothing. This applies
+to `cgroup_*` too, despite its real `jobid` label: element `36410890_2` appears as
+`jobid="36410916"`.
 
 ### GPU identity: UUID, not minor number
 
-`minor_number` is **not unique per schedulable GPU**:
-
-- two nodes each have a minor 0;
-- on a MIG node every instance inherits its parent card's `minor_number` *and*
-  `ordinal`, so a `3g.20gb` pair both report minor 0.
-
-Only the UUID is unique, and its prefix says what the device is: `GPU-…` for a
-whole card, `MIG-…` for an instance. The running view therefore keys rows by UUID and
-labels them `GPU 0` or `MIG 0.1`, enumerating siblings that share a
-`(job, host, minor)` by sorted UUID (NVML exposes no instance index; the ordering
-is stable as long as the partitioning is).
+`minor_number` is **not unique per schedulable GPU** — two nodes each have a minor 0,
+and on a MIG node every instance inherits its parent card's `minor_number` *and*
+`ordinal`. Only the UUID is unique, and its prefix says what the device is: `GPU-…` for
+a whole card, `MIG-…` for an instance. The running view keys rows by UUID and labels
+them `GPU 0` or `MIG 0.1`.
 
 ---
 
 ## 4. Reduction: time, then GPUs
 
-Two reductions apply to every Prometheus-derived number, and mixing them up is the
-most common source of a surprising value.
+Two reductions apply to every Prometheus-derived number, and mixing them up is the most
+common source of a surprising value.
 
-### Over time (`MetricSpec.reducer`)
+### Over time
 
 | reducer | PromQL | used for |
 |---|---|---|
@@ -219,437 +164,121 @@ most common source of a surprising value.
 | `max` | `max_over_time(...)` | memory (`GMEM_GB`, `FB_USED_GB`, `PWRmax_W`) |
 | `delta` | `max_over_time(...) - min_over_time(...)` | `ENERGY_kWh`, a monotonic counter |
 
-**Utilization is averaged; memory is peaked.** That mirrors jobstats, whose report
-labels GPU memory "maximum used/total". Averaging a peak, or peaking an average,
-silently changes the meaning — this is why the reducer lives in the spec rather
-than at the call site.
+**Utilization is averaged; memory is peaked**, mirroring jobstats, whose report labels
+GPU memory "maximum used/total". Averaging a peak, or peaking an average, silently
+changes the meaning.
 
-The window is the job's runtime, `[start, end]`, expressed as a subquery
-`[<duration>s:]` evaluated at `end` — **once the job has ended.**
+The window is the job's runtime `[start, end]` — **once the job has ended.** A job still
+running has no closed window to fold, so an unfinished job reports its **newest scrape**
+and the reduction is dropped; `--runtime-avg` asks for the fold anyway. `delta` keeps
+its window either way: one sample of a counter has no difference to report.
 
-A job still running has no closed window to fold. A mean over a window that is still
-filling answers a different question from a mean over a finished one, so an unfinished
-job reports its **newest scrape** and the reduction is dropped altogether — the same
-query the running view builds, which is what makes the two agree. `--runtime-avg` asks
-for the fold anyway. `delta` is exempt and keeps its window either way: one sample of a
-counter has no difference to report.
-
-The choice is made per record (`JobRecord.unfinished`, over `slurm.UNFINISHED_STATES`),
-not per selection, so a set holding both states reports each on its own rule. The
-header's `Sampled:` line states which you are looking at:
-
-```
-  Sampled:   GPU metrics averaged over each job's whole runtime
-  Sampled:   GPU metrics at their most recent scrape, not averaged -- add --runtime-avg for the runtime mean
-```
-
+The choice is made per record, not per selection, so a set holding both states reports
+each on its own rule. The header's `Sampled:` line states which you are looking at.
 `CPU%`/`MEM%` are absent from that line on purpose — they are cumulative whatever the
-window, so they do not vary with it.
-
-The summary block restates the same choice in its own terms, since its figures depend on
-it twice over -- once in each job's value, once in how those are pooled:
-
-```
-  Averaging: each job's newest scrape. Pooled across jobs by the cores/GB/GPUs each holds now, not by time. Add --runtime-avg for
-    a runtime mean.
-  Averaging: each job's own mean over its whole runtime. Pooled across jobs by resource-time, so a 10-hour job weighs ten times a
-    1-hour one.
-```
-
-The second form is what a finished selection always gets, and what `--runtime-avg` buys a
-running one under `--instant`. It is also what turns the pooled row's label from
-`Used/GPU:` into `Used/GPU-hr:` -- previously the only thing on screen that distinguished them. For a
-single job the pooling clause is dropped: there is nothing to pool across.
+window.
 
 ### The ownership clip
 
-For `nvidia_*` metrics the selector is additionally intersected with the job's
-ownership of the GPU:
+For `nvidia_*` metrics the selector is intersected with the job's ownership of the GPU:
 
 ```promql
 avg_over_time((nvidia_gpu_duty_cycle{uuid=~"..."} and nvidia_gpu_jobId == 34843629)[7200s:])
 ```
 
-This restricts the window to samples the job actually owned that GPU for, which
-makes the window length a harmless upper bound. It works only because both series
-come from the same exporter and so carry identical label sets. `DCGM_FI_*` metrics
-cannot be clipped (§2) and are bounded by the window alone.
+**This is not an optimization.** The owning job is a *label* on the nvml series, so one
+card carries one series **per job that has ever held it** — measured on one A100 over
+two hours: ten `nvidia_gpu_duty_cycle` series for a single UUID, with means from 0.00 to
+100.00. Selecting by UUID alone returns all of them and whichever arrives last wins. Nor
+is it only a long-window problem: the exporter keeps publishing the previous owner's
+series for a scrape or two after that job ends, so even a window exactly as long as the
+job's runtime can contain a foreign series. Without the clip, one job running at 73%
+reported `GPU% 0`.
 
-The clip is not an optimization. The owning job is a *label* on the nvml series, so one
-card carries one series **per job that has ever held it** -- measured on one A100 over two
-hours: ten `nvidia_gpu_duty_cycle` series for a single UUID, means from 0.00 to 100.00.
-Selecting by UUID alone returns all of them, and the collectors key by UUID, so whichever
-arrives last wins. Nor is it only a long-window problem: the exporter keeps publishing the
-previous owner's labelled series for a scrape or two after that job ends, so even a
-window exactly as long as the job's own runtime can contain a foreign series. The sacct
-path went without the clip for a while and reported `GPU% 0` for a job running at 73%.
+`DCGM_FI_*` metrics cannot be clipped ([§2](#2-the-two-exporters)) and are bounded by
+the window alone.
 
-It has to sit **inside** the `label_replace` of a grouped query, not after it: `and` keeps
-only left-hand elements whose label set matches one on the right, and `label_replace` has
-by then added `jsname` to the left alone, so the outer form matches nothing and empties
-every column. `__name__` survives the `and` -- set operators carry the left side over
-whole and ignore the metric name when matching -- so it is still there to be copied.
+### Across a job's GPUs
 
-### Across a job's GPUs (`MetricSpec.agg`)
+**Within a job**, `GPU%` is the mean over the GPUs the summary reports, so a 4-GPU job
+with one idle card reads 75%. `GMEM%` divides summed used by summed total, which is
+capacity-weighted — the difference shows only on cards of unequal size. `ENERGY_kWh`
+sums and `PWRmax_W` takes the max.
 
-Two levels of averaging apply, and they answer different questions.
+Aggregation runs over **UUIDs**, not `(node, minor)` pairs, so MIG siblings are not
+silently dropped from a job-level mean.
 
-**Within a job**, `GPU%` is the mean over the GPUs the summary reports for it, so a
-4-GPU job with one idle card reads 75%. `GMEM%` instead divides summed used by
-summed total, which is capacity-weighted -- the difference only shows on cards of
-unequal size.
-
-**Across jobs**, there is deliberately **no mean**. Utilization is bimodal --
-jobs cluster near 0% or near 100% -- so the average lands in a range where few
-jobs live and describes none of them. Measured on one partition over one day,
-385 GPU jobs split 302 at 75-100% against 11 at 0-5%; the per-job mean read 82%
-while the partition was 66% idle, and the per-job median (89%) was worse still.
-
-What is printed instead is a pooled ratio plus a distribution.
+**Across jobs there is deliberately no mean.** Utilization is bimodal — jobs cluster
+near 0% or 100% — so the average lands where few jobs live and describes none of them.
+Measured on one partition over one day, 385 GPU jobs split 302 at 75–100% against 11 at
+0–5%; the per-job mean read 82% while the partition was 66% idle, and the per-job median
+(89%) was worse still.
 
 ### The pooled row
 
-`Used/GPU-hr:` or `Used/GPU:` is used resource-time over allocated resource-time. Which
-label appears follows one fact -- whether every selected job's value already spans its whole
-runtime, which `select.Resolved.folded` reports. So `-hr` for a finished selection and for
-the running view's default runtime average, and the bare form under `--instant`.
-Weighting a single scrape by hours of elapsed time would
-assert that the scrape represents those hours, which is the claim the `Sampled` line denies
--- so the label and that line are read off the same value and cannot contradict.
-
-Being a ratio of totals rather than a centre, it stays meaningful whatever the shape of
-the distribution. Each column is pooled over the resource *it* measures:
+What is printed instead is a pooled ratio: used resource-time over allocated
+resource-time. Being a ratio of totals rather than a centre, it stays meaningful
+whatever the shape of the distribution. Each column is pooled over the resource *it*
+measures:
 
 | column | weight |
 |---|---|
-| `GPU%`, `GMEM%`, DCGM mean metrics | GPU-seconds (`#GPU` x elapsed) |
-| `CPU%` | core-seconds (allocated cores x elapsed) |
-| `MEM%` | byte-seconds (allocated memory x elapsed) |
+| `GPU%`, `GMEM%`, DCGM mean metrics | GPU-seconds (`#GPU` × elapsed) |
+| `CPU%` | core-seconds (allocated cores × elapsed) |
+| `MEM%` | byte-seconds (allocated memory × elapsed) |
 
-Weighting `CPU%` by core-seconds is exact, not merely reasonable: per job `CPU%`
-is `100 x cpu_seconds / (elapsed x cores)`, so summing numerator and denominator
-across the selection is identical to averaging the per-job values with weight
-`elapsed x cores`.
+Weighting `CPU%` by core-seconds is exact, not merely reasonable: per job `CPU%` is
+`100 × cpu_seconds / (elapsed × cores)`, so summing numerator and denominator across the
+selection is identical to averaging the per-job values with weight `elapsed × cores`.
 
-Including elapsed time is what keeps a swarm of short jobs from drowning out a
-long one: 100 five-minute jobs idling at 0% against one two-day job at 100%
-average to 1% per job, but the long job is 85% of the GPU-hours. Time weighting
-is applied only where each value already spans its job's runtime. In the
-instantaneous running view the weights are bare resource counts, because every
-value there is a single scrape at the same moment and multiplying one by two days
-of elapsed time would assert that the instant represents those two days.
+Including elapsed time keeps a swarm of short jobs from drowning out a long one: 100
+five-minute jobs idling at 0% against one two-day job at 100% average to 1% per job, but
+the long job is 85% of the GPU-hours.
 
-`ENERGY_kWh` sums over a job's GPUs and `PWRmax_W` takes the max
-(`MetricSpec.agg`), so neither has a pooled form; they fall back to the plain
-per-job figure rather than a weighting that would mean nothing.
+Time weighting applies only where each value already spans its job's runtime. Under
+`--instant` the weights are bare resource counts, because multiplying one scrape by two
+days of elapsed time would assert that the instant represents those two days. That is
+also what turns the label from `Used/GPU:` into `Used/GPU-hr:`.
 
-A job whose elapsed time is unknown cannot be placed on the resource-hour scale
-at all, so it is dropped from the row and counted as `no-runtime=N` in the
-`Jobs:` footer.
-
-### The efficiency block
-
-One table row per graded metric, in the same order as the columns above it, so
-the block cannot drift from the table it summarizes. It prints for a **single job**
-as well, where each metric shows a single `1` in the band its value falls in -- the
-job row gives the numbers, the table says where they sit. For one job the rest of
-the block is suppressed: the pooled row would repeat that job's own row, a `Worst`
-row would name it again, and every job count would be 1. The set follows the view:
-eight rows by default, `CPU%`/`MEM%` under `--cpu`, six under `--gpu`, the full
-catalog (18) under `--all-metrics`. A metric that no job reported is omitted rather than
-printed as zeros, which would read as "nothing used it" instead of "nothing
-measured it".
-
-```
-  Averaged over time: every value below is each job's mean over its whole runtime. Pooled across jobs by resource-time, so a
-    10-hour job weighs ten times a 1-hour one.
-  JOBS is how many jobs reported the metric and GOOD/OK/BAD sum to it, so the total differs per row wherever coverage does. Banded
-    by GOOD above 20%, OK above 10%, BAD otherwise; POWER_W is GOOD above 100 W and BAD below, never OK.
-  USED is the resource-time that did work, over what was allocated -- for POWER_W, the time spent above that watt floor.
-  bands locate the waste and USED measures it: no red jobs but a low USED means every job wastes a little, rather than a few jobs
-    wasting a lot
-METRIC   USED          JOBS  GOOD  OK   BAD
-CPU%     528.1h (5%)   319   2     158  159
-MEM%     5.4TBh (4%)   319   4     8    307
-GPU%     348.2h (46%)  319   306   8    5
-GMEM%    226.7h (30%)  319   11    9    299
-SM_ACT%  301.3h (40%)  425   373   17   35
-```
-
-Each metric is measured against the resource it is a percentage *of*, taken from
-the same `_weights()` the pooled row uses so the two cannot disagree:
-
-| metric | weight | unit |
-|---|---|---|
-| `CPU%` | allocated cores x elapsed | core-hours |
-| `MEM%` | allocated host bytes x elapsed | GB-hours, promoted to TB-hours past four digits |
-| `GPU%`, `GMEM%`, every DCGM `%` | allocated GPUs x elapsed | GPU-hours |
-
-The denominators therefore differ by row, deliberately: reading down `USED` shows
-which resource a selection actually wasted. Above, the GPUs ran at 46% while the
-cores managed 5% -- GPU jobs holding cores they never use, which blocks other work
-from those nodes and no GPU row can show.
-
-`USED` carries one decimal with trailing `.0` trimmed, in that row's own unit, plus
-its share of the allocation. It is fractional even in the count form -- what is busy
-is GPU-*equivalents*, not whole GPUs -- so rounding to an integer would make it
-contradict the percentage beside it.
-
-It reported IDLE until it was noticed that one number was being given three
-readings: the cell said 95%, the pooled row above it said 5, the bar below drew 5,
-and the cell's own colour came from the 5. `ALLOC` and `IDLE` are dropped from the
-table -- the allocation is `USED` over its own percentage, and the idle share is the
-remainder -- and the band cells were reduced to job counts for the same reason. All
-of it survives in the CSV, which still emits `allocated=`, `used=` and `idle=`.
-
-Every percentage metric is banded into five tiers by four edges -- `wasteful`,
-`inefficient`, `improvement`, `average` -- which the table then collapses to three
-columns: `BAD` at or below `inefficient`, `OK` at or below `improvement`, `GOOD`
-above. Only those two edges divide the columns, which is why the legend names only
-them: `wasteful` splits `BAD` from `BAD` (it is the Problem-jobs cutoff, stated there)
-and `average` splits `GOOD` from `GOOD`. The cells keep their red/yellow/green tint --
-the header says what the count means and the colour finds it, so neither has to carry
-both, and the words survive `--no-color` and colour-blindness. The `--csv` keys stay
-`red=`/`yellow=`/`green=`: those are identifiers a script reads, not labels. `POWER_W` is the exception twice over: it is graded in watts, and against a
-*floor*, so it has only two bands -- below is idle, at or above is not. Doubling a
-floor would be meaningless, and on a card whose floor is 330 W it would put green
-beyond the hardware's maximum.
-
-The edges are **per metric**, and configured per view: `[thresholds.summary.<edge>]`
-for this table, `[thresholds.timeslice.<edge>]` for `--ts`. Per metric because the
-metrics do not mean the same thing -- a GPU job legitimately holds cores it never
-uses, so `CPU%` at 4% is ordinary where `GPU%` at 4% is idle, and `SM_ACT%` sits
-structurally below `GPU%` on the same work. A single number had to be wrong for some
-row. `default` catches every metric a site does not name, so the extended catalog
-stays graded without being enumerated.
-
-A three-line legend above the table states the cutoffs, what `USED` counts, and why
-a green band is not the same as an efficient one. It quotes one pair of numbers
-while every metric in the table agrees on them, and lists them metric by metric once
-they do not -- there is no single true sentence in that case.
-
-### Three sections
-
-Everything after the per-job listing is presented as three numbered sections, ruled
-to their own widths: **Summary by metric** (the pooled row and the table),
-**Average efficiency** (the bars), and **Problem jobs** (the `Worst` rows and the
-`Jobs:` counts). Numbering runs over the sections that actually have content, so a
-suppressed or empty one leaves no gap -- a missing number would read as a failure.
-Headings and rules follow `--noheader`; `--csv` and `--ts` carry none of it, `--ts`
-structurally so, since it never constructs a `SummaryRenderer`.
-
-### The efficiency bars
-
-Shown by default, omitted with `--no-plot`. One horizontal bar per graded metric: length is the pooled
-utilization, the filled run tinted by the band that value falls in. It draws the
-same number the `USED` column prints -- both are `EfficiencyTally.pooled()` -- so a
-chart and the table it sits under cannot disagree.
-
-It reuses the table's metric list, so the set follows `--cpu` / `--gpu` / `--all-metrics`
-and omits whatever no job reported, minus `POWER_W`: it has a row but no bar, since
-its "used" is time above the watt floor rather than a fraction of a resource, and
-drawing that as an efficiency bar makes idle-but-powered GPUs look like the healthy
-ones. A nonzero utilization always draws at least one block, since an empty bar
-beside a "1%" contradicts itself.
-
-Drawn with block characters and the report's own SGR codes rather than `rich`: the
-report path is the common one and should not import a rendering library to print a
-table. Suppressed under `--csv`, and its title follows `--noheader`.
-
-### What green does not mean
-
-Green is anything above the `improvement` edge, which is a low bar: at the default
-20 a job at 21% is green while leaving four fifths of its cores unused. A selection
-can therefore
-be half idle with almost every job green, which reads as a contradiction until the
-two columns are separated:
-
-```
-  Averaged over time: every value below is each job's mean over its whole runtime. Pooled across jobs by resource-time, so a
-    10-hour job weighs ten times a 1-hour one.
-  JOBS is how many jobs reported the metric and GOOD/OK/BAD sum to it, so the total differs per row wherever coverage does. Banded
-    by GOOD above 20%, OK above 10%, BAD otherwise; POWER_W is GOOD above 100 W and BAD below, never OK.
-  USED is the resource-time that did work, over what was allocated -- for POWER_W, the time spent above that watt floor.
-  bands locate the waste and USED measures it: no red jobs but a low USED means every job wastes a little, rather than a few jobs
-    wasting a lot
-METRIC  USED        JOBS  GOOD  OK  BAD
-CPU%    87.7 (51%)  14    13    1   0
-```
-
-Eleven jobs, each using about half its cores (12, 21, 47, 52, 55, 55, 55, 55, 56,
-56, 56). None is below 10, so the red band is empty; pooled, the cores still only
-reach 51%.
-
-`USED` is the efficiency measure. The bands say *where* the waste sits:
-
-| pattern | reading |
-|---|---|
-| red band holds a large share of the **resource-time** | concentrated: a few jobs waste a lot, and `Worst` names them |
-| red band empty but `USED` low | systemic: every job wastes a little, which is a habit rather than an incident |
-
-Measured on one partition, `GPU%` showed the first (4% of jobs, 53% of the
-GPU-hours, red) and `CPU%` the second. The bands are deliberately calibrated to
-catch pathological jobs rather than to score efficiency: the thresholds that would
-score efficiency differ per workload -- inference, data prep and sparse HPC all run
-legitimately low -- and no default can be right for all of them. Where a site's mix
-is known, the per-metric edges are how to say so, one metric at a time, rather than
-by moving a single number that every row shares.
-
-The three band cells give each band's share of the **jobs** and of the
-**resource-time**: `13 (4%)/54%` is 13 jobs, 4% of those measured, holding 54% of
-the GPU-hours. The gap between the two is the finding -- 4% of the jobs held 54%
-of the GPU-hours below 25% -- and either share alone conceals it. The bands come
-from `Thresholds.tier` and the site's `[thresholds]`, the same cutoffs that tint
-the cells and colour `jobscope plot`, so the block is a tally of what is already
-on screen rather than a second opinion.
-
-Bands are computed from the **stored** value, not the printed one. A job whose
-`OCC%` prints as `15.0` may be 14.96 and therefore red against a cutoff of 15;
-banding the display string would make the report depend on its own formatting.
-
-On a terminal each band cell is printed in its own colour and `USED` is tinted by
-that metric's pooled grade. Colour is dropped for `--csv`, a non-tty and
-`$NO_COLOR`, and the plain output is the tinted output minus the escapes -- the
-final column is left unpadded so that stays exactly true.
-
-A job with **no stored summary** is excluded from every tally and counted as
-`no-jobstats=N`. Slurm writes the summary at job end, so without it a job has Prometheus
-numbers but no `CPU%`/`MEM%`/`GPU%`/`GMEM%`; letting it vote in the DCGM tallies
-alone put 117 jobs behind `SM_ACT%` against 88 behind `GPU%` on one partition, and a
-job cannot be ranked against the rest on a metric it has no value for. It stays in
-the listing regardless -- it ran, and its DCGM numbers are shown on its own row.
-Note this is a *missing* summary, not a CPU-only one: a CPU-only job's summary exists and
-simply carries no GPU data, so it still votes on `CPU%` and `MEM%`.
-
-The `Worst` rows name the top few jobs by resource-time **wasted**,
-`(1 - u) x weight`, not by resource-time held: a 100-hour job at 24% is a larger
-finding than a 10-hour job at 0%.
-
-Entries are grouped under their owner, in rank order rather than alphabetically, so
-the first user named owns the worst job. Each reads `jobid:value:wasted(elapsed)`,
-and a job whose elapsed time exceeds `report.LONG_RUNNING` (three hours) is printed
-red: a brief bad job costs little next to hours of idle hardware. Lines wrap onto
-continuation lines indented under the user column rather than running past the table,
-and the wrap is measured on visible characters so the red escapes do not shorten it. There is one row per measure -- `GPU%`,
-`SM_ACT%`, `POWER_W`, `CPU%` -- and a row is omitted when no job falls in that
-measure's red band. Four rather than every graded column: these say distinct
-things, while the DCGM catalog would add a dozen near-duplicates.
-
-### Power, the one metric that is not a percentage
-
-`POWER_W` is graded in watts against `[thresholds] power_w` (default 100), or against
-`[thresholds.power_w_by_model][<model>]` where a site has set one: idle draw is a
-property of the card, running 27 W to 165 W across one fleet, so an idle RTX PRO
-6000 outdraws a working V100. The model is read from the exporter's `name` label on
-the ownership query both paths already make. Before
-that existed it fell through to the `%` default of 15 -- 15 *watts* -- so every
-power cell graded green, in the table and in `jobscope plot`.
-
-Its waste is the GPU-hours held while **below** the floor, all of it or none:
-
-```
-waste = weight if watts < power_w else 0
-```
-
-A floor asserts idle-or-not, and nothing finer is available. Scaling by how far
-below would imply 50 W wastes twice what 100 W does, and watts are not utilization.
-
-Why include it at all, when it largely agrees with `GPU%`? Because it is the one
-idle signal a duty cycle cannot fake: a job holding a trivial kernel resident reads
-busy on `GPU%` and draws idle watts. Measured over one day on kempner_eng the two
-did agree -- the four lowest-power jobs sat at 73-74 W with `GPU% 0` and
-`SM_ACT% 0.0`, and the top three of every ranking were the same jobs -- but power
-is not a restatement of them: r(POWER, GPU%) = 0.69 and r(POWER, SM_ACT%) = 0.64,
-against r(GPU%, SM_ACT%) = 0.76. It also covers 35 jobs the jobstats metrics miss (no
-stored summary), though those held only 0.6 of 349.2 GPU-hours.
-
-`POWER_W` does get a stats-table row. "Used watts" has no meaning as a total, but the
-resource-time that drew *more* than the floor does, and that is what its `USED` counts
--- all-or-nothing per sample, where a percentage's `USED` takes a fraction of each.
-Grading it as a proportion of the cutoff instead would imply 50 W wastes twice what
-100 W does, and watts are not utilization. The bands still separate the near misses:
-a GPU at 119 W is yellow, not red.
-
-### The two combined rows
-
-`Worst both:` ranks over the two distinct resources (`GPU%`, `CPU%`);
-`Worst all:` over all four measures. The measures are in different units --
-GPU-hours, core-hours, GPU-hours below a watt floor -- and cannot be added: any
-exchange rate is invented, and on a GPU cluster a wrong one decides the ranking by
-itself. Each job's waste is therefore normalised by the selection's own total waste
-in that measure and the shares summed:
-
-```
-score = sum over measures of  waste(job, measure) / total_waste(measure)
-```
-
-Each cell prints the job's **value** in every metric the row names
-(`36337338 gpu0 sm0 pw70W cpu1`), all of them under their cutoffs, which is what put
-the job there; power carries its unit since watts are not a percentage. The order
-still carries the ranking by summed waste share. Printing the shares instead was
-actively misleading -- `12%gpu` reads as a utilization of 12%, the inverse of the
-row's meaning. A row is omitted when any of its measures wasted nothing, since a
-share of a zero total is undefined.
-
-**Candidacy is a conjunction**: a job appears only if it is red in *every* metric the
-row names. `Worst both:` is therefore "idle by GPU and by CPU", and `Worst all:`
-"idle by all four". A disjunction put jobs on the four-metric row that were drawing
-full power, recognisable by a `0%pw` component -- the row claimed more than it meant.
-The cost is that a combined row is frequently absent, which is the honest answer when
-no job is bad by every measure at once. Waste in a metric a job is *green* in is
-still counted in that metric's own total and its own `Worst` row; it simply does not
-earn a place in the conjunction.
-
-Note what `Worst all:` costs: three of its four terms describe the same GPUs, so it
-weights GPU idleness roughly 3:1 against CPU idleness. `Worst both:` is the fair
-comparison between resources; `Worst all:` answers "worst by any measure".
-
-Candidates are the jobs red in **at least one** resource, and for those the waste
-in the *other* resource counts too even where they are green there -- it is real
-waste; the red filter only decides who is a candidate. That filter is what keeps
-the list actionable: a 95%-efficient job can idle 50 GPU-hours simply by being
-enormous.
-
-
-
-Which jobs contribute is the part worth being exact about:
+### Which jobs contribute
 
 | the job | contributes to the pooled GPU figure? |
 |---|---|
-| no GPU allocated | **no** -- there is no GPU% to pool, and counting it would dilute |
-| GPU allocated, sat idle | **yes, as 0** -- this is the case worth finding, not hiding |
-| GPU allocated, no samples | **no** -- absence of data is not evidence of 0% use |
+| no GPU allocated | **no** — there is no GPU% to pool, and counting it would dilute |
+| GPU allocated, sat idle | **yes, as 0** — this is the case worth finding |
+| GPU allocated, no samples | **no** — absence of data is not evidence of 0% use |
 | 4 allocated, 2 reported | the mean of the 2 that reported |
 
-The last two lean the same way on purpose: jobscope never invents a zero for a
-GPU it has no measurement of, because a retention gap or an unscraped short job
-would then read as waste that was never observed. The cost is that such jobs
-quietly leave the figure, which is why the `Jobs:` footer prints both totals --
-`cpu-jobs=18 gpu-jobs=17` says one job's GPU use is unmeasured rather than zero.
-The same jobs are absent from the band tally, so its shares are over measured
-resource-time only.
+The last two lean the same way on purpose: jobscope never invents a zero for a GPU it
+has no measurement of, because a retention gap would then read as waste that was never
+observed. The cost is that such jobs quietly leave the figure, which is why the `Jobs:`
+footer prints both totals.
 
-`mean` by default; `max` for peak-like metrics; `sum` for energy. The per-job
-figure in the summary view uses this; the per-GPU rows in `detail`, `dcgm` and
-`running` do not reduce across GPUs at all.
+A job with **no stored summary** is excluded from every tally and counted as
+`no-jobstats=N`: without it a job has Prometheus numbers but no
+`CPU%`/`MEM%`/`GPU%`/`GMEM%`, and letting it vote in the DCGM tallies alone put 117 jobs
+behind `SM_ACT%` against 88 behind `GPU%` on one partition. It stays in the listing —
+it ran. Note this is a *missing* summary, not a CPU-only one: a CPU-only job's summary
+exists and simply carries no GPU data.
 
-Note the aggregation runs over **UUIDs**, not over `(node, minor)` pairs, so MIG
-siblings are not silently dropped from a job-level mean.
+A job whose elapsed time is unknown cannot be placed on the resource-hour scale at all,
+so it is dropped from the row and counted as `no-runtime=N`.
 
-### Instant versus windowed
+Bands are computed from the **stored** value, not the printed one. A job whose `OCC%`
+prints as `15.0` may be 14.96 and therefore red against a cutoff of 15; banding the
+display string would make the report depend on its own formatting.
 
-`jobscope running` defaults to the newest single scrape — no time reduction at
-all. It is the only mode that does, and it is why running numbers need not match
-jobstats. `running --runtime-avg` applies the reductions above and does match.
+> How the pooled row, the bands and the `Worst` rows are laid out and read is
+> [`reference.md`](reference.md#the-report-block) — including why **green is not the
+> same as efficient**.
 
 ---
 
 ## 5. Reconstructing the summary for a running job
 
-Slurm writes the summary at job end, so a running job has none and its utilization
-columns would be empty. `jobscope/job_ave_stats.py` rebuilds one from Prometheus, in
-the summary's own shape, so `jobstats_metrics` / `jobstats_detail` and therefore the summary
-and detail views, `--csv` and `plot` all work unchanged.
+Slurm writes the summary at job end, so a running job has none. jobscope rebuilds one
+from Prometheus *in the summary's own shape*, so every view, `--csv` and `plot` work
+unchanged.
 
 | summary field | query | reducer |
 |---|---|---|
@@ -663,19 +292,17 @@ and detail views, `--csv` and `plot` all work unchanged.
 
 Details that matter:
 
-- The `jobid` matcher takes the **raw** ID (§3).
-- `step=''` / `task=''` select the job-level cgroup rather than a per-step one. An
-  `=''` matcher also matches the label being absent, which is the case on
-  exporters that do not emit it, so the matcher is safe either way.
-- Values are rounded to the precision the stored summary uses — byte counts to
-  integers, utilization to one decimal — because `jobstats_detail` renders utilization
-  with `%g` and unrounded floats print as `93.1386%`.
-- Failure degrades to `{}`, i.e. the columns simply stay blank. If no Prometheus
-  endpoint is configured at all, the views say so rather than printing dashes that
-  look like idleness.
+- The `jobid` matcher takes the **raw** ID ([§3](#raw-versus-display-job-ids)).
+- `step=''` / `task=''` select the job-level cgroup rather than a per-step one. An `=''`
+  matcher also matches the label being absent, which is the case on exporters that do
+  not emit it.
+- Values are rounded to the precision the stored summary uses, or reconstructed rows
+  print `93.1386%` beside stored rows printing `93.1`.
+- Failure degrades to blank columns. With no Prometheus endpoint configured at all the
+  views say so, rather than printing dashes that look like idleness.
 
-Because the GPU part uses exactly the query behind `running --runtime-avg`, a running
-job's `GPU%` equals the mean of its `running --runtime-avg` values by construction.
+Because the GPU part uses exactly the query behind `--runtime-avg`, a running job's
+`GPU%` equals the mean of its `--runtime-avg` values by construction.
 
 ---
 
@@ -683,29 +310,29 @@ job's `GPU%` equals the mean of its `running --runtime-avg` values by constructi
 
 Worth understanding before trusting any recomputed utilization figure.
 
-`GPU%` from the summary and `GPU%` recomputed from Prometheus are the same metric
-under the same reducer, yet can differ by several points on a **short** job. The
-cause is the window boundary: the summary is what jobstats computed at job end, while
-a recomputation has to reconstruct the window from sacct's `Start` and `End`.
+`GPU%` from the summary and `GPU%` recomputed from Prometheus are the same metric under
+the same reducer, yet can differ by several points on a **short** job. The cause is the
+window boundary: the summary is what jobstats computed at job end, while a recomputation
+reconstructs the window from sacct's `Start` and `End`.
 
 Measured on a 570 s job with one GPU (60 s scrape interval, so ~10 samples):
 
 ```
 raw samples inside [start,end]:  100, 0, 94, 93, 89, 92, 79, 86, 86, 80
 mean of those                    79.9
-stored summary                      77.9
+stored summary                   77.9
 recomputed at sacct's End        72.5
 recomputed 30 s earlier          77.7
 ```
 
-One sample is worth roughly 8 points at this length, and the job's ramp-down sits
-just outside the window. It is not the clip (clipped and unclipped both give 72.5)
-and not subquery step alignment (an explicit `[570s:60s]` gives 72.5 too).
+One sample is worth roughly 8 points at this length, and the job's ramp-down sits just
+outside the window. It is not the clip (clipped and unclipped both give 72.5) and not
+subquery step alignment.
 
 Two conclusions:
 
-1. **Prefer the stored value when it exists** — which is the rule in §1. It makes
-   the views agree and removes the boundary question entirely.
+1. **Prefer the stored value when it exists** — the rule in [§1](#preference-order). It
+   makes the views agree and removes the boundary question.
 2. **Agreement improves with window length.** Across 1270 active GPUs, comparing
    `DCGM_FI_PROF_GR_ENGINE_ACTIVE` with `nvidia_gpu_duty_cycle`:
 
@@ -722,8 +349,8 @@ Two conclusions:
 
 ## 7. Reading the columns correctly
 
-`GPU%` and `SM_ACT%` are not interchangeable, and the gap between them is the
-useful signal:
+`GPU%` and `SM_ACT%` are **not interchangeable**, and the gap between them is the useful
+signal:
 
 - `GPU%` / `ENGINE%` — *was the GPU busy at all* (any kernel resident)
 - `SM_ACT%` — *how much of the GPU's width was engaged*
@@ -736,55 +363,61 @@ Across 1270 active GPUs over a 1 h average, signed difference against `GPU%`:
 | `GR_ENGINE_ACTIVE` | −0.43 | 29% | 23% |
 | `SM_ACTIVE` | **−19.86** | **93%** | 2% |
 
-So `ENGINE%` is an unbiased stand-in for `GPU%`, while `SM_ACT%` runs ~20 points
-lower and **must not be read as "GPU utilization"**. A job reading
-`91 / 65 / 36` for GPU%/SM_ACT%/OCC% was never idle, but spread its kernels over
-only about two-thirds of the SMs and filled about a third of the warp slots — a
-single utilization number cannot show that.
+So `ENGINE%` is an unbiased stand-in for `GPU%`, while `SM_ACT%` runs ~20 points lower
+and **must not be read as "GPU utilization"**. A job reading `91 / 65 / 36` for
+GPU%/SM_ACT%/OCC% was never idle, but spread its kernels over about two-thirds of the
+SMs and filled about a third of the warp slots — a single utilization number cannot show
+that.
 
-`GMEM_GB` (NVML) and `FB_USED_GB` (DCGM) both report used framebuffer from
-different exporters and disagree by a few tenths of a GiB. `GMEM_GB` is the
-jobstats-comparable one.
+`GMEM_GB` (NVML) and `FB_USED_GB` (DCGM) both report used framebuffer from different
+exporters and disagree by a few tenths of a GiB. `GMEM_GB` is the jobstats-comparable
+one.
 
-Note the `G`: a bare `MEM%` means **host** memory in the summary and detail views,
-so GPU memory is always `GMEM*`. Reusing `MEM%` for GPU memory not only read as the
-wrong quantity, it graded against the host threshold in `jobscope plot`.
+Note the `G`: a bare `MEM%` means **host** memory, so GPU memory is always `GMEM*`.
+
+### Power
+
+`POWER_W` is graded in watts against a floor, not banded as a percentage. Idle draw is a
+property of the card — 27 W to 165 W across one fleet — so an idle RTX PRO 6000 outdraws
+a working V100, and `[eff.floor.power]` sets it per model. The model is read
+from the exporter's `name` label on a query both paths already make.
+
+Its waste is the GPU-hours held while **below** the floor, all of it or none. Scaling by
+how far below would imply 50 W wastes twice what 100 W does, and watts are not
+utilization.
+
+Why include it when it largely agrees with `GPU%`? It is the one idle signal a duty
+cycle cannot fake: a job holding a trivial kernel resident reads busy on `GPU%` and draws
+idle watts. Measured over one day the two did agree — the four lowest-power jobs sat at
+73–74 W with `GPU% 0` — but power is not a restatement: r(POWER, GPU%) = 0.69 against
+r(GPU%, SM_ACT%) = 0.76. It also covers 35 jobs the jobstats metrics miss.
 
 ---
 
 ## 8. MIG
 
-On a partitioned node the two exporters disagree about what a GPU *is*:
+On a partitioned node the two exporters disagree about what a GPU *is*: **NVML** reports
+each MIG *instance* with a `MIG-…` UUID, each inheriting its parent's `minor_number`;
+**dcgm-exporter** reports the *physical* card under its `GPU-…` UUID, distinguishing
+instances by a separate `GPU_I_ID` label.
 
-- **NVML** reports each MIG *instance*, with a `MIG-…` UUID, each inheriting its
-  parent card's `minor_number` and `ordinal`.
-- **dcgm-exporter** reports the *physical* card under its `GPU-…` UUID,
-  distinguishing instances by a separate `GPU_I_ID` label.
-
-What follows:
-
-- **`--ts` is MIG-correct**: keyed by UUID, one row per instance, labelled
-  `MIG n.i`. A slice's `memory_total` is the *slice* (e.g. 19.6 GB of a 40 GB
-  card), so its `GMEM%` is per-slice.
-- **DCGM columns read `-` on a MIG row.** A `MIG-…` UUID never equals a `GPU-…`
-  one, and nothing in the metrics maps between them — the instance shares its
-  parent's `minor_number`, but nothing says which `GPU_I_ID` it is. Attributing
-  the whole card's DCGM values to one slice would be actively misleading.
-- **`GPU%` is unavailable on MIG.** NVML does not report `utilization.gpu` when MIG
-  is enabled: on one node `jobId` and `memory_used_bytes` return 11 series each
-  while `duty_cycle` returns 3 — only its non-MIG cards. A fully partitioned node
-  reports none.
-- **The historical views still collapse MIG rows.** `dcgm` and `detail` key per-GPU
-  data by `(node, minor)`, which siblings share, so a four-instance job renders
-  three rows. The summary has the same limitation, since it is keyed by minor number.
-  `--ts` is the accurate view for MIG.
+- **`--ts` is MIG-correct**: keyed by UUID, one row per instance, labelled `MIG n.i`. A
+  slice's `memory_total` is the *slice*, so its `GMEM%` is per-slice.
+- **DCGM columns read `-` on a MIG row.** A `MIG-…` UUID never equals a `GPU-…` one and
+  nothing maps between them. Attributing the whole card's DCGM values to one slice would
+  be actively misleading.
+- **`GPU%` is unavailable on MIG.** NVML does not report `utilization.gpu` when MIG is
+  enabled: on one node `jobId` returned 11 series while `duty_cycle` returned 3 — only
+  its non-MIG cards. A fully partitioned node reports none.
+- **The historical views collapse MIG rows**, keying per-GPU data by `(node, minor)`,
+  which siblings share. `--ts` is the accurate view for MIG.
 
 ---
 
 ## 9. Verifying a number by hand
 
-The exporters are reachable directly from a login node, which bypasses
-Prometheus, the scrape delay and the reduction machinery:
+The exporters are reachable directly from a login node, bypassing Prometheus, the scrape
+delay and the reduction machinery:
 
 ```bash
 curl -s http://holygpu8a10302:9445/metrics | grep nvidia_gpu_duty_cycle
@@ -798,51 +431,42 @@ sacct -j 34843528_6 -o JobID,JobIDRaw,Start,End,Elapsed
 ```
 
 ```promql
-# which GPUs, and when they were owned
-nvidia_gpu_jobId == 34843629
-
-# the utilization figure, clipped to ownership
+nvidia_gpu_jobId == 34843629                       # which GPUs, and when they were owned
 avg_over_time((nvidia_gpu_duty_cycle and nvidia_gpu_jobId == 34843629)[7200s:])
-
-# every raw sample, to see the shape rather than the mean
-nvidia_gpu_duty_cycle{uuid="GPU-..."}
+nvidia_gpu_duty_cycle{uuid="GPU-..."}              # every raw sample, to see the shape
 ```
 
-`jobscope --ts` emits exactly that last view as CSV, and pipes into
-`jobscope plot`.
+`jobscope --ts` emits that last view as CSV, and pipes into `jobscope plot`.
 
-The endpoint is resolved from configuration (see the README) and commonly embeds a
-credential, so jobscope never prints it; URLs reaching help text or error messages
-are masked. `jobscope probe` is the one command that must name the endpoint, and
-it masks the credential too (`https://***@host/path`), so its output is safe to
-paste into a ticket.
+The endpoint commonly embeds a credential, so jobscope never prints it; URLs reaching
+help text or errors are masked. `jobscope probe` masks it too
+(`https://***@host/path`), so its output is safe to paste into a ticket.
 
 ---
 
 ## 10. Known limits
 
-- Recomputed utilization is boundary-sensitive on short jobs (§6). The preference
-  order in §1 avoids it for finished jobs; there is no summary to prefer for running
-  ones, where the window is `[start, now]` and the tail is still being written.
-- DCGM columns cannot be clipped to GPU ownership (§4), so on a GPU that changed
-  hands mid-window they may include a neighbouring job's samples. `nvidia_*`
-  columns are clipped and do not have this problem.
-- The running view's ownership query is not scoped to a cluster, so a Prometheus
-  serving several clusters could in principle collide on job ID.
-- MIG: no DCGM columns, no `GPU%`, and collapsed rows in the historical views (§8).
-- The running view's runtime average fans out to roughly one query per job per metric --
-  PromQL cannot vary a window per series -- where the newest scrape is one query per metric
-  for the whole selection. Measured on one 110-job partition: 628 queries against 12.
+- Recomputed utilization is boundary-sensitive on short jobs ([§6](#6-why-a-recomputed-window-can-disagree)).
+  The preference order avoids it for finished jobs; there is no summary to prefer for
+  running ones.
+- DCGM columns cannot be clipped to GPU ownership ([§4](#the-ownership-clip)), so on a
+  GPU that changed hands mid-window they may include a neighbouring job's samples.
+  `nvidia_*` columns are clipped and do not have this problem.
+- The running view's ownership query is not scoped to a cluster, so a Prometheus serving
+  several clusters could in principle collide on job ID.
+- MIG: no DCGM columns, no `GPU%`, and collapsed rows in the historical views ([§8](#8-mig)).
+- **The running view's runtime average costs roughly one query per job per metric** —
+  PromQL cannot vary a window per series — where the newest scrape is one query per
+  metric for the whole selection. Measured on one 110-job partition: 628 queries against
+  12.
 
-  That cost is **paced, not capped**. The selection is queried in batches of
-  `select.RUNNING_JOBS_PER_CHUNK` jobs and each batch's rows print as they land, so a wide
-  sweep is a table filling in rather than a blank wait -- first row in about two seconds,
-  summary at ten, on that same partition. `[prometheus] max_queries_per_second` (50) and
-  `query_burst` (200) hold the rate the server sees; the burst is what keeps this invisible
-  for ordinary use, since an explicit job ID is ten queries and a small partition about a
-  hundred. Pacing spreads the queries out and does not remove any -- `--min-elapsed` is the
-  only thing that reduces the count, by reducing the job count. `--instant` declines the
-  average outright and stays a single grouped query.
+  That cost is **paced, not capped**. The selection is queried in batches and each
+  batch's rows print as they land, so a wide sweep is a table filling in rather than a
+  blank wait — first row in about two seconds, summary at ten, on that partition.
+  `[prometheus] max_queries_per_second` and `query_burst` hold the rate the server sees;
+  the burst keeps this invisible for ordinary use. Pacing spreads queries out and does
+  not remove any — `--min-elapsed` is the only thing that reduces the count.
+  `--instant` declines the average outright and stays a single grouped query.
 
   Above `[defaults] max_running_jobs` (2000) a running selection is refused rather than
   swept: a backstop against a typo, not a cost policy.

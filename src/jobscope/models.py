@@ -229,7 +229,6 @@ class JobRow:
     runtime: str = "-"
     gpus: int = 0
     duration: Optional[int] = None
-    unfinished: bool = False
     # Whether the scheduler returned a record for this jobid at all. False means every
     # identity field above is the dash it defaults to. It is not the same question as
     # `has_summary`, and the summary's weighting distinguishes them: a job that was
@@ -243,6 +242,10 @@ class JobRow:
     gpu_rows: Tuple["UnitRow", ...] = ()
     node_rows: Tuple["UnitRow", ...] = ()
     measured: Mapping[str, float] = field(default_factory=dict)
+    # The subset of ``measured`` whose column the exporter outranks the stored summary
+    # for. Settled when the row is built, not per cell: the row and the footer average
+    # must not disagree about which number a job scored. See jobscope.rows._overrides.
+    overrides: Mapping[str, float] = field(default_factory=dict)
     per_gpu: Mapping = field(default_factory=dict)
     per_node: Mapping = field(default_factory=dict)
     model: str = ""

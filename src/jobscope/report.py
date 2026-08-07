@@ -16,7 +16,6 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from . import dcgm, metrics
 from .models import JobRow, ReportContext
-from .rows import overrides_for
 from .config import (
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
@@ -43,7 +42,6 @@ from .cpu import CgroupSpec, chosen_specs
 from .dcgm import (
     DESCRIPTIONS,
     MODEL_KEY,
-    JobGpuData,
     MetricSpec,
     applicable_derived,
     columns_for,
@@ -131,11 +129,10 @@ def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
     The identity and jobstats columns are fixed; only the profiling block varies, which
     is what lets `--all-metrics` widen the table without becoming a different view.
     The fixed columns are dropped from the block whatever source serves them -- one
-    number deserves one column, and GPU%/GMEM% already have theirs. Deliberately NOT
-    ``dcgm.catalog().jobstats_headers``: that set shrinks under ``--gpu-source dcgm``
-    (GPU% stops being jobstats-backed), which would give GPU% a second column beside its
-    fixed one. Which source *fills* the fixed cell is settled in
-    :meth:`SummaryRenderer.add`.
+    number deserves one column, and GPU%/GMEM% already have theirs. Deliberately not
+    the jobstats-backed set, which shrinks under ``--gpu-source dcgm`` (GPU% stops being
+    jobstats-backed) and would give GPU% a second column beside its fixed one. Which
+    source *fills* the fixed cell is settled in :meth:`SummaryRenderer.add`.
     """
     if specs is None:
         return list(SUMMARY_COLUMNS)
@@ -205,13 +202,6 @@ def detail_prefix(level: str = GPU_LEVEL) -> Tuple[Column, ...]:
              _UNIT_COLUMN.get(level, _UNIT_COLUMN[GPU_LEVEL]))
             + tuple(Column(header, *_PREFIX_DISPLAY[header], _FIRST_CELL + i)
                     for i, header in enumerate(UNIT_HEADERS)))
-
-
-# Where each prefix cell sits, read off the columns rather than restated, so a column
-# that moves takes its index with it. Used to fill a cell from an exporter by *name*.
-# Level-independent: only cell 1's header differs, and nothing looks that one up.
-_PREFIX_INDEX: Dict[str, int] = {col.header: col.index
-                                 for col in detail_prefix(GPU_LEVEL)}
 
 
 def detail_gpu_headers() -> List[str]:
@@ -836,19 +826,16 @@ def detail_row_cells(unit, values, runtime: str = "-") -> tuple:
     rather than a function of how wide the block is -- see :func:`detail_columns`. The
     block therefore starts at 8, not 7.
 
-    The prefix is laid out from :func:`detail_prefix`'s own Columns rather than from the
-    order a ``UnitRow`` happens to iterate in, so the cells follow the headers instead of
-    the two having to be kept in step by hand.
+    The prefix follows ``UNIT_HEADERS`` -- the same list :func:`detail_prefix` builds its
+    Columns from -- so the cells and the headers cannot drift apart.
     """
-    by_header = dict(unit.cells)
-    by_header.update(exporter_prefix_cells(values))
-    cells = [""] * _JOBSTATS_CELLS
-    for col in detail_prefix(GPU_LEVEL):
-        cells[col.index] = by_header.get(col.header, "-")
-    cells[_NODE_INDEX], cells[_GPU_INDEX] = unit.node, unit.unit
-    cells.append(runtime)
-    return tuple(cells) + tuple(format_by_header(h, values.get(h))
-                                for h in detail_gpu_headers())
+    overridden = exporter_prefix_cells(values)
+    by_header = dict(unit.cells, **overridden) if overridden else unit.cells
+    return ((unit.node, unit.unit)
+            + tuple(by_header.get(h, "-") for h in UNIT_HEADERS)
+            + (runtime,)
+            + tuple(format_by_header(h, values.get(h))
+                    for h in detail_gpu_headers()))
 
 
 # What each graded column is a percentage *of*, as
@@ -1443,7 +1430,7 @@ class SummaryRenderer:
             # summary does not own has to be overridden *before* it is tallied, or the row
             # would show the measured value and the footer average the summary's. Which
             # columns those are is rows.overrides_for's to decide, not a renderer's.
-            measured = overrides_for(job) if do_dcgm else {}
+            measured = job.overrides if do_dcgm else {}
             if not job.has_summary:
                 for col in JOBSTATS_HEADERS:
                     row[col] = "-"
@@ -2035,7 +2022,7 @@ class DetailRenderer:
 
     def _rows_for(self, job: JobRow):
         node_level = self.level == NODE_LEVEL
-        units = job.node_rows if node_level else job.gpu_rows
+        all_units = job.node_rows if node_level else job.gpu_rows
         # Elapsed is per job, so it repeats down the block -- accepted for the reason
         # CPU% already repeats: a column is the only way a CSV reader gets it, and the
         # detail CSV carries JOBID and nothing else about the job.
@@ -2050,10 +2037,9 @@ class DetailRenderer:
         else:
             def values_for(unit):
                 return job.per_gpu.get((unit.node, str(unit.unit)), {})
-        if self.options.nodename:
-            units = [u for u in units if u.node == self.options.nodename]
-        self.nodes_seen.update(u.node for u in
-                               (job.node_rows if node_level else job.gpu_rows))
+        self.nodes_seen.update(u.node for u in all_units)
+        units = ([u for u in all_units if u.node == self.options.nodename]
+                 if self.options.nodename else all_units)
         rows = [detail_row_cells(u, values_for(u), job.runtime) for u in units]
         self.matched += len(rows)
         return rows

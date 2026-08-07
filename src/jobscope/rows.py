@@ -15,11 +15,11 @@ consequences, both of which this module exists to end:
 
 What is *not* here: formatting. A :class:`jobscope.models.JobRow` carries readings,
 not cells. The one exception is the per-unit rows, whose cells are strings already --
-see :func:`unit_rows`.
+see :class:`jobscope.models.UnitRow` for why.
 
 The interesting decision in here is which source wins a column, in
-:func:`_measured_overrides`. It has to be made once per job, before anything is
-tallied, and it used to live inline in the renderer.
+:func:`_overrides`. It has to be made once per job, before anything is tallied, and
+it used to live inline in the renderer.
 """
 
 from typing import Dict, List, Mapping, Optional, Sequence
@@ -35,8 +35,16 @@ from .jobstats import (
 from .models import JobRow, ReportContext
 from .slurm import JobRecord, Selection, format_window
 
+# What a caller wants per-unit rows for, if anything. The summary view reads neither
+# tuple, and building both for a thousands-of-job sweep is the single most expensive
+# thing this module does -- measured at 63% of build_rows on a 2000-job selection, and
+# worse the bigger the allocation. ``None`` builds both, for a caller that has not said.
+JOB_LEVEL = "job"
+GPU_LEVEL = "gpu"
+NODE_LEVEL = "node"
 
-def _measured_overrides(measured: Mapping[str, float]) -> Dict[str, float]:
+
+def _overrides(measured: Mapping[str, float]) -> Dict[str, float]:
     """The queried values that outrank the stored summary, by header.
 
     An exporter named ahead of the summary (``--gpu-source dcgm``) owns its columns,
@@ -60,17 +68,22 @@ def _measured_overrides(measured: Mapping[str, float]) -> Dict[str, float]:
 
 
 def build_row(jobid: str, record: Optional[JobRecord],
-              found: JobGpuData = None) -> JobRow:
+              found: JobGpuData = None, level: Optional[str] = None) -> JobRow:
     """One job's :class:`~jobscope.models.JobRow`.
 
     ``record`` may be None -- a jobid the selection asked for that sacct did not
     return. The row still renders, as the identity dashes it always did, so a job
     does not silently vanish from a report that named it.
+
+    ``level`` is the view the row is being built for, so only the per-unit rows that
+    view will read are built. See :data:`JOB_LEVEL` on why that is worth a parameter.
     """
     found = found if found is not None else JobGpuData()
     gpus = record.gpus if record else 0
     stats = record.stats if record else None
     cores, memory = jobstats_capacity(stats)
+    measured = found.overall or {}
+    per_gpu = found.per_gpu or {}
     return JobRow(
         jobid=jobid,
         user=record.user if record else "?",
@@ -80,35 +93,32 @@ def build_row(jobid: str, record: Optional[JobRecord],
         runtime=record.runtime if record else "-",
         gpus=gpus,
         duration=record.duration if record else None,
-        unfinished=bool(record.unfinished) if record else False,
         found=record is not None,
         cores=cores,
         memory=memory,
         metrics=jobstats_metrics(stats, gpus),
-        gpu_rows=tuple(jobstats_detail(stats)),
-        node_rows=tuple(jobstats_per_node(stats)),
-        measured=dict(found.overall or {}),
-        per_gpu=dict(found.per_gpu or {}),
-        per_node=dict(found.per_node or {}),
-        model=job_model(found.per_gpu or {}),
+        gpu_rows=(tuple(jobstats_detail(stats))
+                  if level in (None, GPU_LEVEL) else ()),
+        node_rows=(tuple(jobstats_per_node(stats))
+                   if level in (None, NODE_LEVEL) else ()),
+        measured=measured,
+        overrides=_overrides(measured),
+        per_gpu=per_gpu,
+        per_node=found.per_node or {},
+        model=job_model(per_gpu),
     )
 
 
 def build_rows(jobids: Sequence[str], records: Mapping[str, JobRecord],
-               dcgm_data: Mapping) -> List[JobRow]:
+               dcgm_data: Mapping, level: Optional[str] = None) -> List[JobRow]:
     """The rows for one chunk, in the order ``jobids`` gives them.
 
     Order is the caller's: a chunk arrives already sorted the way the report prints,
     and re-deriving that here would be a second opinion about it.
     """
     return [build_row(jid, records.get(jid),
-                      JobGpuData(*dcgm_data.get(jid, ())))
+                      JobGpuData(*dcgm_data.get(jid, ())), level)
             for jid in jobids]
-
-
-def overrides_for(row: JobRow) -> Dict[str, float]:
-    """``row``'s queried values that outrank its stored summary. See above."""
-    return _measured_overrides(row.measured)
 
 
 def any_unfinished(records: Mapping[str, JobRecord]) -> bool:

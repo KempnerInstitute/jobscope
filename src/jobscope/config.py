@@ -620,11 +620,11 @@ def _all_headers() -> frozenset:
     Wider than :func:`_known_percent_headers` because a floor metric is typically
     *not* a percentage -- POWER_W being the case that ships.
     """
-    from .cpu import CGROUP_METRICS
+    from .cpu import catalog as host_catalog
     from .dcgm import DERIVED_COLUMNS, catalog
     return frozenset([s.header for s in catalog().all_specs]
                      + [d.header for d in DERIVED_COLUMNS]
-                     + [s.header for s in CGROUP_METRICS])
+                     + list(host_catalog().headers))
 
 
 def _metric_list(where: str, raw) -> Optional[list]:
@@ -1498,7 +1498,7 @@ def build_catalogs(table: Mapping, gpu_pref: Tuple[str, ...],
                    host_pref: Tuple[str, ...]) -> None:
     """Install the site metrics and both source orders, in the one order that works.
 
-    Three steps that have to happen together, and used to be three calls a caller
+    Two steps that have to happen together, and used to be separate calls a caller
     could interleave or forget:
 
     1. ``[metrics.<family>.<name>]`` definitions join the catalogs, so the view
@@ -1506,38 +1506,20 @@ def build_catalogs(table: Mapping, gpu_pref: Tuple[str, ...],
     2. Each family re-resolves which candidate serves each of its columns under the
        new preference. A name looked up before this resolves against the previous
        order.
-    3. ``metrics`` recomputes the cross-family role view over the winners.
 
-    Skipping step 3 leaves role lookups keyed to the previous order's headers; running
-    it before step 2 keys them to the previous order's winners. Both are the confusing
-    kind of half-applied -- a site metric that renders correctly everywhere and has no
-    role, no label, and no name in ``probe``. Doing all three here is what makes that
-    unreachable rather than merely documented.
+    The cross-family role view follows automatically -- :func:`jobscope.metrics.catalog`
+    derives it from whatever the two families now hold, so it cannot be left keyed to
+    the previous order's winners.
 
-    Every step is unconditional: a config that *removes* a definition has to
+    Both steps are unconditional: a config that *removes* a definition has to
     un-register it, and dropping ``[gpu]`` has to restore the default order.
     """
     from . import cpu, dcgm
-    from . import metrics as metrics_module
     gpu_specs, cgroup_specs = _site_specs(table)
     dcgm.register(gpu_specs)
     cpu.register(cgroup_specs)
     dcgm.set_preference(gpu_pref)
     cpu.set_preference(host_pref)
-    metrics_module.rebuild()
-
-
-def register_metrics(table: Mapping) -> None:
-    """Install the ``[metrics.<family>.<name>]`` definitions, keeping the source order.
-
-    :func:`build_catalogs` is what a config load calls; this is the narrower door for
-    a caller that is only changing the definitions -- the test suite resetting the
-    catalogs between cases, mostly. Registration replaces rather than accumulates, so
-    loading a config twice yields one copy of each metric and removing a table from
-    the file removes the metric.
-    """
-    from . import cpu, dcgm
-    build_catalogs(table, dcgm.catalog().preference, cpu.catalog().preference)
 
 
 def _metrics(table: Mapping) -> Metrics:
@@ -1546,7 +1528,7 @@ def _metrics(table: Mapping) -> Metrics:
     Each view key is a list of metric names, or the string ``"all"`` for the whole
     catalog. Absent, a view keeps its built-in list (see :meth:`Metrics.__post_init__`).
     Family sub-tables are metric *definitions* and were consumed by
-    :func:`register_metrics` before this runs.
+    :func:`build_catalogs` before this runs.
 
     A view may also be stated *per source* -- ``[metrics.dcgm] summary = [...]`` --
     which is how a site says that leading with one exporter should collect a
@@ -1651,14 +1633,19 @@ def _known_percent_headers() -> frozenset:
     a metric added there is threshold-tunable the moment it exists. It used to be
     literally ``("CPU%", "MEM%")``, which meant any new host column was silently
     dropped from a config with a note saying it was unknown.
+
+    Both read the *resolved* catalog, not the built-in declaration: a site metric
+    from ``[metrics.cgroup.<name>]`` lands on the catalog, and reading the
+    declaration would put that name back in the "unknown" bucket this exists to
+    keep it out of.
     """
-    from .cpu import CGROUP_METRICS
+    from .cpu import catalog as host_catalog
     from .dcgm import catalog, columns_for
     return frozenset([header for _key, header, _dec
                       in columns_for(catalog().all_specs)
                       if header.endswith("%")]
-                     + [spec.header for spec in CGROUP_METRICS
-                        if spec.header.endswith("%")])
+                     + [header for header in host_catalog().headers
+                        if header.endswith("%")])
 
 
 def _edges(raw) -> Dict[str, float]:

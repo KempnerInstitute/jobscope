@@ -10,15 +10,8 @@ import dataclasses
 
 import pytest
 
-from jobscope import cpu, dcgm, source
+from jobscope import dcgm, source
 from jobscope.errors import JobscopeError
-
-
-@pytest.fixture(autouse=True)
-def restore_preference():
-    """Every test here moves module state, so put it back."""
-    yield
-    dcgm.set_preference(source.DEFAULT_PREFERENCE)
 
 
 # --- parsing ----------------------------------------------------------------

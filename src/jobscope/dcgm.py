@@ -295,9 +295,6 @@ class GpuCatalog:
     jobstats_backed_keys: Tuple[str, ...]
     gpu_summary_specs: Tuple[MetricSpec, ...]
     headers: Tuple[str, ...]
-    # The column headers those keys produce, including the derived GMEM%. Renderers
-    # use this to keep a jobstats-backed quantity out of the profiling block.
-    jobstats_headers: Tuple[str, ...]
     aliases: Mapping[str, MetricSpec]
     names: Tuple[str, ...]
     # Position in ``metrics``, so a resolved selection can be put back in catalog order.
@@ -356,7 +353,6 @@ def _build(metrics: Sequence[MetricSpec],
     metrics = tuple(metrics)
     preference = tuple(preference)
     resolved = source.resolve(metrics, preference, source.JOBSTATS_COLUMNS)
-    order = [s.column for s in resolved.specs]
     default_specs = tuple(s for s in resolved.specs if s.group == "default")
     backed_keys = tuple(s.key for s in resolved.specs
                         if s.column in resolved.from_jobstats)
@@ -373,9 +369,6 @@ def _build(metrics: Sequence[MetricSpec],
         jobstats_backed_keys=backed_keys,
         gpu_summary_specs=summary_specs,
         headers=tuple(spec.header for spec in summary_specs),
-        jobstats_headers=tuple(
-            sorted(resolved.from_jobstats, key=order.index)
-            + [d.header for d in DERIVED_COLUMNS if set(d.deps) & set(backed_keys)]),
         aliases=_alias_table(metrics, resolved),
         # One canonical name per metric, to offer when a config gets one wrong. The
         # header without its "%" where there is one (``gpu``, ``sm_act``) and the key
@@ -429,9 +422,8 @@ def set_preference(preference: Tuple[str, ...]) -> None:
 
     Separate from :func:`register` because the two are independent: a site names its
     series in ``[metrics.<family>]``, and names its order in ``[gpu] source``. Both
-    rebuild the catalog, and both have to run before :func:`jobscope.metrics.rebuild`
-    so the cross-family role view sees the same winners --
-    :func:`jobscope.config.build_catalogs` is what guarantees that order.
+    replace the catalog wholesale, which is what lets
+    :func:`jobscope.metrics.catalog` notice by identity that its view is stale.
     """
     global _ACTIVE
     _ACTIVE = _build(_ACTIVE.metrics, preference)
@@ -451,10 +443,10 @@ def register(extra: List[MetricSpec]) -> None:
     stays stable and site metrics sort last in every view that shows them.
     """
     global _ACTIVE
-    _ACTIVE = _build(merged_metrics(extra), _ACTIVE.preference)
+    _ACTIVE = _build(_merged_metrics(extra), _ACTIVE.preference)
 
 
-def merged_metrics(extra: Sequence[MetricSpec]) -> Tuple[MetricSpec, ...]:
+def _merged_metrics(extra: Sequence[MetricSpec]) -> Tuple[MetricSpec, ...]:
     """The built-in catalog with ``extra`` overriding by key and appending the rest."""
     by_key = {spec.key: spec for spec in extra}
     merged = [_inherit(builtin, by_key.pop(builtin.key, None)) for builtin in METRICS]
