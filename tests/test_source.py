@@ -203,11 +203,8 @@ def test_host_columns_have_their_own_axis():
 def test_the_host_preference_moves_cpu_and_mem():
     from jobscope import cpu
     cpu.set_preference(("cgroup", "jobstats"))
-    try:
-        assert cpu.catalog().resolved.source_of("CPU%") == "cgroup"
-        assert cpu.catalog().resolved.from_jobstats == frozenset()
-    finally:
-        cpu.set_preference(source.DEFAULT_HOST_PREFERENCE)
+    assert cpu.catalog().resolved.source_of("CPU%") == "cgroup"
+    assert cpu.catalog().resolved.from_jobstats == frozenset()
 
 
 def test_the_source_line_names_the_host_columns_first():
@@ -351,14 +348,11 @@ def test_a_held_catalog_is_a_consistent_snapshot_not_a_torn_one():
     from jobscope import dcgm
     before = dcgm.catalog()
     dcgm.set_preference(("dcgm", "jobstats", "nvml"))
-    try:
-        after = dcgm.catalog()
-        assert after is not before
-        assert "GPU%" not in after.resolved.from_jobstats     # dcgm now serves it
-        assert "GPU%" in before.resolved.from_jobstats        # the snapshot is intact
-        for held in (before, after):
-            summary = {s.column for s in held.gpu_summary_specs}
-            assert not summary & held.resolved.from_jobstats
-            assert set(held.headers) == {s.header for s in held.gpu_summary_specs}
-    finally:
-        dcgm.set_preference(before.preference)
+    after = dcgm.catalog()
+    assert after is not before
+    assert "GPU%" not in after.resolved.from_jobstats     # dcgm now serves it
+    assert "GPU%" in before.resolved.from_jobstats        # the snapshot is intact
+    for held in (before, after):
+        summary = {s.column for s in held.gpu_summary_specs}
+        assert not summary & held.resolved.from_jobstats
+        assert set(held.headers) == {s.header for s in held.gpu_summary_specs}

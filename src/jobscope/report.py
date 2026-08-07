@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from . import dcgm, metrics
-from .models import JobRow, ReportContext
+from .models import GPU_LEVEL, JobRow, NODE_LEVEL, ReportContext
 from .config import (
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
@@ -151,11 +151,8 @@ def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
 # GPU and NODE are the two levels a detail row can be about, and they differ in one cell:
 # cell 1 is a card's minor number at gpu level and the count of cards pooled at node level,
 # because a pooled row has to say what it pooled. Everything else is identical, which is
-# why the two share a renderer.
-GPU_LEVEL = "gpu"
-NODE_LEVEL = "node"
-JOB_LEVEL = "job"
-
+# why the two share a renderer. The names come from models -- jobscope.rows reads the same
+# three to decide which per-unit tuples to build.
 _UNIT_COLUMN = {GPU_LEVEL: Column("GPU", "{:<4}", "gpu", 1),
                 NODE_LEVEL: Column("#GPU", "{:<5}", "gpu", 1)}
 
@@ -187,8 +184,7 @@ _FIRST_CELL = 2
 # cell's position from depending on how many profiling columns there are. Appending it
 # after the block instead would make its index vary with --gpu-source, which is precisely
 # the bug detail_columns() exists to prevent. Group "id", so it shows in every view.
-_JOBSTATS_CELLS = _FIRST_CELL + len(UNIT_HEADERS)
-_RUNTIME_INDEX = _JOBSTATS_CELLS
+_RUNTIME_INDEX = _FIRST_CELL + len(UNIT_HEADERS)
 _RUNTIME_COLUMN = Column("RUNTIME", "{:<12}", "id", _RUNTIME_INDEX)
 
 
@@ -829,8 +825,7 @@ def detail_row_cells(unit, values, runtime: str = "-") -> tuple:
     The prefix follows ``UNIT_HEADERS`` -- the same list :func:`detail_prefix` builds its
     Columns from -- so the cells and the headers cannot drift apart.
     """
-    overridden = exporter_prefix_cells(values)
-    by_header = dict(unit.cells, **overridden) if overridden else unit.cells
+    by_header = {**unit.cells, **exporter_prefix_cells(values)}
     return ((unit.node, unit.unit)
             + tuple(by_header.get(h, "-") for h in UNIT_HEADERS)
             + (runtime,)
@@ -1429,7 +1424,8 @@ class SummaryRenderer:
             # Read before the summary block, not inside the DCGM one below: a column the
             # summary does not own has to be overridden *before* it is tallied, or the row
             # would show the measured value and the footer average the summary's. Which
-            # columns those are is rows.overrides_for's to decide, not a renderer's.
+            # columns those are is rows._overrides' to decide, not a renderer's, and it
+            # is settled once when the row is built rather than asked again here.
             measured = job.overrides if do_dcgm else {}
             if not job.has_summary:
                 for col in JOBSTATS_HEADERS:

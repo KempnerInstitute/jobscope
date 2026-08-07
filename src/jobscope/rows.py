@@ -32,16 +32,8 @@ from .jobstats import (
     jobstats_metrics,
     jobstats_per_node,
 )
-from .models import JobRow, ReportContext
+from .models import GPU_LEVEL, JobRow, NODE_LEVEL, ReportContext
 from .slurm import JobRecord, Selection, format_window
-
-# What a caller wants per-unit rows for, if anything. The summary view reads neither
-# tuple, and building both for a thousands-of-job sweep is the single most expensive
-# thing this module does -- measured at 63% of build_rows on a 2000-job selection, and
-# worse the bigger the allocation. ``None`` builds both, for a caller that has not said.
-JOB_LEVEL = "job"
-GPU_LEVEL = "gpu"
-NODE_LEVEL = "node"
 
 
 def _overrides(measured: Mapping[str, float]) -> Dict[str, float]:
@@ -75,8 +67,12 @@ def build_row(jobid: str, record: Optional[JobRecord],
     return. The row still renders, as the identity dashes it always did, so a job
     does not silently vanish from a report that named it.
 
-    ``level`` is the view the row is being built for, so only the per-unit rows that
-    view will read are built. See :data:`JOB_LEVEL` on why that is worth a parameter.
+    ``level`` is the view the row is being built for (see
+    :data:`jobscope.models.JOB_LEVEL`), so only the per-unit rows that view will read
+    are built. Worth a parameter because the summary reads neither tuple, and building
+    both is the single most expensive thing this module does -- measured at 63% of
+    ``build_rows`` on a 2000-job selection, and worse the bigger the allocation.
+    ``None`` builds both, for a caller that has not said.
     """
     found = found if found is not None else JobGpuData()
     gpus = record.gpus if record else 0

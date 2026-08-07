@@ -619,12 +619,19 @@ def _all_headers() -> frozenset:
 
     Wider than :func:`_known_percent_headers` because a floor metric is typically
     *not* a percentage -- POWER_W being the case that ships.
+
+    Asked of :mod:`jobscope.metrics` rather than reassembled here: "resolved GPU
+    candidates, plus the derived columns, plus the host family" is exactly what that
+    module composes, and a second spelling of it is one of the hand-kept header sets
+    it was written to end. A third family, or a change to what counts as derived,
+    then lands in one place -- and missing the second copy fails silently, as a
+    legitimate ``[eff] vote`` name rejected as a typo.
+
+    Imported inside the function for the reason the catalogs are; see
+    :func:`_known_percent_headers`.
     """
-    from .cpu import catalog as host_catalog
-    from .dcgm import DERIVED_COLUMNS, catalog
-    return frozenset([s.header for s in catalog().all_specs]
-                     + [d.header for d in DERIVED_COLUMNS]
-                     + list(host_catalog().headers))
+    from . import metrics
+    return frozenset(metrics.catalog().by_header)
 
 
 def _metric_list(where: str, raw) -> Optional[list]:

@@ -199,6 +199,24 @@ def parse_preference(value, where: str = "[gpu] source",
     return tuple(seen) + tuple(name for name in allowed if name not in seen)
 
 
+def merged_metrics(builtins: Sequence, extra: Sequence, inherit) -> Tuple:
+    """The built-in catalog with ``extra`` overriding by key and appending the rest.
+
+    Both families register site metrics the same way, so the rule lives here once
+    rather than beside each catalog. What ``inherit`` decides differs -- which fields
+    a site may override and which keep the built-in's purpose -- so that stays with
+    the family that knows its own spec type.
+
+    The ``pop`` does double duty and is the reason this is worth naming: it hands
+    ``inherit`` the override *and* consumes it, so what is left in ``by_key`` at the
+    end is exactly the extras that matched no built-in. Those append in declaration
+    order, which is what keeps catalog order stable and sorts site metrics last.
+    """
+    by_key = {spec.key: spec for spec in extra}
+    merged = [inherit(builtin, by_key.pop(builtin.key, None)) for builtin in builtins]
+    return tuple(merged + [spec for spec in extra if spec.key in by_key])
+
+
 def _rank(preference: Sequence[str]) -> Dict[str, int]:
     return {name: i for i, name in enumerate(preference)}
 

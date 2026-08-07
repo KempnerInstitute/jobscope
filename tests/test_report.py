@@ -3217,10 +3217,9 @@ _PROFILING_VALUES = {"GPU%": 11.0, "SM_ACT%": 22.0, "TENSOR%": 33.0, "DRAM%": 44
 
 @pytest.fixture
 def preference():
-    """Set the GPU source order, and put it back -- it is module state on dcgm."""
+    """Set the GPU source order. Putting it back is conftest.hermetic_config's job."""
     from jobscope import dcgm, source
-    yield lambda name: dcgm.set_preference(source.parse_preference(name))
-    dcgm.set_preference(source.DEFAULT_PREFERENCE)
+    return lambda name: dcgm.set_preference(source.parse_preference(name))
 
 
 def _detail_cells(name, preference, csv=False, color=False):

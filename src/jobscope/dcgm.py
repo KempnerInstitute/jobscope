@@ -443,14 +443,8 @@ def register(extra: List[MetricSpec]) -> None:
     stays stable and site metrics sort last in every view that shows them.
     """
     global _ACTIVE
-    _ACTIVE = _build(_merged_metrics(extra), _ACTIVE.preference)
-
-
-def _merged_metrics(extra: Sequence[MetricSpec]) -> Tuple[MetricSpec, ...]:
-    """The built-in catalog with ``extra`` overriding by key and appending the rest."""
-    by_key = {spec.key: spec for spec in extra}
-    merged = [_inherit(builtin, by_key.pop(builtin.key, None)) for builtin in METRICS]
-    return tuple(merged + [spec for spec in extra if spec.key in by_key])
+    _ACTIVE = _build(source.merged_metrics(METRICS, extra, _inherit),
+                     _ACTIVE.preference)
 
 
 def _inherit(builtin: MetricSpec, override: Optional[MetricSpec]) -> MetricSpec:

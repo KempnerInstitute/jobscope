@@ -25,6 +25,7 @@ from typing import List, Optional, Tuple
 
 from . import config, dcgm, plot, probe, report, rows
 from .errors import JobscopeError
+from .models import GPU_LEVEL, JOB_LEVEL, NODE_LEVEL
 from .report import (
     DetailRenderer,
     RenderOptions,
@@ -1179,12 +1180,13 @@ def handle_report(args) -> None:
     # and the one its Sampled line had been contradicting all along.
     options = dataclasses.replace(
         options, time_weighted=selected.folded)
-    # "job" keeps the per-job table; the two detail levels share one renderer and differ
-    # only in their identity prefix -- see report.detail_columns.
-    level = ("node" if args.per_node else "gpu" if args.per_gpu else "job")
+    # JOB_LEVEL keeps the per-job table; the two detail levels share one renderer and
+    # differ only in their identity prefix -- see report.detail_columns.
+    level = (NODE_LEVEL if args.per_node else GPU_LEVEL if args.per_gpu else JOB_LEVEL)
     # `total` and `specs` reach the detail views so a multi-job listing can end in one
     # aggregate summary rather than a chart per job -- see DetailRenderer.
-    renderer = (SummaryRenderer(selected.context, options, specs=specs) if level == "job"
+    renderer = (SummaryRenderer(selected.context, options, specs=specs)
+                if level == JOB_LEVEL
                 else DetailRenderer(selected.context, options, level=level, specs=specs,
                                     total=selected.total))
     for chunk_ids, records, dcgm_data in selected.chunks:

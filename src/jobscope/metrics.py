@@ -59,10 +59,11 @@ class Catalog:
     substitution rather than a change. GPU before host, because ``WORST_METRICS`` read
     ``GPU%, SM_ACT%, POWER_W, CPU%``.
 
-    Frozen and rebuilt wholesale for the reason :class:`jobscope.dcgm.GpuCatalog` is:
-    this view changes when either family's catalog does, and a half-applied cross-family
-    view is the confusing kind of half-broken -- a site metric that renders fine but has
-    no role lookup and no label, and that ``probe`` still calls unnamed.
+    Derived rather than installed: unlike the family catalogs there is nothing to
+    register here, and :func:`catalog` builds this from whatever the two now hold. That
+    is what makes a half-applied cross-family view unrepresentable -- a site metric that
+    renders fine but has no role lookup, no label, and that ``probe`` still calls
+    unnamed was the shape of the bug when this had to be rebuilt by hand.
     """
 
     specs: Tuple
@@ -97,9 +98,10 @@ def _build(gpu, host) -> Catalog:
 # sequenced correctly against both, which is the ordering rule build_catalogs exists
 # to remove rather than one it should add.
 #
-# The race between two threads both finding it stale is benign: the derivation is pure
-# and the tuple assignment atomic, so the loser recomputes an equal value.
-_CACHE = None
+# Not guarded by a lock, and does not need one: the catalogs move at config load, the
+# derivation is pure, and a triple built from a pair that has since been superseded
+# fails its own identity test on the next call.
+_CACHE = (None, None, None)
 
 
 def catalog() -> Catalog:
@@ -110,7 +112,7 @@ def catalog() -> Catalog:
     """
     global _CACHE
     gpu, host = dcgm.catalog(), cpu.catalog()
-    if _CACHE is None or _CACHE[0] is not gpu or _CACHE[1] is not host:
+    if _CACHE[0] is not gpu or _CACHE[1] is not host:
         _CACHE = (gpu, host, _build(gpu, host))
     return _CACHE[2]
 

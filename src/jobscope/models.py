@@ -172,6 +172,18 @@ class ReportContext:
     unfinished: bool = False
 
 
+# What a report is a row *about*: the job, or one of the two units it ran on. Here
+# rather than beside either user because both layers speak it and neither owns it --
+# `jobscope.rows` reads it to build only the per-unit tuples the view will look at, and
+# `jobscope.report` reads it to pick the identity prefix. They used to hold a copy each,
+# with `cli` naming the levels a third time in literals, and the failure mode of a
+# disagreement was silent: an unrecognised level builds neither tuple and the detail
+# view prints "(no jobstats data)" for a job that has plenty.
+JOB_LEVEL = "job"
+GPU_LEVEL = "gpu"
+NODE_LEVEL = "node"
+
+
 @dataclass(frozen=True)
 class UnitRow:
     """One node, or one GPU: what the detail views print a line for.
