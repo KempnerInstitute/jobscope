@@ -21,6 +21,7 @@ import io
 import os
 import re
 import sys
+import time
 from typing import List, Optional, Tuple
 
 from . import config, dcgm, plot, probe, report, rows
@@ -34,7 +35,7 @@ from .report import (
     describe_dcgm,
     timeseries_eff,
     timeseries_stats,
-    verify_ladder,
+    verify_report,
 )
 from .running import format_duration, parse_duration
 from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
@@ -292,11 +293,12 @@ def _add_report_args(report) -> None:
     grain.add_argument("--verify", dest="verify", nargs="?", const=True,
                        default=False, metavar="WINDOW",
                        help=_help("check one job before acting on it",
-                                  "per metric, the min/max and the mean over a ladder of "
-                                  "windows, the share of samples under its cutoff, the "
-                                  "longest unbroken idle stretch, and the shape that "
-                                  "follows. Takes an optional window to bound the fetch "
-                                  "on a very long job"))
+                                  "whether it is idle and wasteful, and since when: a "
+                                  "timeline of the run, how much of it was measured "
+                                  "active and idle, where the time went by band, and a "
+                                  "verdict by the same rule the rest of the report "
+                                  "grades on. Takes an optional window to bound the "
+                                  "fetch on a very long job"))
     grain.add_argument("--ts", dest="ts", nargs="?", const=True,
                        default=False, metavar="WINDOW",
                        help=_help("the per-scrape time series as CSV",
@@ -316,6 +318,18 @@ def _add_report_args(report) -> None:
                                   "this one move'. Watts are omitted (they cannot share an "
                                   "axis with percentages) and each panel legends its own "
                                   "metrics"))
+    # Not in `grain`: that group is "one row per what" and its members compete. This
+    # modifies --verify rather than replacing it, which is what --stats and --eff do to
+    # --ts, so it sits with those. Not a value on --verify either -- that optional value
+    # already carries WINDOW through _ts_value/_reclaim_jobid_after_ts, and a second
+    # grammar on it would make _JOBID_RE disambiguate three things instead of two.
+    shape.add_argument("--full", dest="verify_full", action="store_true",
+                       help=_help("--verify: report every voting metric in full",
+                                  "with a timeline and an idle split each, rather than "
+                                  "those for the leading metric and a line for the "
+                                  "rest, plus the per-rung ladder and the legend that "
+                                  "reads it -- the whole of the evidence the verdict "
+                                  "was reached from"))
     level = shape.add_mutually_exclusive_group()
     # One flag for one axis. These were --stats/--stats-per-node/--stats-per-job, three
     # spellings setting this same dest to three constants. `choices` also keeps the
@@ -600,6 +614,8 @@ def _inert_dests(args) -> set:
             hide.add("plot_ts")
         # All three summarize a series, so all three raise without one.
         hide.update({"stats", "eff"})
+    if not args.verify:
+        hide.add("verify_full")   # raises: it has no verdict block to sit under
     if args.view == "cpu":
         # show_dcgm goes false, so no GPU spec list is built -- which makes both the
         # width of that list and where it would have been read from inert.
@@ -962,12 +978,12 @@ def _eff_timeseries(text: str, options, level: str, show_all: bool) -> None:
         timeseries_eff(found[1], found[0], options, level=level, show_all=show_all)
 
 
-def _verify_series(text: str, options, cfg) -> None:
-    """Summarize the series --verify just emitted as a window ladder."""
+def _verify_series(text: str, options, cfg, window_end=None) -> None:
+    """Turn the series --verify just emitted into a verdict on the job."""
     found = _emitted_series(text)
     if found:
-        verify_ladder(found[1], plot.metric_cols(found[0]), options,
-                      windows=cfg.report.verify_windows)
+        verify_report(found[1], plot.metric_cols(found[0]), options,
+                      windows=cfg.report.verify_windows, window_end=window_end)
 
 
 def _stats_timeseries(text: str, options, level: str) -> None:
@@ -1065,6 +1081,9 @@ def handle_report(args) -> None:
     if args.stats and not args.ts:
         raise JobscopeError("--stats summarizes a time series; add --ts (optionally with "
                             "a window, e.g. --ts 1h)")
+    if args.verify_full and not args.verify:
+        raise JobscopeError("--full shows every metric --verify's verdict was taken over; "
+                            "add --verify (optionally with a window, e.g. --verify 2h)")
     if args.stats and args.plot_ts:
         print("note: the chart already prints min/mean/max/last; ignoring --stats",
               file=sys.stderr)
@@ -1103,7 +1122,7 @@ def handle_report(args) -> None:
         # nor the flag alone can answer it.
         plot_avgeff=not args.no_plot,
         nodename=args.nodename, gpu_ids=tuple(plot.gpu_list(args.gpuid)) if args.gpuid else (),
-        window=_ts_window(args),
+        window=_ts_window(args), verify_full=args.verify_full,
         color=_want_color(args), combined=ts_combined,
         worst_jobs=cfg.defaults.worst_jobs,
         long_running=parse_duration(cfg.defaults.long_running),
@@ -1138,7 +1157,12 @@ def handle_report(args) -> None:
         buffer = io.StringIO()
         emit_timeseries(request, cfg, timeout, workers, ts_specs, args.step, options,
                         out=buffer)
-        _verify_series(buffer.getvalue(), options, cfg)
+        # When the fetch was asked to stop, which the samples cannot say: an exporter
+        # that died leaves a series that simply ends, and its last sample looks like the
+        # present. Only for a running job -- a finished one's newest scrape *is* the end
+        # of its window, so there is nothing to have gone quiet since.
+        _verify_series(buffer.getvalue(), options, cfg,
+                       window_end=int(time.time()) if request.running else None)
         return
 
     if args.ts:

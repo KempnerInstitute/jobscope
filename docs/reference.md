@@ -81,7 +81,8 @@ this way, so `jobscope <jobid>` still reports a job running right now.
 | *(default)* / `--per-job` | one row per job |
 | `--per-node` | one row per node, GPU figures pooled across its cards |
 | `--per-gpu` | one row per GPU, with node name and GPU number |
-| `--verify [WINDOW]` | check one job before acting: min/max, a mean per window rung, share of samples under the cutoff, longest unbroken idle stretch |
+| `--verify [WINDOW]` | check one job before acting: is it idle and wasteful, and since when — see below |
+| `--full` | with `--verify`: every metric the verdict was taken over, plus the ladder |
 | `--ts [WINDOW]` | the per-scrape time series as CSV |
 | `--stats` | with `--ts`: summarize it — min/mean/max/last per GPU per metric |
 | `--stats node` / `--stats job` | the same, pooled per node / across the job |
@@ -415,6 +416,18 @@ script reading them does not break when you recolour the display.
 sections = ["problems", "metrics"]   # lead with the jobs, skip the bars
 ```
 
+`[report] verify_windows` sets the rungs `--verify --full`'s ladder narrows to, widest
+first. Two by default, because the ladder has to show a direction and three columns of
+numbers is already a lot to read — an hour being the span at which a stalled job becomes
+worth acting on, and half an hour the shortest window with enough samples at a 60s scrape
+to mean anything. A rung as wide as the fetch is dropped rather than printed as a
+duplicate of it, so a 20-minute job shows one column and a 40-hour job shows all of them.
+
+```toml
+[report]
+verify_windows = ["4h", "1h", "15m"]   # default: ["2h", "30m"]
+```
+
 `[plot]` sets chart defaults, shared by `jobscope plot` and `--plot-ts`:
 
 ```toml
@@ -559,6 +572,120 @@ percent would mean picking one number for every architecture.
 and none of the point; `--eff all` lists it. `--csv` gives one row per job, carrying
 `GMEM%` and `POWER_W` even though neither votes on the label: a row you will sort or join
 on should say what was measured.
+
+### Before you act: `--verify`
+
+`--verify` answers one question about one job — is it idle and wasteful, and since when.
+It needs `-j`: it fetches every scrape of the job's series, which is right for a job you
+are about to `scancel` and wrong for a partition.
+
+```console
+$ jobscope -j 36664692 --verify 4h
+  Job:      36664692  alice  4 unit(s)  NVIDIA H200
+  Window:   13:50 .. 17:51   4h01m
+  Samples:  241 expected at 60s; 241 measured (100%)
+
+GPU%  (idle below 2, drawn against 0-100)
+  n1:0  ▆▅▅▃▅▅▅▆▅▅▅▃▅▅▅▆▅▅▅▃▅▅▅▆▅▅▅▃▅...........................
+  n1:1  ...........................................................
+  cell 2m  ────┬─────────────┬────────────┬────────────┬──────────
+              14:00         15:00        16:00        17:00
+
+             MEASURED     ACTIVE            IDLE       LONGEST IDLE
+  n1:0          4h01m      1h34m  39%      2h27m  61%  1h58m
+  n1:1          4h01m         0s   0%      4h01m 100%  4h01m
+  every unit idle at the same scrape for 2h27m of 4h01m; 14.6 of 16.1 unit-hours idle
+
+  GPU% time by band  (the cutoffs the verdict is taken on)
+    wasteful   90%  ███████████████████████████████░░░  14h30m
+    good        9%  ███░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1h24m
+
+Graded by best of GPU%, SM_ACT%.
+Verdict: wasteful (<2%) -- 3 of 4 units never cleared 2
+  n1:0  ran, then stopped: last sustained work at 15:52, idle at every scrape since -- 1h58m
+  n1:1  never ran: no GPU% sample reached 2 anywhere in this window (peak 0.6)
+```
+
+**The timeline is where it stopped.** One cell per bucket on a fixed 0–100 axis, so a
+job that never ran reads flat rather than being stretched to its own range. A space is a
+scrape that never arrived; a `.` is a cell where *nothing* cleared the cutoff, so the
+strip going flat means the work stopped and not that the mean dipped.
+
+**Every duration is measured time** — samples times the scrape interval, never the wall
+clock. What was not measured is its own figure, because an exporter that stopped
+answering leaves no samples and counting its silence as idleness is how a collection gap
+becomes a verdict. The job line is the instants every unit was idle *together*, so an
+outage on one card is not reported as the job being idle.
+
+**The verdict is the same rule the rest of the report grades on** — best of the voting
+metrics, lowered by any floor metric under its floor, against
+[`[thresholds.timeslice]`](#thresholds). It is withheld, not guessed, when the window
+holds fewer than 30 scrapes or less than half of them arrived; it is qualified when the
+metric moves faster than it is sampled, since no mean of such a series is reproducible.
+
+**One line per metric the verdict was taken over** — that table and the verdict are the
+whole of the default output:
+
+```
+  The metrics the verdict was taken over  (ACTIVE/IDLE are measured time, summed over units)
+    METRIC   UNITS   N   MIN    MAX    MEAN   ACTIVE  IDLE   IDLEMAX  SHAPE
+    GPU%     1 GPU   61  98.0   100.0  98.9   1h01m   0s     none     steady
+    SM_ACT%  1 GPU   61  2.9    62.2   10.3   1h01m   0s     none     steady
+    TENSOR%  1 GPU   61  0.0    0.6    0.0    0s      1h01m  1h01m    flat-idle
+    DRAM%    1 GPU   61  0.2    39.5   5.5    9m      52m    9m       steady
+    POWER_W  1 GPU   61  113.0  235.0  124.3  1h01m   0s     none     steady
+    CPU%     1 host  61  100.0  100.0  100.0  1h01m   0s     none     steady
+```
+
+`ACTIVE` and `IDLE` are summed over units, so a 4-GPU job accrues four card-hours per
+hour of window — unit-time, the way the summary charges GPU-hours. `IDLEMAX` is the
+longest *unbroken* stretch on any one unit, which a total cannot give: four minutes
+between batches and three hours of a stopped job sum the same and mean the opposite.
+
+`--full` adds **where each one's time actually went**, which is the block to diagnose
+from:
+
+```
+  Time by band, per metric  (the cutoffs the verdict is taken on)
+    GPU%     100% good, 1h01m -- nothing measured in any other band
+    SM_ACT%
+               wasteful    0%  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0s
+            inefficient   87%  ██████████████████████████████░░░░  53m
+      needs improvement    0%  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0s
+                average    0%  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0s
+                   good   13%  ████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   8m
+    TENSOR%  100% wasteful, 1h01m -- nothing measured in any other band
+    DRAM%
+               wasteful   85%  █████████████████████████████░░░░░  52m
+      ...
+    POWER_W  100% at or above, 1h01m -- nothing measured in any other band
+    CPU%     100% good, 1h01m -- nothing measured in any other band
+```
+
+Read together those say what one number cannot: the job's duty cycle is pegged at 100%
+`good`, its SM residency spent 87% of the window in `inefficient`, its tensor pipes
+never started and its memory bus idled 85% of the hour. That is a job spinning on a
+trivial kernel — busy by the measure the verdict grades on, and computing almost
+nothing.
+
+A metric whose time sits ≥95% in one band collapses to a line, because the remainder
+cannot be a sustained anything. The bins are `Thresholds.tier` calls, so a band block
+cannot disagree with the verdict under it. `UNITS` says what was pooled, since a host
+metric is measured once per node and a GPU one once per card. A column that neither
+votes nor sets a floor (`MEM%`, `GMEM%`) is left to the ladder: it has no cutoff and no
+say.
+
+So a plain `--verify` is the answer and one line of evidence per metric; `--full` is all
+of the evidence — a timeline and a per-unit idle split for each voting metric, the band
+split above, and the per-rung ladder with min/max/swing and a mean per window rung. On a
+one-GPU job that is roughly 19 lines against 94.
+
+**Where the timeline went.** It is behind `--full`, but *when* a job stopped is still in
+the default: the verdict's per-unit sentences name the clock time
+(`ran, then stopped: last sustained work at 15:52, idle at every scrape since — 1h58m`),
+and they are also where a multi-GPU job says which cards were idle.
+
+`--csv` gives one row per unit and metric with every figure, durations in seconds.
 
 ---
 

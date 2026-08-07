@@ -2211,6 +2211,98 @@ def test_a_non_terminal_gets_a_fixed_width():
     assert terminal_width(io.StringIO()) == PIPED_CHART_WIDTH
 
 
+# --- the timeline strip -----------------------------------------------------------
+
+def _strip(values, cells=20, header="GPU%", step=60, options=None):
+    """A level_strip of ``values``, bucketed the way the verify block will bucket them."""
+    from jobscope import job_eff
+    start = 1_000_000
+    stamped = [(start + i * step, v) for i, v in enumerate(values) if v is not None]
+    end = start + (len(values) - 1) * step
+    bands = _thresholds()
+    return report.level_strip(
+        job_eff.bucket(stamped, start, end, cells),
+        job_eff.bucket(stamped, start, end, cells, reduce=max),
+        job_eff.cutoff(bands, header), job_eff.full_scale(bands, header),
+        options=options, header=header)
+
+
+def test_a_card_that_never_ran_draws_flat_however_much_it_jittered():
+    """The reason this is not plot.braille_spark, which scales to the values' own
+    min..max: a card idling between 0.4 and 0.6 has a *range*, and normalising to it
+    draws a full-height sawtooth for a card that never did anything."""
+    from jobscope.plot import braille_spark
+    jitter = [0.4, 0.6] * 60
+    assert set(_strip(jitter)) == {"."}
+    assert len(set(braille_spark(jitter, 20)[0])) >= 1
+    assert braille_spark(jitter, 20)[0] != _strip(jitter)
+
+
+def test_a_fixed_axis_keeps_two_flat_series_apart():
+    """Flat is not one character: the height still says how hard it worked."""
+    assert set(_strip([0.5] * 120)) == {"."}
+    assert set(_strip([50.0] * 120)) == {"▅"}
+    assert set(_strip([95.0] * 120)) == {"█"}
+
+
+def test_a_cell_holding_one_busy_sample_is_not_drawn_idle():
+    """A three-minute cell of 100, 0, 0 and one of 0, 0, 0 have nearly the same mean.
+    Telling them apart is the entire reason for the view, so the idle rung is reserved
+    for cells where nothing cleared the cutoff."""
+    assert "." not in _strip([100, 0, 0] * 40, cells=40)
+    assert set(_strip([0, 0, 0] * 40, cells=40)) == {"."}
+
+
+def test_a_bucket_nothing_was_measured_in_draws_as_a_gap():
+    """Not as a zero: an exporter outage and an idle card are different events."""
+    from jobscope import job_eff
+    strip = report.level_strip([1.0, None, 1.0], [1.0, None, 1.0], 2.0, 100.0)
+    assert strip == "%s %s" % (report.STRIP_IDLE, report.STRIP_IDLE)
+    assert job_eff.bucket([], 0, 60, 3) == [None, None, None]
+
+
+def test_the_strip_is_one_character_per_bucket():
+    for cells in (1, 7, 20, 103):
+        assert len(_strip([50.0] * 120, cells=cells)) == cells
+
+
+def test_a_strip_is_never_drawn_finer_than_the_scrape_interval():
+    """At 116 columns a 40-minute job would get 100 cells for 40 samples, and 60 of them
+    would be gaps that are not gaps -- an outage drawn where the data is complete."""
+    assert report.strip_cells(116, 10, span=2400, step=60) == 41
+    # A long job is bounded by the room instead.
+    assert report.strip_cells(116, 10, span=86400, step=60) == 104
+    # And never narrower than a strip that could say anything.
+    assert report.strip_cells(30, 10, span=86400, step=60) == report.MIN_STRIP_CELLS
+
+
+def test_the_axis_labels_sit_under_their_own_cells():
+    from jobscope import job_eff
+    edges = job_eff.bucket_edges(1_000_000, 1_000_000 + 240 * 60, 80)
+    rule, labels = report.strip_axis(edges, indent=2)
+    assert len(rule) == 80 + 2
+    # A tick every ten cells at least, so a five-character HH:MM cannot collide.
+    ticks = [i for i, ch in enumerate(rule) if ch == "┬"]
+    assert ticks and all(b - a >= 10 for a, b in zip(ticks, ticks[1:]))
+    for i in ticks:
+        assert labels[i:i + 5].strip(), "no label under the tick at %d" % i
+
+
+def test_the_strip_carries_no_escapes_without_colour():
+    plain = _strip([50.0] * 120, options=RenderOptions(thresholds=_thresholds()))
+    assert "\033" not in plain
+
+
+def test_tinting_the_strip_does_not_change_what_it_measures():
+    """Every width in this file is taken after _ESC_RE strips the escapes, so a run-length
+    tinted strip has to measure the same as an untinted one."""
+    options = RenderOptions(thresholds=_thresholds(), color=True)
+    painted = _strip(([90.0] * 60) + ([0.5] * 60), options=options)
+    plain = _strip(([90.0] * 60) + ([0.5] * 60))
+    assert "\033" in painted
+    assert report._ESC_RE.sub("", painted) == plain
+
+
 def test_in_columns_pads_a_short_block():
     """A metric absent from one group leaves its block a line short of its neighbour."""
     from jobscope.report import in_columns
@@ -3802,18 +3894,38 @@ def _series(values, step=60, start=1_000_000, metric="GPU%", node="n1", gpu="0")
             for i, v in enumerate(values)]
 
 
-def _verify(rows, metrics=("GPU%",), windows=(("2h", 7200), ("30m", 1800))):
+def _verify(rows, metrics=("GPU%",), windows=(("2h", 7200), ("30m", 1800)), window=None,
+            detail=True):
+    """The ladder is behind --full now; these tests are about the ladder."""
     out = io.StringIO()
-    report.verify_ladder(rows, list(metrics),
-                         RenderOptions(thresholds=_thresholds()), out, windows=windows)
+    report.verify_report(rows, list(metrics),
+                         RenderOptions(thresholds=_thresholds(), window=window,
+                                       verify_full=detail),
+                         out, windows=windows)
     return out.getvalue()
 
 
+def _ladder_header(text):
+    """The ladder table's header row, wherever in the block it sits."""
+    return next(ln for ln in text.splitlines() if ln.startswith("NODE"))
+
+
 def _row(text, metric="GPU%"):
-    header = next(ln for ln in text.splitlines() if ln.startswith("NODE"))
-    row = next(ln for ln in text.splitlines() if (" %s " % metric) in ln
-               and not ln.startswith("NODE"))
-    return dict(zip(header.split(), row.split()))
+    """One ladder row as a dict, taken from the ladder body alone.
+
+    Bounded by the blank line that ends the block rather than searched for across the
+    whole output: the verdict block names its metrics in prose, and some of those lines
+    have the same field count as a row by coincidence.
+    """
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("NODE"))
+    fields = lines[start].split()
+    for line in lines[start + 1:]:
+        if not line.strip():
+            break
+        if not line.startswith("-") and metric in line.split():
+            return dict(zip(fields, line.split()))
+    raise AssertionError("no %s row in the ladder:\n%s" % (metric, text))
 
 
 def test_a_bursty_job_is_not_reported_as_idle():
@@ -3850,11 +3962,10 @@ def test_a_steadily_busy_job_reads_steady():
 
 def test_a_rung_at_least_as_long_as_the_run_is_dropped():
     """Otherwise every job shorter than the widest window gets identical columns."""
-    short = _verify(_series([50] * 20))          # 20 minutes
-    assert "2h" not in short.splitlines()[0] and "30m" not in short.splitlines()[0]
-    assert "run" in short.splitlines()[0]
-    long = _verify(_series([50] * 300))          # 5 hours
-    assert "2h" in long.splitlines()[0] and "30m" in long.splitlines()[0]
+    short = _ladder_header(_verify(_series([50] * 20))).split()      # 20 minutes
+    assert "2h" not in short and "30m" not in short and "run" in short
+    long = _ladder_header(_verify(_series([50] * 300))).split()      # 5 hours
+    assert "2h" in long and "30m" in long
 
 
 def test_slicing_a_rung_equals_a_narrowed_fetch():
@@ -3898,10 +4009,312 @@ def test_power_answers_to_its_per_model_floor_not_a_percentage_edge():
     assert low["BELOW"] == "100%"
 
 
+def test_power_has_a_shape_rather_than_always_reading_steady():
+    """Thresholds.tier returns "" for a non-percentage, and reading that through
+    _VERDICT_ORDER.get(tier, 0) ranked every POWER_W sample the same. Every rank being
+    equal made flat-idle, declining and bursty all unreachable, so a card that never rose
+    off its 100 W idle floor reported `steady` -- the one word that says it is fine."""
+    never_ran = _series([74] * 200, metric="POWER_W")
+    assert _row(_verify(never_ran, metrics=("POWER_W",)), "POWER_W")["SHAPE"] == "flat-idle"
+    # Drew 500 W for 2.5h, then fell through the floor for the last hour.
+    stopped = _series(([500] * 150) + ([80] * 60), metric="POWER_W")
+    assert _row(_verify(stopped, metrics=("POWER_W",)), "POWER_W")["SHAPE"] == "declining"
+    # Still above the floor throughout: `steady` is the right answer here, and stays it.
+    dipped = _series(([500] * 150) + ([120] * 60), metric="POWER_W")
+    assert _row(_verify(dipped, metrics=("POWER_W",)), "POWER_W")["SHAPE"] == "steady"
+
+
+def test_memory_has_no_idle_line_to_be_below():
+    """MEM% and GMEM% are percentages, so they used to answer to the wasteful edge like
+    any other column -- which made "this job's memory was idle for 3h" printable. A
+    capacity reading full while nothing computes is what the `memory` role names."""
+    text = _verify(_series([1.0] * 200, metric="MEM%"), metrics=("MEM%",))
+    got = _row(text, "MEM%")
+    assert (got["BELOW"], got["IDLEMAX"]) == ("-", "-")
+    # The graded columns are unaffected -- this is about the role, not about being low.
+    assert _row(_verify(_series([1.0] * 200)))["BELOW"] == "100%"
+
+
+def test_a_dead_exporter_is_counted_as_missing_rather_than_as_a_short_series():
+    """The gap count came off each series' own extent, so a series that simply *stopped*
+    was complete by its own measure: an exporter that died halfway reported zero missing
+    scrapes and its last sample looked like the present."""
+    rows = _series([50] * 60, gpu="0") + _series([50] * 120, gpu="1")
+    assert "60 scrape(s) missing" in _verify(rows)
+
+
+def test_a_windowed_fetch_names_the_window_rather_than_the_run():
+    """range_window narrows the query, so under --verify 2h the fetch *is* the window.
+    The ladder printed a `run` column of 121 samples beside a `2h` column of 120 -- two
+    readings of the same data, the first named after a run it did not cover."""
+    windowed = _ladder_header(_verify(_series([50] * 121), window=7200)).split()
+    assert "2h" in windowed and "run" not in windowed
+    assert windowed.count("2h") == 1
+    # Without a window the whole run is the first rung, exactly as before.
+    assert "run" in _ladder_header(_verify(_series([50] * 121))).split()
+    # A window wider than the run got the whole run, so `run` is what that column is.
+    assert "run" in _ladder_header(_verify(_series([50] * 20), window=14400)).split()
+
+
+def test_a_host_metric_is_reported_once_per_node_not_once_per_card():
+    """A combined series carries CPU%/MEM% on every GPU row, so grouping the whole lot by
+    card gave a 4-GPU job four identical CPU% rows -- and counted one node's host samples
+    four times in anything that pools them."""
+    rows = []
+    for i in range(60):
+        for gpu in ("0", "1", "2", "3"):
+            rows.append({"JOBID": "1", "USER": "alice", "EPOCH": str(1_000_000 + i * 60),
+                         "NODE": "n1", "GPU": gpu, "MODEL": "NVIDIA H200",
+                         "GPU%": "50", "CPU%": "7.5"})
+    data = report.verify_figures(rows, ["GPU%", "CPU%"],
+                                 RenderOptions(thresholds=_thresholds()))
+    host = [f for f in data.figures if f.metric == "CPU%"]
+    assert len(host) == 1
+    assert len(host[0].values) == 60          # the node's scrapes, not 4x them
+    assert host[0].unit == ("n1",)            # named by node: it pooled no cards
+    assert len([f for f in data.figures if f.metric == "GPU%"]) == 4
+
+
+def test_each_node_is_measured_at_its_own_scrape_interval():
+    """One modal gap over every stamp in the report is the majority node's, and on a job
+    whose nodes scrape at different rates every duration on the other node was wrong."""
+    minute = [{"JOBID": "1", "USER": "a", "EPOCH": str(1_000_000 + i * 60), "NODE": "n1",
+               "GPU": "0", "MODEL": "NVIDIA H200", "GPU%": "1"} for i in range(100)]
+    five = [{"JOBID": "1", "USER": "a", "EPOCH": str(1_000_000 + i * 300), "NODE": "n2",
+             "GPU": "0", "MODEL": "NVIDIA H200", "GPU%": "1"} for i in range(20)]
+    data = report.verify_figures(minute + five, ["GPU%"],
+                                 RenderOptions(thresholds=_thresholds()))
+    by_node = {f.unit[0]: f for f in data.figures}
+    assert by_node["n1:0"].step == 60 and by_node["n2:0"].step == 300
+    # 20 samples five minutes apart is an hour and forty, not twenty minutes.
+    assert by_node["n2:0"].idlemax == 20 * 300
+
+
+def test_rows_that_carry_no_value_for_the_metric_say_so_rather_than_raising():
+    """stamped_samples keys a group off the row's identity, so rows whose metric column
+    is blank leave a group with no stamps at all -- and `max(set())` ran on it. Reachable
+    whenever a column is in the series header and empty in every row of it."""
+    blank = [dict(row, **{"GPU%": ""}) for row in _series([50] * 50)]
+    assert _verify(blank).strip() == "no samples to verify"
+    assert _verify(_series([50] * 50), metrics=("NOSUCH%",)).strip() == "no samples to verify"
+
+
 def test_the_table_names_which_source_served_each_column():
     """--verify is the pre-action check; where the number came from is part of the answer."""
     text = _verify(_series([50] * 100))
     assert "GPU% <-" in text
+
+
+# --- --verify: the verdict block --------------------------------------------------
+
+def _block(rows, metrics=("GPU%",), window=None, color=False, windows=(("2h", 7200),)):
+    """The default --verify output: the verdict block, no ladder."""
+    return _verify(rows, metrics, windows=windows, window=window, detail=False)
+
+
+def test_the_default_output_concludes_rather_than_tabulating():
+    text = _block(_series([0.5] * 200))
+    assert "Verdict:" in text
+    assert "NODE:GPU" not in text          # the ladder is behind --full
+    assert "SWING" not in text
+
+
+def test_verify_full_adds_the_ladder_under_the_verdict():
+    text = _verify(_series([0.5] * 200))   # detail=True
+    assert "Verdict:" in text and "NODE:GPU" in text and "SWING" in text
+    assert text.index("NODE:GPU") < text.index("Verdict:")
+
+
+def test_the_verdict_is_the_one_the_rest_of_the_report_reaches():
+    """job_eff.classify, not a second opinion. Cross-checked against --ts --eff, which
+    is the other caller that turns a series into a category."""
+    for values, expected in (([85] * 120, "good"), ([0.5] * 120, "wasteful"),
+                             ([15] * 120, "needs improvement")):
+        rows = _series(values)
+        block = _block(rows)
+        out = io.StringIO()
+        report.timeseries_eff(rows, ["JOBID", "USER", "EPOCH", "NODE", "GPU", "MODEL",
+                                     "GPU%"],
+                              RenderOptions(thresholds=_thresholds()), out, level="job")
+        assert "Verdict: %s" % expected in block
+        assert expected in out.getvalue()
+
+
+def test_a_job_that_stopped_says_when_it_stopped():
+    """The question the whole view is for: not just that it is idle, but since when."""
+    text = _block(_series(([90] * 150) + ([0.5] * 60)))
+    assert "ran, then stopped" in text
+    assert "idle at every scrape since -- 1h00m" in text
+
+
+def test_a_card_that_never_ran_is_named_as_such_and_counted():
+    """Pooling hides it: a job using one card of four and one using four badly reach the
+    same verdict, and only the first is fixed by asking for fewer GPUs."""
+    rows = _series([90] * 120, gpu="0")
+    for gpu in ("1", "2", "3"):
+        rows += _series([0.2] * 120, gpu=gpu)
+    text = _block(rows)
+    assert text.count("never ran") == 3
+    assert "3 of 4 units never cleared 2" in text
+
+
+def test_units_idle_at_different_times_were_never_idle_together():
+    """The job-level figure is the instants they shared, not the span between the first
+    and the last -- which would count an exporter outage as job-wide idleness."""
+    rows = (_series(([0.5] * 60) + ([90] * 60), gpu="0")
+            + _series(([90] * 60) + ([0.5] * 60), gpu="1"))
+    assert "every unit idle at the same scrape for 0s" in _verify(rows, detail=True)
+
+
+def test_a_window_too_short_to_grade_withholds_the_verdict():
+    text = _block(_series([50, 0, 97, 80, 60, 40]))
+    assert "No verdict:" in text and "fewer than 30" in text
+    assert "Verdict:" not in text.replace("No verdict:", "")
+    # What was measured still prints: refusing to state a fact is not a virtue.
+    assert "The metrics the verdict was taken over" in text
+
+
+def test_half_a_window_measured_withholds_the_verdict():
+    rows = _series([90] * 100, gpu="0") + _series([90] * 240, gpu="1")
+    text = _block(rows)
+    assert "No verdict:" in text and "less than half a window" in text
+
+
+def test_an_unreproducible_mean_qualifies_the_verdict_without_withholding_it():
+    """A bursty job with a low mean can still be genuinely wasteful, so this warns
+    rather than refuses -- and it warns where the verdict is, not only below it."""
+    text = _block(_series([100 if i % 2 else 0 for i in range(151)]))
+    assert "Verdict:" in text
+    assert "on a mean that is not reproducible" in text
+    assert "flapping" in text
+
+
+def test_the_timeline_shows_where_the_job_collapsed():
+    text = _verify(_series(([90] * 100) + ([0.5] * 100)), detail=True)
+    strip = next(ln for ln in text.splitlines() if ln.strip().startswith("n1:0")
+                 and report.STRIP_IDLE in ln)
+    # Working then idle, in that order, on one line.
+    assert strip.rstrip().endswith(report.STRIP_IDLE)
+    worked = min(strip.index(ch) for ch in report.STRIP_BLOCKS if ch in strip)
+    assert worked < strip.index(report.STRIP_IDLE)
+
+
+def test_the_bands_block_agrees_with_the_verdict_it_sits_under():
+    """The bins are Thresholds.tier calls, so the histogram cannot contradict the
+    conclusion -- and it collapses to a line when one band holds nearly all of it."""
+    busy = _verify(_series([85] * 200), detail=True)
+    assert "100% good" in busy and "nothing measured in any other band" in busy
+    mixed = _verify(_series(([85] * 100) + ([0.5] * 100)), detail=True)
+    assert "Time by band, per metric" in mixed
+    # Half the window either side of the cutoff, so both bands carry real time.
+    wasteful = next(ln for ln in mixed.splitlines() if "wasteful" in ln)
+    good = next(ln for ln in mixed.splitlines() if ln.strip().startswith("good"))
+    assert "50%" in wasteful and "1h40m" in wasteful
+    assert "50%" in good and "1h40m" in good
+
+
+def _multi(gpu_values, sm_values, mem_values=None, gpu="0"):
+    """Rows carrying several metrics per scrape, as a combined series does."""
+    rows = []
+    for i, value in enumerate(gpu_values):
+        row = {"JOBID": "1", "USER": "alice", "EPOCH": str(1_000_000 + i * 60),
+               "NODE": "n1", "GPU": gpu, "MODEL": "NVIDIA H200",
+               "GPU%": str(value), "SM_ACT%": str(sm_values[i])}
+        if mem_values is not None:
+            row["MEM%"] = str(mem_values[i])
+        rows.append(row)
+    return rows
+
+
+def test_the_default_block_reports_every_metric_the_verdict_used():
+    """The 'Graded by best of ...' line names them, and naming a metric as having voted
+    while showing none of its numbers is the gap. Measured on a real job: GPU% 98.9 and
+    TENSOR% flat is a card busy by duty cycle and barely computing."""
+    rows = _multi([98] * 120, [1.0] * 120)
+    text = _verify(rows, metrics=("GPU%", "SM_ACT%"), detail=False)
+    assert "The metrics the verdict was taken over" in text
+    # The leading metric is in the table too, or it has no representation at all.
+    assert next(ln for ln in text.splitlines() if ln.strip().startswith("GPU%"))
+    line = next(ln for ln in text.splitlines() if ln.strip().startswith("SM_ACT%")
+                and "flat-idle" in ln)
+    assert "1.0" in line                       # its min/max/mean, which GPU% alone hides
+    # One table and the verdict: every picture is evidence behind it, and waits for --full.
+    assert "drawn against" not in text and "Time by band, per metric" not in text
+    full = _verify(rows, metrics=("GPU%", "SM_ACT%"), detail=True)
+    assert "Time by band, per metric" in full and "SM_ACT%  100% wasteful" in full
+    assert full.count("drawn against") == 2
+
+
+def test_a_metric_that_neither_votes_nor_floors_is_left_to_the_ladder():
+    """MEM% has no cutoff and no say, so it has nothing to contribute to a verdict
+    block -- it is carried by --full's ladder instead."""
+    rows = _multi([98] * 120, [50] * 120, mem_values=[40] * 120)
+    data = report.verify_figures(rows, ["GPU%", "SM_ACT%", "MEM%"],
+                                 RenderOptions(thresholds=_thresholds()))
+    assert "MEM%" not in data.judged
+    assert data.judged[0] == "GPU%" and "SM_ACT%" in data.judged
+
+
+def test_full_draws_a_timeline_for_every_voting_metric():
+    rows = _multi([98] * 120, [1.0] * 120)
+    full = _verify(rows, metrics=("GPU%", "SM_ACT%"), detail=True)
+    assert full.count("drawn against") == 2
+    assert "GPU%  (idle below" in full and "SM_ACT%  (idle below" in full
+    # And the ladder underneath it, which is the rest of what the flag buys.
+    assert "NODE:GPU" in full and "SWING" in full
+
+
+def test_a_pooled_row_reports_its_most_actionable_shape():
+    """A metric flat-idle on one card of four says so rather than averaging into the
+    majority's `steady` -- the row cannot carry four shapes and that is the one that
+    would change what someone does."""
+    from jobscope.report import worst_shape
+
+    class Fake:
+        def __init__(self, shape):
+            self.shape = shape
+    assert worst_shape([Fake("steady"), Fake("flat-idle")]) == "flat-idle"
+    assert worst_shape([Fake("steady"), Fake("bursty")]) == "bursty"
+    assert worst_shape([Fake("declining"), Fake("bursty")]) == "declining"
+    assert worst_shape([Fake("steady"), Fake("steady")]) == "steady"
+
+
+def test_csv_carries_every_figure_the_block_computed():
+    """--verify --csv wrote the human table into a pipeline expecting CSV. It now emits
+    one row per unit and metric, with the full set whatever --full says: that
+    flag is about how much terminal to spend."""
+    import csv as csv_module
+    rows = _series(([90] * 100) + ([0.5] * 60), gpu="0") + _series([0.2] * 160, gpu="1")
+    out = io.StringIO()
+    report.verify_report(rows, ["GPU%"],
+                         RenderOptions(thresholds=_thresholds(), csv=True,
+                                       verify_full=False),
+                         out, windows=(("30m", 1800),))
+    got = list(csv_module.reader(io.StringIO(out.getvalue())))
+    header, body = got[0], got[1:]
+    assert header[:6] == ["JOBID", "USER", "NODE", "GPU", "METRIC", "MODEL"]
+    assert len(body) == 2                     # one row per unit
+    by_gpu = {row[3]: dict(zip(header, row)) for row in body}
+    # Durations in seconds, not _span's reading form -- that one is not round-trippable.
+    assert by_gpu["1"]["IDLE_S"] == str(160 * 60)
+    assert by_gpu["1"]["SHAPE"] == "flat-idle"
+    # The verdict is the job's, on every row: a row is what gets sorted or joined on.
+    assert len({row["VERDICT"] for row in by_gpu.values()}) == 1
+
+
+def test_the_block_does_not_reshape_with_the_terminal_when_redirected():
+    """PIPED_CHART_WIDTH exists for this, and nothing asserted it on this path."""
+    import os
+    import shutil
+    real = shutil.get_terminal_size
+    try:
+        shutil.get_terminal_size = lambda fallback=(80, 24): os.terminal_size((400, 24))
+        wide = _block(_series([50] * 200))
+        shutil.get_terminal_size = lambda fallback=(80, 24): os.terminal_size((40, 24))
+        narrow = _block(_series([50] * 200))
+    finally:
+        shutil.get_terminal_size = real
+    assert wide == narrow
 
 
 def test_every_row_has_a_cell_under_every_header():

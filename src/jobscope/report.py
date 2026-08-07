@@ -5,6 +5,7 @@ stable: the CSV emitted here is what ``jobscope plot`` parses.
 """
 
 import csv
+import itertools
 import re
 import shutil
 import sys
@@ -14,9 +15,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-from . import dcgm, metrics
+from . import cpu, dcgm, metrics
 from .models import GPU_LEVEL, JobRow, NODE_LEVEL, ReportContext
 from .config import (
+    BUCKET_OF,
     DEFAULT_LONG_RUNNING,
     DEFAULT_WORST_JOBS,
     REPORT_SECTIONS,
@@ -52,21 +54,41 @@ from .dcgm import (
 )
 from .errors import JobscopeError
 from .job_eff import (
+    ALIASED,
+    BURSTY,
     CATEGORIES,
+    DECLINING,
+    FLAT_IDLE,
+    MIN_SAMPLES,
     NO_DATA,
+    IdleSince,
+    Measured,
+    SPARSE,
+    STALE,
+    STEADY,
+    THIN,
     below_share,
+    bucket,
+    bucket_edges,
     classify,
     classify_description,
     classify_metrics,
+    concurrent_idle,
     cutoff,
+    distribution,
+    full_scale,
+    idle_stamps,
     longest_idle,
+    measured_time,
     median_swing,
+    qualifiers,
     series_shape,
     tier_criteria,
     tier_range,
     unceilinged,
+    went_idle,
 )
-from .running import Gpu, RunningJob, build_columns, job_sort_key
+from .running import Gpu, RunningJob, build_columns, format_duration, job_sort_key
 
 
 @dataclass(frozen=True)
@@ -333,6 +355,11 @@ class RenderOptions:
     # --ts only: emit just the last N seconds of each job's series, narrowing the
     # range queries rather than filtering rows afterwards.
     window: Optional[int] = None
+    # --verify only: add the per-rung ladder table under the verdict block. Off by
+    # default because the block answers the question and the ladder is the evidence
+    # behind it -- which is worth a flag, not worth twenty rows of a four-GPU job's
+    # screen every time.
+    verify_full: bool = False
     # Tint %-metric cells by their threshold band. Off unless the caller has
     # established that the destination is a terminal that wants colour.
     color: bool = False
@@ -431,7 +458,8 @@ BAR_WIDTH = 34
 
 
 def bar_lines(items, indent: str = "  ") -> List[str]:
-    """Horizontal bars from ``(label, percent, band)`` triples.
+    """Horizontal bars from ``(label, percent, band)`` triples, or 4-tuples with a
+    trailing cell -- a duration beside a share, where the share alone does not size it.
 
     One primitive for the per-job summary and the per-GPU detail charts, so they look
     identical rather than merely similar. A nonzero value always draws at least one
@@ -440,18 +468,21 @@ def bar_lines(items, indent: str = "  ") -> List[str]:
     """
     if not items:
         return []
-    label_width = max(len(label) for label, _v, _b in items)
+    items = [one if len(one) == 4 else tuple(one) + ("",) for one in items]
+    label_width = max(len(label) for label, _v, _b, _t in items)
+    trailing = max(len(text) for _l, _v, _b, text in items)
     out = []
-    for label, value, band in items:
+    for label, value, band, text in items:
         filled = max(0, min(BAR_WIDTH, int(round(value / 100.0 * BAR_WIDTH))))
         if value > 0 and filled == 0:
             filled = 1
         run = "\u2588" * filled
         value_text = "<1%" if 0 < value < 0.5 else "%d%%" % round(value)
-        out.append("%s%*s  %4s  %s%s" % (
+        out.append(("%s%*s  %4s  %s%s%s" % (
             indent, label_width, label, value_text,
             tint(run, band) if run else run,
-            "\u2591" * (BAR_WIDTH - filled)))
+            "\u2591" * (BAR_WIDTH - filled),
+            ("  %*s" % (trailing, text)) if trailing else "")).rstrip())
     return out
 
 
@@ -521,6 +552,125 @@ def tint(text: str, role: str) -> str:
     """
     escape = _SGR.get(role, "") if role else ""
     return escape + text + _RESET if escape else text
+
+
+# --- the timeline strip -------------------------------------------------------
+#
+# One character per time bucket, drawn against a *fixed* axis (job_eff.full_scale) so
+# two jobs read the same way and a flat series reads flat. jobscope.plot.braille_spark
+# is the wrong primitive here despite being the closest one: it scales to the values'
+# own min..max, which is right for a chart that prints its axis and wrong for a strip
+# that has none -- a job that never rose above 0.6% would draw as a full-range sawtooth.
+#
+# The ramp is one space, one full stop and seven blocks, and the three kinds of cell it
+# distinguishes are the whole point: nothing measured, nothing that cleared the cutoff,
+# and how hard it worked.
+#
+# A full stop rather than U+2581 for the idle rung. Eight block heights sit about two
+# pixels apart, which is fine for reading *shape* -- where it is high, where it collapses
+# -- and useless for reading one cell. But one distinction has to survive monochrome, and
+# it is idle versus working: it is the most decision-relevant bit in the view, and
+# U+2581 and U+2582 differ by a pixel. A full stop sits on the baseline and is
+# unambiguously not a block at any font. In colour it carries its band as well, so the
+# bit is stated twice -- the redundancy the GOOD/OK/BAD headers argue for below.
+STRIP_GAP = " "
+STRIP_IDLE = "."
+STRIP_BLOCKS = "▂▃▄▅▆▇█"
+STRIP_RAMP = STRIP_GAP + STRIP_IDLE + STRIP_BLOCKS
+# Below this a strip says nothing about shape, so it is not worth narrowing further to
+# fit a label; the caller wraps or drops instead.
+MIN_STRIP_CELLS = 20
+
+# Tick spacings, coarsest wins: the smallest that leaves at least ten cells between
+# ticks, so a five-character HH:MM never touches its neighbour.
+_TICK_STEPS = (60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
+
+
+def strip_level(mean: Optional[float], peak: Optional[float],
+                limit: Optional[float], scale: Optional[float]) -> int:
+    """Which rung of :data:`STRIP_RAMP` a cell draws at: 0 gap, 1 idle, 2..8 working.
+
+    A cell may only draw as idle when *nothing in it* cleared the cutoff, which is why
+    the peak is asked for alongside the mean. Without that rule a three-minute cell
+    holding 100, 0, 0 draws identically to one holding 0, 0, 0 -- and telling those two
+    apart is the entire reason this view exists. The cost is that the lowest block spans
+    a wider range of means than the rest, which is the right trade: the ramp is read for
+    where it collapses, not for its exact height.
+
+    A metric with no cutoff has no idle rung to fall to, and scales normally.
+    """
+    if mean is None or not scale:
+        return 0
+    if limit is not None and (peak is None or peak < limit):
+        return 1
+    return max(2, min(8, 1 + int(round(mean / scale * 7))))
+
+
+def level_strip(means, peaks, limit: Optional[float], scale: Optional[float],
+                options: Optional["RenderOptions"] = None, header: str = "",
+                model: str = "") -> str:
+    """One tinted character per bucket, from parallel mean and peak lists.
+
+    Tinted per *run* of equal band rather than per cell: a hundred cells at ten escape
+    bytes each is a kilobyte a line, and ``_ESC_RE`` strips escapes before anything
+    measures a width, so the grouping is invisible to every caller.
+    """
+    cells = []
+    for mean, peak in zip(means, peaks):
+        level = strip_level(mean, peak, limit, scale)
+        band = "" if (options is None or level == 0) else cell_band(
+            options, header, mean, model)
+        cells.append((STRIP_RAMP[level], band))
+    out = []
+    for band, group in itertools.groupby(cells, key=lambda cell: cell[1]):
+        text = "".join(char for char, _band in group)
+        out.append(tint(text, band) if band else text)
+    return "".join(out)
+
+
+def strip_cells(width: int, label_width: int, span: int, step: int,
+                indent: int = 2) -> int:
+    """How many cells to draw a ``span``-second series in, never finer than ``step``.
+
+    The second clamp is the one that is easy to miss: at 116 columns a forty-minute job
+    would be given a hundred cells for forty samples, and sixty of them would be gaps
+    that are not gaps -- an exporter outage drawn where the data is complete.
+    """
+    room = max(MIN_STRIP_CELLS, width - label_width - indent)
+    return max(1, min(room, span // max(1, step) + 1))
+
+
+def strip_axis(edges, indent: int = 0) -> List[str]:
+    """``[tick row, label row]`` for the cells ``edges`` describes.
+
+    Built from the same edge list the strip was drawn from rather than from a measured
+    width, so the labels sit under their own cells structurally -- which is what keeps
+    the axis correct once the strip above it is full of colour escapes.
+    """
+    if not edges:
+        return []
+    start, end = edges[0][0], edges[-1][1]
+    cell = max(1, (end - start) // len(edges))
+    every = next((s for s in _TICK_STEPS if s >= 10 * cell), _TICK_STEPS[-1])
+    rule = ["─"] * len(edges)
+    labels = [" "] * len(edges)
+    # Ticks land on aligned wall-clock instants -- 14:00, 14:30 -- rather than on
+    # multiples of the fetch's own start, which would put them at 14:07 and 14:37 and
+    # make two runs of the same job impossible to lay beside each other.
+    stamp = start - start % every
+    while stamp <= end:
+        if stamp >= start:
+            at = next((i for i, (lo, hi) in enumerate(edges) if lo <= stamp < hi),
+                      len(edges) - 1)
+            rule[at] = "┬"
+            text = time.strftime("%H:%M", time.localtime(stamp))
+            # All of it or none of it: half a timestamp at the right edge reads as a
+            # different time rather than as a truncated one.
+            if at + len(text) <= len(labels):
+                labels[at:at + len(text)] = list(text)
+        stamp += every
+    pad = " " * indent
+    return [pad + "".join(rule), (pad + "".join(labels)).rstrip()]
 
 
 def fmt_context(label: str, value: str) -> str:
@@ -2786,7 +2936,7 @@ def stamped_samples(rows: List[dict], metrics: List[str],
     return groups
 
 
-def sampling_step(stamps) -> int:
+def sampling_step(stamps, default: int = 60) -> int:
     """The scrape interval, inferred from the stamps themselves.
 
     Inferred rather than plumbed through: the renderer already has the timestamps, and a
@@ -2795,38 +2945,200 @@ def sampling_step(stamps) -> int:
 
     The most common gap between consecutive samples, so one missing scrape does not stretch
     the estimate the way a mean would.
+
+    ``default`` is what to answer when there is no gap to measure -- a single sample, or
+    none. A caller asking per unit passes the report-wide step, so a unit with one sample
+    inherits the interval its peers were scraped at rather than a hardcoded minute.
     """
     ordered = sorted(set(stamps))
     gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b > a]
     if not gaps:
-        return 60
+        return default
     return max(set(gaps), key=gaps.count)
 
 
-def verify_rungs(span: int, windows) -> List[Tuple[str, Optional[int]]]:
-    """``[(label, seconds or None)]`` widest first, the whole run always first.
+def verify_rungs(span: int, windows,
+                 fetched: Optional[int] = None) -> List[Tuple[str, Optional[int]]]:
+    """``[(label, seconds or None)]`` widest first, the whole fetch always first.
 
-    A rung at least as long as the run is dropped rather than printed as a duplicate of
+    A rung at least as long as the fetch is dropped rather than printed as a duplicate of
     it: without that, every job shorter than the widest configured window gets three
     identical columns and the ladder says nothing. A 20-minute job therefore shows one
     rung and a 40-hour job shows all of them.
+
+    ``fetched`` is ``--verify WINDOW`` in seconds, and it is the same rule with a second
+    source of "as long as". :func:`jobscope.running.range_window` narrows the *query*
+    rather than filtering rows afterwards, so under a window the fetch **is** the window:
+    ``--verify 2h`` used to print a ``run`` column of 121 samples beside a ``2h`` column
+    of 120, the two differing by one sample and the first one named after a run it did
+    not cover.
+
+    ``span < fetched`` is the case that would make the label a lie the other way: a
+    40-minute job asked for ``--verify 2h`` got its whole run, so ``run`` is what that
+    column is.
     """
     # (label, seconds) as the config resolved them -- parsed and ordered once, at load.
     # Sorted again here rather than trusted, because series_shape reads the ladder
     # widest-first and reversing it turns "declining" into its opposite with no error.
-    rungs: List[Tuple[str, Optional[int]]] = [("run", None)]
-    rungs += sorted(((label, seconds) for label, seconds in windows if seconds < span),
+    windowed = fetched is not None and span >= fetched
+    rungs: List[Tuple[str, Optional[int]]] = [
+        (format_duration(fetched) if windowed else "run", None)]
+    cap = min(span, fetched) if windowed else span
+    rungs += sorted(((label, seconds) for label, seconds in windows if seconds < cap),
                     key=lambda pair: pair[1], reverse=True)
     return rungs
 
 
-def verify_ladder(rows: List[dict], metrics: List[str], options: "RenderOptions",
-                  out=None, windows=()) -> None:
-    """The ladder table: per unit and metric, the shape of the series and what it rests on.
+def _one_per_stamp(pairs):
+    """The first value at each stamp, oldest first.
 
-    Extends the ``--ts --stats`` row identity rather than inventing a layout, so a reader
-    who knows that table knows this one: same ``NODE:GPU``/``METRIC`` lead, a mean per rung
-    where it had one mean, then the three figures a decision needs.
+    A combined series repeats a host metric on every GPU row of its node, so a
+    node-level grouping sees one node's CPU% once per card -- four copies of one
+    reading, which is four times the weight in anything that pools them.
+    """
+    seen: Dict[int, float] = {}
+    for stamp, value in pairs:
+        seen.setdefault(stamp, value)
+    return sorted(seen.items())
+
+
+def _unit_cells(level: str, multi_job: bool, key: tuple,
+                found: dict) -> Tuple[str, ...]:
+    """The identity cells for one row, under the ladder's single ``NODE:GPU`` lead.
+
+    :func:`unit_values` is not usable at node level here: it reports how many GPUs the
+    row pooled, off a ``gpus`` set :func:`stamped_samples` does not keep. A host metric
+    pooled nothing anyway -- it is measured once per node -- so its row names the node
+    and stops, which is also what says it is not a per-card reading.
+    """
+    if level == GPU_LEVEL:
+        return unit_values(GPU_LEVEL, multi_job, key, found)
+    return ((key[0],) if multi_job else ()) + (key[1],)
+
+
+@dataclass(frozen=True)
+class SeriesFigures:
+    """Every figure --verify computes for one unit's one metric, computed once.
+
+    A record rather than thirteen locals because several blocks read these and each
+    would otherwise re-derive them from ``pairs`` -- which is how one quantity ends up
+    computed two ways and the table disagrees with the conclusion under it.
+
+    Not an :class:`EfficiencyTally`, despite the resemblance: that one accumulates
+    across jobs and has an ``add``. This is one pass's output, frozen, and nothing
+    should teach it to grow.
+    """
+
+    key: tuple
+    level: str
+    unit: Tuple[str, ...]
+    metric: str
+    model: str
+    bands: Thresholds
+    step: int
+    pairs: List[Tuple[int, float]]
+    limit: Optional[float]
+    values: List[float]
+    peak: float
+    low: float
+    swing: Optional[float]
+    means: List[Optional[float]]
+    share: Optional[float]
+    idlemax: Optional[int]
+    shape: str
+    missing: int
+    expected: int
+    measured: Optional["Measured"]
+    stopped: Optional["IdleSince"]
+    bins: List[Tuple[str, int]]
+    flags: List[str]
+
+    @property
+    def mean(self) -> Optional[float]:
+        """The whole-fetch mean -- the widest rung, which is always first."""
+        return self.means[0] if self.means else None
+
+    @property
+    def scale(self) -> Optional[float]:
+        """The fixed axis this metric draws against, or None if it has no scale."""
+        return full_scale(self.bands, self.metric, self.model)
+
+
+@dataclass(frozen=True)
+class VerifyFetch:
+    """One fetch, reduced: the frame every block shares plus the per-series figures."""
+
+    level: str
+    multi_job: bool
+    metrics: List[str]
+    thresholds: Thresholds
+    step: int
+    oldest: int
+    newest: int
+    span: int
+    rungs: List[Tuple[str, Optional[int]]]
+    figures: List[SeriesFigures]
+    user: str = "?"
+    window_end: Optional[int] = None
+
+    @property
+    def gaps(self) -> int:
+        """Scrapes missing across every series, which is what the note counts."""
+        return sum(f.missing for f in self.figures)
+
+    @property
+    def shown(self) -> List[str]:
+        """The metrics that actually carried samples, in the order asked for."""
+        seen = {f.metric for f in self.figures}
+        return [m for m in self.metrics if m in seen]
+
+    @property
+    def lead(self) -> Optional[str]:
+        """The metric the timeline is drawn for and the sentences are written about.
+
+        The first *voting* metric in catalog order that has a cutoff and some samples:
+        GPU% on the usual view, CPU% under ``--cpu``. One rather than all of them
+        because the default set is five GPU metrics plus two host ones, and a strip per
+        metric per card is twenty-eight of them for a four-GPU job.
+        """
+        voting = classify_metrics(self.shown, self.thresholds)
+        for header in metrics.in_catalog_order(voting):
+            if any(f.metric == header and f.limit is not None for f in self.figures):
+                return header
+        return None
+
+    @property
+    def judged(self) -> List[str]:
+        """The metrics that decide the verdict: the ballot plus the floors, in catalog
+        order.
+
+        What "the metrics a wasteful job is filtered on" means, and so what this view
+        owes the reader figures for -- the ``Graded by best of ...`` line names them,
+        and naming a metric as having voted while showing none of its numbers is the
+        gap this closes. A column that neither votes nor floors (MEM%, GMEM%) is
+        carried by the ladder and not here: it has no cutoff and no say.
+        """
+        wanted = set(classify_metrics(self.shown, self.thresholds))
+        wanted |= set(self.thresholds.floors)
+        return [m for m in metrics.in_catalog_order(self.shown)
+                if m in wanted and any(f.metric == m and f.limit is not None
+                                       for f in self.figures)]
+
+    def on(self, metric: Optional[str]) -> List[SeriesFigures]:
+        """Every unit's figures for one metric, in row order."""
+        return [f for f in self.figures if f.metric == metric]
+
+
+def verify_figures(rows: List[dict], metrics: List[str], options: "RenderOptions",
+                   windows=(), window_end: Optional[int] = None
+                   ) -> Optional[VerifyFetch]:
+    """Reduce one fetch to its figures. Pure: no terminal, no colour, no printing.
+
+    ``window_end`` is when the fetch was asked to stop, which the samples cannot say:
+    an exporter that died leaves a series that simply ends, and its last sample looks
+    like the present. Given it, a series with nothing recent is flagged ``STALE`` and
+    no present-tense claim is made about it. Absent, that check is skipped rather than
+    guessed at.
 
     Every rung comes from the *same fetch*, sliced. ``running.range_window`` guarantees
     that is sound -- "aligned, ``--ts 1h`` returns exactly the rows a full ``--ts`` would
@@ -2837,96 +3149,613 @@ def verify_ladder(rows: List[dict], metrics: List[str], options: "RenderOptions"
     keep. Adding the level back means teaching the grouping to carry them, not passing a
     string through.
     """
-    level = GPU_LEVEL
-    out = out or sys.stdout
     thresholds = _bands(options)
-    groups = stamped_samples(rows, metrics, level)
-    if not groups:
-        print("no samples to verify", file=out)
-        return
-
-    stamps = {s for found in groups.values() for pairs in found["stamps"].values()
-              for s, _v in pairs}
+    # A host metric is not per GPU. A combined series carries CPU%/MEM% on every row,
+    # so grouping the whole lot by card gave a 4-GPU job four identical CPU% rows and
+    # counted one node's host samples four times in anything pooled. Split by which
+    # family serves the column, and group each at the level it is actually measured at.
+    host = [m for m in metrics if m in set(cpu.catalog().headers)]
+    per_gpu = [m for m in metrics if m not in set(host)]
+    grouped = [(GPU_LEVEL, per_gpu, stamped_samples(rows, per_gpu, GPU_LEVEL)),
+               (NODE_LEVEL, host, stamped_samples(rows, host, NODE_LEVEL))]
+    stamps = {s for _lvl, _ms, groups in grouped for found in groups.values()
+              for pairs in found["stamps"].values() for s, _v in pairs}
+    if not stamps:
+        return None
     step = sampling_step(stamps)
     newest, oldest = max(stamps), min(stamps)
-    rungs = verify_rungs(newest - oldest + step, windows or ())
+    span = newest - oldest + step
+    rungs = verify_rungs(span, windows or (), options.window)
+    multi_job = len({key[0] for _lvl, _ms, groups in grouped for key in groups}) > 1
 
-    multi_job = len({k[0] for k in groups}) > 1
-    lead = unit_headers(level, multi_job)
+    figures = []
+    for level, wanted, groups in grouped:
+        for key in sorted(groups, key=unit_order):
+            found = groups[key]
+            model = job_model({k: {MODEL_KEY: m} for k, m in found["models"].items()})
+            # Resolved once per unit and used for every figure below: the cutoff and the
+            # shape have to be read off the same bands, or a POWER_W column can report a
+            # share taken against this card's floor and a shape taken against no floor.
+            bands = thresholds.for_model(model)
+            # This unit's own interval, defaulting to the report's. One modal gap over
+            # every stamp in the report is the majority node's, and on a job whose nodes
+            # scrape at different rates every duration on the other node was wrong.
+            here = sampling_step({s for pairs in found["stamps"].values()
+                                  for s, _v in pairs}, default=step)
+            # How many scrapes the *fetch* should have held, off the grid the whole
+            # report shares rather than off each series' own extent. Read per series, an
+            # exporter that died halfway reported zero missing scrapes -- the series
+            # simply ended, and its last sample looked like the present.
+            expected = (newest - oldest) // here + 1
+            for metric in wanted:
+                pairs = found["stamps"].get(metric)
+                if not pairs:
+                    continue
+                if level == NODE_LEVEL:
+                    pairs = _one_per_stamp(pairs)
+                limit = cutoff(bands, metric, model)
+                values = [v for _s, v in pairs]
+                peak = max(values)
+                means = [_rung_mean(pairs, newest, seconds) for _label, seconds in rungs]
+                swing = median_swing(pairs, here)
+                adjacent = sum(1 for (sa, _a), (sb, _b) in zip(pairs, pairs[1:])
+                               if sb - sa <= here)
+                figures.append(SeriesFigures(
+                    key=key, level=level,
+                    unit=_unit_cells(level, multi_job, key, found),
+                    metric=metric, model=model, bands=bands, step=here, pairs=pairs,
+                    limit=limit, values=values, peak=peak, low=min(values),
+                    swing=swing, means=means,
+                    share=below_share(values, limit),
+                    idlemax=longest_idle(pairs, limit, here),
+                    shape=series_shape(bands, metric, peak, means, limit),
+                    missing=max(0, expected - len(pairs)), expected=expected,
+                    measured=measured_time(pairs, limit, here, expected),
+                    stopped=went_idle(pairs, limit, here),
+                    bins=distribution(values, bands, metric, model),
+                    flags=qualifiers(len(pairs), expected, min(values), peak, swing,
+                                     adjacent, limit,
+                                     newest_age=(None if window_end is None
+                                                 else window_end - max(s for s, _v in pairs)),
+                                     step=here)))
+    if not figures:
+        return None
+    return VerifyFetch(
+        level=GPU_LEVEL, multi_job=multi_job, metrics=list(metrics),
+        thresholds=thresholds, step=step, oldest=oldest, newest=newest, span=span,
+        rungs=rungs, figures=figures, window_end=window_end,
+        user=next((found["user"] for _lvl, _ms, groups in grouped
+                   for found in groups.values() if found.get("user")), "?"))
+
+
+class JobVerdict(NamedTuple):
+    """One job's category over the fetched window, and what it was reached by."""
+
+    name: str
+    label: str
+    judged: Dict[str, float]
+    bands: Thresholds
+    floors: List[str]
+    withheld: str
+
+
+def job_verdict(data: VerifyFetch) -> JobVerdict:
+    """The whole job's verdict, by the same route the rest of the report takes.
+
+    :func:`jobscope.job_eff.classify` over pooled means, with the guards
+    ``timeseries_eff`` already carries: a series that carries columns which could have
+    voted this job healthy, and has a value for none of them, is ``no-data`` rather
+    than whatever the ceilinged metrics say.
+
+    Pooled over *samples* rather than over per-unit means, so a card the exporter
+    answered for twice does not weigh the same as one it answered for two hundred
+    times -- the argument ``timeseries_stats`` already makes for its own pooling.
+
+    ``withheld`` names the guard that stopped a verdict being asserted, or is empty.
+    NO_DATA is not a tier, and reporting a collection gap as waste is the reading that
+    gets someone an email.
+    """
+    means = {}
+    for metric in data.shown:
+        values = [v for f in data.on(metric) for v in f.values]
+        if values:
+            means[metric] = sum(values) / len(values)
+    voting = classify_metrics(data.shown, data.thresholds)
+    model = job_model({f.key: {MODEL_KEY: f.model} for f in data.figures if f.model})
+    bands = data.thresholds.for_model(model)
+    judged = {m: means[m] for m in metrics.in_catalog_order(voting) if m in means}
+    carriers = unceilinged(bands, voting)
+    if carriers and not any(m in judged for m in carriers):
+        judged = {}
+    floor_readings = {h: means.get(h) for h in bands.floors}
+    name = classify(judged, bands, floor_readings, columns=voting) or NO_DATA
+    # The lead metric's guards decide whether the figures may be spoken for at all.
+    # Taken off the lead rather than off every column, because a thin CPU% series is
+    # not a reason to withhold a verdict a full GPU% series supports.
+    flags = {flag for f in data.on(data.lead) for flag in f.flags}
+    withheld = next((f for f in (THIN, SPARSE) if f in flags), "")
+    if withheld:
+        name = NO_DATA
+    # No range for NO_DATA: it is deliberately outside TIERS, so it has no band and no
+    # edges to quote -- asking tier_range for them raises, which is the shape of the
+    # claim being refused.
+    label = ("" if name == NO_DATA
+             else tier_range(name, bands, metrics.in_catalog_order(judged)))
+    return JobVerdict(
+        name=name, label=label, judged=judged, bands=bands,
+        floors=[h for h, v in floor_readings.items() if v is not None],
+        withheld=withheld)
+
+
+def _ladder_lines(data: VerifyFetch) -> List[str]:
+    """The per-rung table: one row per unit and metric, widest rung first."""
     # SWING sits with MIN/MAX because all three describe the raw signal, before any
     # window means it into a single number -- and it is what says whether that number is
     # reproducible.
-    headers = lead + ("METRIC", "N", "MIN", "MAX", "SWING") + tuple(
-        label for label, _s in rungs) + VERIFY_TAIL
+    headers = unit_headers(data.level, data.multi_job) + (
+        "METRIC", "N", "MIN", "MAX", "SWING") + tuple(
+        label for label, _s in data.rungs) + VERIFY_TAIL
     table = []
-    gaps = 0
-    for key in sorted(groups, key=unit_order):
-        found = groups[key]
-        model = job_model({k: {MODEL_KEY: m} for k, m in found["models"].items()})
-        for metric in metrics:
-            pairs = found["stamps"].get(metric)
-            if not pairs:
-                continue
-            limit = cutoff(thresholds.for_model(model), metric, model)
-            values = [v for _s, v in pairs]
-            peak = max(values)
-            means = [_rung_mean(pairs, newest, seconds) for _label, seconds in rungs]
-            here = [s for s, _v in pairs]
-            expected = (max(here) - min(here)) // step + 1
-            gaps += max(0, expected - len(pairs))
-            share = below_share(values, limit)
-            idle = longest_idle(pairs, limit, step)
-            # unit_values, not a hand-built prefix: it is paired with unit_headers
-            # precisely so the two cannot disagree in length, and a mismatch here is
-            # silently truncated by the zip in `line` -- which is how SHAPE went missing
-            # the first time this ran.
-            swing = median_swing(pairs, step)
-            cells = list(unit_values(level, multi_job, key, found)) + [
-                metric, len(values), "%.1f" % min(values), "%.1f" % peak,
-                "-" if swing is None else "%.1f" % swing]
-            cells += ["-" if m is None else "%.1f" % m for m in means]
-            cells += ["-" if share is None else "%d%%" % round(100 * share),
-                      "-" if idle is None else _span(idle),
-                      series_shape(thresholds, metric, peak, means)]
-            table.append([str(c) for c in cells])
-
-    if not table:
-        print("no samples to verify", file=out)
-        return
+    for one in data.figures:
+        # The identity cells come off the figure, settled when it was built and paired
+        # with unit_headers there: a prefix whose length disagrees with the header is
+        # silently truncated by the zip in `line`, which is how SHAPE went missing the
+        # first time this ran.
+        cells = list(one.unit) + [
+            one.metric, len(one.values), "%.1f" % one.low, "%.1f" % one.peak,
+            "-" if one.swing is None else "%.1f" % one.swing]
+        cells += ["-" if m is None else "%.1f" % m for m in one.means]
+        cells += ["-" if one.share is None else "%d%%" % round(100 * one.share),
+                  "-" if one.idlemax is None else _span(one.idlemax), one.shape]
+        table.append([str(c) for c in cells])
     # Sized to the content, header included, so a long hostname widens its column instead
     # of pushing every cell after it out from under its own heading.
     widths = [max(len(row[i]) for row in [list(headers)] + table) + 2
               for i in range(len(headers))]
+    lines = []
     for row in [list(headers), None] + table:
         if row is None:
-            print("-" * (sum(widths) - 2), file=out)
+            lines.append("-" * (sum(widths) - 2))
             continue
-        print("".join(c.ljust(w) for c, w in zip(row, widths)).rstrip(), file=out)
+        lines.append("".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())
+    return lines
 
-    print(file=out)
-    if gaps:
+
+def _ladder_legend(data: VerifyFetch) -> List[str]:
+    """What the ladder's columns mean, and what the figures were taken against."""
+    lines = []
+    if data.gaps:
         # Said rather than absorbed: a thin series is a fact about the collection, and the
         # figures above divide by the samples that exist, not by the wall clock.
-        print("  %d scrape(s) missing from these series -- the shares above are of "
-              "measured samples," % gaps, file=out)
-        print("    and a gap breaks an idle stretch rather than extending it", file=out)
-    shown = [m for m in metrics if any(m in f["stamps"] for f in groups.values())]
-    print("  SWING = median change between consecutive scrapes. Approaching MAX-MIN, the "
-          "metric moves", file=out)
-    print("    faster than it is sampled and no mean of it is reproducible -- compare "
-          "MAX and the shape,", file=out)
-    print("    not the rung means, and expect a different --gpu-source to disagree by "
-          "several points.", file=out)
-    print("  BELOW = share of samples under the metric's own cutoff; IDLEMAX = the "
-          "longest unbroken run", file=out)
-    print("    under it, with a gap breaking the run rather than extending it. "
-          "flat-idle is the only", file=out)
-    print("    shape that says nothing ever ran. Cutoffs: %s"
-          % _cutoff_summary(thresholds, shown), file=out)
+        lines.append("  %d scrape(s) missing from these series -- the shares above are "
+                     "of measured samples," % data.gaps)
+        lines.append("    and a gap breaks an idle stretch rather than extending it")
+    lines.append("  SWING = median change between consecutive scrapes. Approaching "
+                 "MAX-MIN, the metric moves")
+    lines.append("    faster than it is sampled and no mean of it is reproducible -- "
+                 "compare MAX and the shape,")
+    lines.append("    not the rung means, and expect a different --gpu-source to "
+                 "disagree by several points.")
+    lines.append("  BELOW = share of samples under the metric's own cutoff; IDLEMAX = "
+                 "the longest unbroken run")
+    lines.append("    under it, with a gap breaking the run rather than extending it. "
+                 "flat-idle is the only")
+    lines.append("    shape that says nothing ever ran. Cutoffs: %s"
+                 % _cutoff_summary(data.thresholds, data.shown))
+    return lines
+
+
+def _clock(stamp: int) -> str:
+    """A wall-clock instant to the minute. Seconds are dropped for the reason
+    :func:`jobscope.slurm.format_window` drops them: nobody acts to the second."""
+    return time.strftime("%H:%M", time.localtime(stamp))
+
+
+def _fetch_lines(data: VerifyFetch) -> List[str]:
+    """What was fetched and how much of it arrived, before any figure taken over it."""
+    shown = data.on(data.lead)
+    jobs = ", ".join(sorted({f.key[0] for f in data.figures}))
+    model = job_model({f.key: {MODEL_KEY: f.model} for f in data.figures if f.model})
+    lines = ["  %-10s%s  %s  %d unit(s)%s"
+             % ("Job:", jobs, data.user, len({f.key for f in shown}),
+                "  " + model if model else "")]
+    lines.append("  %-10s%s .. %s   %s" % ("Window:", _clock(data.oldest),
+                                           _clock(data.newest), _span(data.span)))
+    measured = sum(len(f.values) for f in shown)
+    expected = sum(f.expected for f in shown)
+    # Counted on the lead metric alone, because that is what every figure below is
+    # taken over. A whole-report gap count belongs to the ladder, whose rows each carry
+    # their own -- said here it would contradict this line, which is the shape of the
+    # confusion: "210 measured (100%)" beside "3 scrape(s) missing".
+    #
+    # Said rather than absorbed either way: every share below divides by the samples
+    # that exist, not by the wall clock.
+    lines.append("  %-10s%d expected at %ds; %d measured (%d%%)%s"
+                 % ("Samples:", expected, data.step, measured,
+                    round(100.0 * measured / expected) if expected else 100,
+                    "" if measured >= expected else
+                    " -- %d missing, and every figure below is of what arrived"
+                    % (expected - measured)))
+    return lines
+
+
+def _strip_lines(data: VerifyFetch, options: "RenderOptions", width: int,
+                 metric: Optional[str] = None) -> List[str]:
+    """The timeline: one row per unit, one cell per bucket, on a fixed axis.
+
+    Drawn for the lead metric alone. All the rows share one ``(oldest, newest, cells)``
+    frame -- taken from the fetch, not from each unit -- or they are not comparable,
+    which is the only thing a stack of strips is for.
+    """
+    lead = metric or data.lead
+    shown = data.on(lead) if lead else []
+    if not shown or shown[0].scale is None:
+        return []
+    label_width = max(len(" ".join(f.unit)) for f in shown)
+    # The *measured* extent, not the span: span counts the closing scrape's own
+    # interval, and a cell per that is one more cell than there are samples -- which
+    # draws a gap where nothing was missing.
+    cells = strip_cells(width, max(label_width, 8), data.newest - data.oldest,
+                        data.step)
+    edges = bucket_edges(data.oldest, data.newest, cells)
+    limit = shown[0].limit
+    lines = ["%s  (idle below %g, drawn against 0-%g)"
+             % (lead, limit, shown[0].scale) if limit is not None else lead]
+    for one in shown:
+        means = bucket(one.pairs, data.oldest, data.newest, cells)
+        peaks = bucket(one.pairs, data.oldest, data.newest, cells, reduce=max)
+        lines.append("  %-*s  %s" % (
+            label_width, " ".join(one.unit),
+            level_strip(means, peaks, one.limit, one.scale, options, lead, one.model)))
+    axis = strip_axis(edges, indent=label_width + 4)
+    if axis:
+        # The cell width labels the rule rather than sitting above it, so the block
+        # costs two lines rather than three and the reader learns the scale where the
+        # scale is drawn.
+        axis[0] = "  %-*s%s" % (label_width, "cell " + _span(
+            max(1, (data.newest - data.oldest) // cells)), axis[0][label_width + 2:])
+        lines += axis
+    return lines
+
+
+def _measured_lines(data: VerifyFetch, metric: Optional[str] = None) -> List[str]:
+    """How long each unit was measured, and how much of that it spent idle.
+
+    Measured time, never the wall clock. The three figures are what was measured, what
+    of it cleared the cutoff, and what did not -- and the job line is the instants every
+    unit was idle *together*, not the span between the first and the last, which would
+    count an exporter outage in the middle as job-wide idleness.
+    """
+    lead = metric or data.lead
+    shown = [f for f in data.on(lead) if f.measured is not None]
+    if not shown:
+        return []
+    label_width = max(max(len(" ".join(f.unit)) for f in shown), 8)
+    lines = ["  %-*s  %9s  %9s       %9s       %s"
+             % (label_width, "", "MEASURED", "ACTIVE", "IDLE", "LONGEST IDLE")]
+    for one in shown:
+        held = one.measured
+        total = held.idle + held.active
+        lines.append("  %-*s  %9s  %9s %3d%%  %9s %3d%%  %s" % (
+            label_width, " ".join(one.unit), _span(total), _span(held.active),
+            round(100.0 * held.active / total) if total else 0,
+            _span(held.idle), round(100.0 * held.idle / total) if total else 0,
+            "none" if not one.idlemax else _span(one.idlemax)))
+    if len(shown) > 1:
+        together = concurrent_idle(
+            [idle_stamps(f.pairs, f.limit) for f in shown], data.step)
+        wasted = sum(f.measured.idle for f in shown) / 3600.0
+        allocated = sum(f.measured.idle + f.measured.active for f in shown) / 3600.0
+        lines.append("  every unit idle at the same scrape for %s of %s; %.1f of %.1f "
+                     "unit-hours idle" % (_span(together), _span(data.span), wasted,
+                                          allocated))
+    return lines
+
+
+def _metrics_table(data: VerifyFetch) -> List[str]:
+    """One line per metric the verdict was taken over, pooled across units.
+
+    The whole of the default output's evidence, and the reason it is a table rather than
+    a stack of blocks: the ``Graded by best of ...`` line names every metric that voted,
+    and one line each is what lets them be read down. It is the difference between
+    "GPU% 98.9, working" and the same card at SM_ACT% 10.3 with TENSOR% flat -- busy by
+    duty cycle and barely computing, which is the waste a duty cycle alone cannot show.
+
+    Pooled over samples rather than over per-unit means, for the reason
+    :func:`job_verdict` pools that way. ``UNITS`` says what was pooled, because a host
+    metric is measured once per node and a GPU one once per card, and without it a
+    reader cannot tell why the sample counts differ. Which *unit* was idle is the
+    verdict's per-unit sentences, and the timeline behind ``--full``.
+    """
+    if not data.judged:
+        return []
+    rows = []
+    for metric in data.judged:
+        shown = data.on(metric)
+        values = [v for f in shown for v in f.values]
+        if not values:
+            continue
+        one = shown[0]
+        longest = max((f.idlemax or 0) for f in shown)
+        held = [f.measured for f in shown if f.measured is not None]
+        active = sum(m.active for m in held)
+        idle = sum(m.idle for m in held)
+        rows.append([
+            metric, "%d %s" % (len(shown), "host" if one.level == NODE_LEVEL else "GPU"),
+            str(len(values)), "%.1f" % min(values), "%.1f" % max(values),
+            "%.1f" % (sum(values) / len(values)),
+            _span(active), _span(idle),
+            "none" if not longest else _span(longest), worst_shape(shown)])
+    if not rows:
+        return []
+    # ACTIVE and IDLE are measured time summed over the units, so on a 4-GPU job they
+    # total four card-hours per hour of window -- unit-time, like the GPU-hours the
+    # summary charges. IDLEMAX is the longest *unbroken* stretch on any one unit, which
+    # a total cannot give: four minutes between batches and three hours of a stopped job
+    # sum the same and mean the opposite.
+    headers = ["METRIC", "UNITS", "N", "MIN", "MAX", "MEAN", "ACTIVE", "IDLE",
+               "IDLEMAX", "SHAPE"]
+    widths = [max(len(r[i]) for r in [headers] + rows) + 2 for i in range(len(headers))]
+    lines = ["  The metrics the verdict was taken over  (ACTIVE/IDLE are measured time, "
+             "summed over units)"]
+    for row in [headers] + rows:
+        lines.append("    " + "".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())
+    return lines
+
+
+def worst_shape(figures: List[SeriesFigures]) -> str:
+    """The most actionable shape among a metric's units, worst first.
+
+    A pooled row cannot carry four shapes, and the one worth surfacing is the one that
+    would change what someone does -- so a metric flat-idle on one card of four says
+    flat-idle here rather than averaging into the majority's `steady`.
+    """
+    order = (NO_DATA, FLAT_IDLE, DECLINING, BURSTY)
+    found = {f.shape for f in figures}
+    return next((name for name in order if name in found), STEADY)
+
+
+def _distribution_lines(data: VerifyFetch, options: "RenderOptions") -> List[str]:
+    """Where the lead metric's time went, binned on the edges the verdict is taken on.
+
+    A different question from the timeline: it says whether a job is genuinely on/off
+    or steadily mediocre, which changes what to do about it. The bins are
+    ``Thresholds.tier`` calls, so this cannot disagree with the conclusion under it.
+    """
+    lines = []
+    for metric in data.judged:
+        block = _one_distribution(data, options, metric)
+        if block:
+            lines += block
+    if not lines:
+        return []
+    # Stated once above the stack rather than on each block: it is the same sentence
+    # about every one of them, and repeated six times it stops being read.
+    return ["  Time by band, per metric  (the cutoffs the verdict is taken on)"] + lines
+
+
+def _one_distribution(data: VerifyFetch, options: "RenderOptions",
+                      metric: str) -> List[str]:
+    """One metric's time split across its own bands, pooled over its units."""
+    shown = data.on(metric)
+    if not shown or not shown[0].bins:
+        return []
+    totals: Dict[str, int] = {}
+    for one in shown:
+        for name, count in one.bins:
+            totals[name] = totals.get(name, 0) + count
+    measured = sum(totals.values())
+    if not measured:
+        return []
+    step = shown[0].step
+    # One band holding nearly all of it says the same thing in one line as in five, and
+    # the remainder cannot be a sustained anything. It matters more with a block per
+    # metric than it did with one: six metrics at five bands each is a page.
+    top, count = max(totals.items(), key=lambda pair: pair[1])
+    if count / measured >= 0.95:
+        return ["    %-8s %d%% %s, %s -- nothing measured in any other band"
+                % (metric, round(100.0 * count / measured), top, _span(count * step))]
+    items = []
+    for name, held in totals.items():
+        band = BUCKET_OF.get(name, "") if options.color else ""
+        items.append((name, 100.0 * held / measured, band, _span(held * step)))
+    return ["    %s" % metric] + bar_lines(items, indent="      ")
+
+
+def _verdict_lines(data: VerifyFetch, options: "RenderOptions") -> List[str]:
+    """The conclusion, and one sentence per unit saying what it rests on."""
+    lead = data.lead
+    found = job_verdict(data)
+    lines = []
+    if found.judged:
+        lines.append("Graded %s." % classify_description(
+            metrics.in_catalog_order(found.judged), found.floors, found.bands))
+    if found.withheld:
+        lines.append(_withheld_sentence(data, found))
+    else:
+        role = next((r for n, r in CATEGORIES if n == found.name), "")
+        text = ("Verdict: %s (%s)" % (found.name, found.label) if found.label
+                else "Verdict: %s" % found.name)
+        # The count, because pooling hides it: a job using one card of four and one
+        # using four badly reach the same verdict, and only the first is fixed by
+        # asking for fewer GPUs. Named for the lead metric's own cutoff.
+        shown = data.on(lead)
+        dead = [f for f in shown if f.shape == FLAT_IDLE]
+        if dead and len(shown) > 1:
+            text += " -- %d of %d units never cleared %g" % (
+                len(dead), len(shown), shown[0].limit)
+        lines.append(tint(text, role) if options.color and role else text)
+        # A verdict taken over a mean, on a metric whose mean is an artefact of when
+        # the sampler looked, has to say so where the verdict is -- not only in the
+        # sentence below it, which a reader who has their answer will not reach.
+        if any(ALIASED in f.flags for f in shown):
+            lines.append("  on a mean that is not reproducible; read MIN/MAX and the "
+                         "idle split above, or --full for the time by band")
+        if any(STALE in f.flags for f in shown):
+            lines.append("  and only up to the newest scrape that arrived -- see below")
+    units = data.on(lead)
+    width = max([len(" ".join(f.unit)) for f in units] + [8]) + 2
+    for one in units:
+        lines.append("  %-*s%s" % (width, " ".join(one.unit),
+                                   _unit_sentence(data, one)))
+    return lines
+
+
+def _withheld_sentence(data: VerifyFetch, found: JobVerdict) -> str:
+    """Why there is no verdict, naming what would fix it."""
+    lead = data.lead
+    one = next(iter(data.on(lead)), None)
+    if found.withheld == THIN:
+        return ("No verdict: %d scrape(s) over %s. Nothing is graded on fewer than %d, "
+                "about %s at this %ds scrape, because below that the measured idle "
+                "share turns on one sample."
+                % (one.expected, _span(data.span), MIN_SAMPLES,
+                   _span(MIN_SAMPLES * data.step), data.step))
+    return ("No verdict: %d of %d expected scrapes arrived (%d%%). A verdict over less "
+            "than half a window describes the minority of it -- check the exporter "
+            "before reading the figures above as the job's behaviour."
+            % (len(one.values), one.expected,
+               round(100.0 * len(one.values) / one.expected)))
+
+
+def _unit_sentence(data: VerifyFetch, one: SeriesFigures) -> str:
+    """What this unit did, in the order that decides which fact leads.
+
+    never ran > stopped > declining > bursty > working. ``never ran`` is first because
+    it is the only shape that licenses a kill and must not be reachable any other way;
+    ``stopped`` outranks ``declining`` because "stopped at 15:52" is the more actionable
+    of the same finding, and because ``declining`` reads rung means that a swing warning
+    may have just discredited.
+    """
+    metric, limit = one.metric, one.limit
+    aliased = ALIASED in one.flags
+    if STALE in one.flags:
+        return ("last measured at %s, %s before the end of the window -- whether it is "
+                "idle now is not measured"
+                % (_clock(max(s for s, _v in one.pairs)),
+                   _span(data.window_end - max(s for s, _v in one.pairs))))
+    if one.shape == FLAT_IDLE:
+        return ("never ran: no %s sample reached %g anywhere in this window (peak %.1f)"
+                % (metric, limit, one.peak))
+    if one.stopped is not None:
+        return ("ran, then stopped: last sustained work at %s, idle at every scrape "
+                "since -- %s, through the newest at %s"
+                % (_clock(one.stopped.at), _span(one.stopped.seconds),
+                   _clock(max(s for s, _v in one.pairs))))
+    if aliased:
+        return ("flapping: %s moves a median of %.1f between %ds scrapes over a "
+                "%.1f-point range, so no mean of it is reproducible -- read the idle "
+                "split, not the mean"
+                % (metric, one.swing, one.step, one.peak - one.low))
+    if one.shape == DECLINING:
+        stated = ", ".join("%s %.1f" % (label, mean)
+                           for (label, _s), mean in zip(data.rungs, one.means)
+                           if mean is not None)
+        return "declining: %s" % stated
+    if one.shape == BURSTY:
+        return ("bursty: %s peaked at %.1f and was below %g at %d%% of scrapes; "
+                "longest idle %s"
+                % (metric, one.peak, limit, round(100 * (one.share or 0)),
+                   _span(one.idlemax or 0)))
+    return ("working: %s %.1f, never below %g, still working at the newest scrape (%s)"
+            % (metric, one.mean or 0.0, limit,
+               _clock(max(s for s, _v in one.pairs))))
+
+
+def _source_lines(data: VerifyFetch) -> List[str]:
+    """Which exporter served each column. --verify is the pre-action check, and where
+    the number came from is part of the answer."""
+    lines = []
     for source, columns in dcgm.catalog().resolved.by_source():
-        from_here = [c for c in columns if c in metrics]
+        from_here = [c for c in columns if c in data.metrics]
         if from_here:
-            print("  %s <- %s" % (" ".join(from_here), source), file=out)
+            lines.append("  %s <- %s" % (" ".join(from_here), source))
+    return lines
+
+
+def _verify_csv(data: VerifyFetch, options: "RenderOptions", out) -> None:
+    """One row per unit and metric, carrying every figure the block computed.
+
+    Always the full set, whatever ``--full`` says: that flag is about how much
+    of a terminal to spend, and a consumer that has asked for CSV wants the columns.
+
+    Durations in seconds, not in :func:`_span`'s two-unit form -- that one exists for
+    reading and its own docstring says it is not for round-tripping. The verdict is the
+    job's, repeated on every row, because a row is what gets sorted or joined on and a
+    conclusion that only exists in a footer cannot travel with one.
+    """
+    writer = csv.writer(out, lineterminator="\n")
+    found = job_verdict(data)
+    rungs = [label for label, _s in data.rungs]
+    if options.header:
+        writer.writerow(["JOBID", "USER", "NODE", "GPU", "METRIC", "MODEL", "N",
+                         "EXPECTED", "MIN", "MAX", "SWING"] + rungs
+                        + ["BELOW", "IDLEMAX_S", "IDLE_S", "ACTIVE_S", "MISSING_S",
+                           "WENT_IDLE", "SHAPE", "FLAGS", "VERDICT"])
+    for one in data.figures:
+        held = one.measured
+        writer.writerow(
+            [one.key[0], data.user, one.key[1] if len(one.key) > 1 else "",
+             one.key[2] if len(one.key) > 2 else "", one.metric, one.model,
+             len(one.values), one.expected, "%.1f" % one.low, "%.1f" % one.peak,
+             "" if one.swing is None else "%.1f" % one.swing]
+            + ["" if m is None else "%.1f" % m for m in one.means]
+            + ["" if one.share is None else "%.4f" % one.share,
+               "" if one.idlemax is None else one.idlemax,
+               "" if held is None else held.idle,
+               "" if held is None else held.active,
+               "" if held is None else held.missing,
+               "" if one.stopped is None else one.stopped.at,
+               one.shape, " ".join(one.flags), found.name])
+
+
+def verify_report(rows: List[dict], metrics: List[str], options: "RenderOptions",
+                  out=None, windows=(), window_end: Optional[int] = None) -> None:
+    """The pre-action check on one job: what its series is shaped like, and what rests
+    on that.
+
+    Extends the ``--ts --stats`` row identity rather than inventing a layout, so a reader
+    who knows that table knows this one: same ``NODE:GPU``/``METRIC`` lead, a mean per rung
+    where it had one mean, then the three figures a decision needs.
+
+    A dispatcher over block builders that each return lines and none of which print --
+    the idiom :func:`bar_lines` and :func:`in_columns` already follow here, and what
+    lets every block be checked without a terminal.
+    """
+    out = out or sys.stdout
+    data = verify_figures(rows, metrics, options, windows, window_end)
+    if data is None:
+        print("no samples to verify", file=out)
+        return
+    if options.csv:
+        return _verify_csv(data, options, out)
+    width = terminal_width(out)
+    blocks = [_fetch_lines(data)]
+    if options.verify_full:
+        # Every metric that decides the verdict gets the full treatment, which is what
+        # the flag buys: five GPU metrics over four cards is twenty strips, too many to
+        # lead with and exactly what someone who asked for all of them wants. The band
+        # split is here rather than in the default for the same reason -- it is six
+        # blocks of up to five bars, which is a page to read past on the way to a
+        # verdict, and the table below carries the same metrics in one line each.
+        for metric in data.judged:
+            blocks += [_strip_lines(data, options, width, metric),
+                       _measured_lines(data, metric)]
+        blocks += [_distribution_lines(data, options),
+                   _ladder_lines(data), _ladder_legend(data)]
+    else:
+        # One table and the verdict. The timeline, the per-unit idle split and the band
+        # breakdown are all evidence for what the table already states in a line per
+        # metric, and a reader who wants them is asking --full for them. When a job went
+        # idle is still here: the verdict's per-unit sentences name the clock time.
+        blocks.append(_metrics_table(data))
+    blocks += [_source_lines(data), _verdict_lines(data, options)]
+    for lines in blocks:
+        if not lines:
+            continue
+        for line in lines:
+            print(line, file=out)
+        print(file=out)
 
 
 def _span(seconds: int) -> str:

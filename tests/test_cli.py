@@ -1751,6 +1751,36 @@ def test_verify_is_exclusive_with_the_other_granularities():
             subparsers.choices[RUNNING].parse_intermixed_args(["--verify", other])
 
 
+def test_verify_full_modifies_verify_rather_than_competing_with_it():
+    """It belongs with --stats and --eff, which modify --ts, not in the granularity group
+    whose members replace each other."""
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(
+        ["--verify", "2h", "--full"])
+    assert args.verify == "2h" and args.verify_full is True
+    # It modifies rather than competes: --verify still carries its own window.
+    assert subparsers.choices[RUNNING].parse_intermixed_args(
+        ["--verify", "--full"]).verify is True
+
+
+def test_verify_full_without_verify_says_what_to_add(capsys):
+    """It has no verdict block to sit under, so it raises rather than doing nothing."""
+    with pytest.raises(SystemExit):
+        main(["running", "-j", "1", "--full"])
+    err = capsys.readouterr().err
+    assert "--full" in err and "add --verify" in err
+
+
+def test_verify_full_is_hidden_where_it_would_have_raised():
+    """_inert_dests' contract: the narrowed help hides what would not have worked."""
+    from jobscope.cli import _inert_dests
+    _, subparsers = build_parser()
+    without = subparsers.choices[RUNNING].parse_intermixed_args(["-j", "1"])
+    with_it = subparsers.choices[RUNNING].parse_intermixed_args(["-j", "1", "--verify"])
+    assert "verify_full" in _inert_dests(without)
+    assert "verify_full" not in _inert_dests(with_it)
+
+
 def test_verify_grades_against_the_timeslice_bands():
     """A windowed view answers to [thresholds.timeslice], like every other one: a
     half-hour rung that catches a checkpoint pause should not answer to a
@@ -1784,8 +1814,8 @@ def test_h_is_the_summary_and_help_all_is_the_detail(capsys):
     assert len(brief.splitlines()) < len(full.splitlines())
     # --verify is the worked example: its summary is one line, its detail five.
     assert "check one job before acting on it" in _flat(brief)
-    assert "longest unbroken idle stretch" not in _flat(brief)
-    assert "longest unbroken idle stretch" in _flat(full)
+    assert "whether it is idle and wasteful" not in _flat(brief)
+    assert "whether it is idle and wasteful" in _flat(full)
 
 
 def test_no_flag_is_visible_in_h_but_missing_from_help_all(capsys):

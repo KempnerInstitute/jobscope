@@ -106,8 +106,9 @@ multi-GPU and multi-node shapes, the two agree here to within one point (memory 
 exactly).
 
 To compare *exporters*, run the same report under `--gpu-source nvml` and
-`--gpu-source dcgm`, and use `--verify`'s `SWING` column to see whether either mean is
-reproducible at all.
+`--gpu-source dcgm`, and use `--verify --full`'s `SWING` column to see whether
+either mean is reproducible at all. A plain `--verify` says so in words when the swing
+is large enough to matter, without the column.
 
 ### `--coverage`: which hosts serve each column
 
@@ -403,7 +404,8 @@ Retired flags, kept defined for the same reason so the message names the replace
 `InAve`, `InMax` and `InMin` all return the same number — so its GPU row compared a
 snapshot against a whole-run average and disagreed in proportion to how fast the metric
 was moving. What it was reaching for is two exporters measuring the same quantity:
-`--gpu-source nvml` against `--gpu-source dcgm`, plus `--verify`'s `SWING` column.
+`--gpu-source nvml` against `--gpu-source dcgm`, plus `--verify --full`'s
+`SWING` column.
 
 Older spellings not in that table (`--validate`, `--hwdetail`, `--timeseries`,
 `--extended`, `--min-runtime`) are gone and give argparse's plain "unrecognized
