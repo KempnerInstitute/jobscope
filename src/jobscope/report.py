@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from . import cpu, dcgm, metrics
-from .models import GPU_LEVEL, JobRow, NODE_LEVEL, ReportContext
 from .config import (
     BUCKET_OF,
     DEFAULT_LONG_RUNNING,
@@ -26,15 +25,6 @@ from .config import (
     Thresholds,
     parse_duration,
 )
-# Two formatters, a constant and the per-unit column list -- not the storage helpers:
-# turning a stored summary into rows is jobscope.rows' job now, and
-# tests/test_layering.py holds it there.
-from .jobstats import GIB, UNIT_HEADERS, bytes_to_gb
-
-# A job running longer than this, and still on a Wasteful row, is the expensive
-# kind of waste: a short bad job costs little, whereas hours of idle hardware do
-# not come back. Its entry is highlighted. [defaults] long_running overrides it.
-LONG_RUNNING = parse_duration(DEFAULT_LONG_RUNNING)
 from .cpu import CgroupSpec, chosen_specs
 
 # Functions and constants only: everything the source preference can move now lives on
@@ -61,12 +51,12 @@ from .job_eff import (
     FLAT_IDLE,
     MIN_SAMPLES,
     NO_DATA,
-    IdleSince,
-    Measured,
     SPARSE,
     STALE,
     STEADY,
     THIN,
+    IdleSince,
+    Measured,
     below_share,
     bucket,
     bucket_edges,
@@ -88,7 +78,18 @@ from .job_eff import (
     unceilinged,
     went_idle,
 )
+
+# Two formatters, a constant and the per-unit column list -- not the storage helpers:
+# turning a stored summary into rows is jobscope.rows' job now, and
+# tests/test_layering.py holds it there.
+from .jobstats import GIB, UNIT_HEADERS, bytes_to_gb
+from .models import GPU_LEVEL, NODE_LEVEL, JobRow, ReportContext
 from .running import Gpu, RunningJob, build_columns, format_duration, job_sort_key
+
+# A job running longer than this, and still on a Wasteful row, is the expensive
+# kind of waste: a short bad job costs little, whereas hours of idle hardware do
+# not come back. Its entry is highlighted. [defaults] long_running overrides it.
+LONG_RUNNING = parse_duration(DEFAULT_LONG_RUNNING)
 
 
 @dataclass(frozen=True)
@@ -771,19 +772,34 @@ def gpu_source_line(specs: Optional[List] = None, have_jobstats: bool = True,
     asked cgroup, cgroup was empty. That is deliberately more useful than omitting the
     name, because "we queried an exporter this cluster does not run" is exactly the
     diagnostic a port needs, and the alternative hides it.
+
+    An **empty** ``specs`` is not the same as ``None`` here, and the difference is
+    ``--no-dcgm`` against ``--cpu``. ``None`` means the view prints no GPU column at
+    all, so there is nothing to attribute. ``[]`` means it prints them but collected
+    none of them: GPU% and the memory pair come out of the stored jobstats summary,
+    which arrived with sacct and cost no query, and they are on screen whether or not
+    an exporter was asked anything. Saying nothing about them would leave two
+    populated columns unattributed, which is the one thing this line exists to prevent.
     """
     from . import cpu, dcgm
     from . import source as source_module
-    if not specs and not host_specs:
+    if specs is None and not host_specs:
         # --cpu with no host list either: nothing collected, so nothing to attribute.
         return ""
     host, gpu = cpu.catalog(), dcgm.catalog()
+    gpu_resolution = (gpu.resolved if have_jobstats
+                      else source_module.resolve(gpu.metrics, gpu.preference))
+    # The columns still on screen with nothing collected for them -- see above. Only
+    # with a stored summary to serve them: a running job has none, so under
+    # have_jobstats=False an empty list really does mean nothing was collected.
+    if specs == [] and have_jobstats:
+        specs = [spec for spec in gpu.metrics
+                 if spec.column in set(dict(gpu_resolution.by_source()).get("jobstats", ()))]
     per_source: Dict[str, List[str]] = {}
     for resolution, wanted in (
             (host.resolved if have_jobstats else source_module.resolve(
                 host.candidates, host.preference), host_specs),
-            (gpu.resolved if have_jobstats else source_module.resolve(
-                gpu.metrics, gpu.preference), specs)):
+            (gpu_resolution, specs)):
         if not wanted:
             continue
         shown = {spec.column for spec in wanted}

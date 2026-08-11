@@ -2,7 +2,8 @@
 
 import pytest
 
-from jobscope import config as config_module, cpu, dcgm
+from jobscope import config as config_module
+from jobscope import cpu, dcgm
 from jobscope.config import (
     Config,
     Defaults,

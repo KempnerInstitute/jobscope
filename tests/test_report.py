@@ -7,8 +7,6 @@ import re
 
 import pytest
 
-from jobscope.rows import build_context, build_rows
-
 from jobscope import models, plot, report
 from jobscope.dcgm import catalog as gpu_catalog
 from jobscope.errors import JobscopeError
@@ -19,11 +17,11 @@ from jobscope.report import (
     cols_for,
     context_pairs,
     dcgm_report,
-    dcgm_timeseries,
     detail,
     fmt_context,
     summarize,
 )
+from jobscope.rows import build_context, build_rows
 from jobscope.slurm import JobRecord, Selection
 
 CTX = [("User", "alice"), ("Select", "x")]
@@ -90,6 +88,31 @@ def test_context_pairs_explicit_ids(gpu_record):
                                         "1 job ID(s)", {"100": gpu_record}))
     # No GPU specs collected, so no provenance line -- see _source_pair.
     assert pairs == [("User", "alice"), ("Select", "1 job ID(s)")]
+
+
+def test_no_gpu_specs_still_credits_the_columns_the_summary_serves():
+    """--no-dcgm collects nothing from an exporter, but GPU% and the memory pair are
+    still on screen -- they came out of the stored jobstats summary with sacct. An
+    unattributed populated column is exactly what the Source line exists to prevent."""
+    line = report.gpu_source_line(specs=[], host_specs=None)
+    assert "<- jobstats" in line
+    for column in ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB"):
+        assert column in line
+    # Nothing was queried, so no exporter may be credited.
+    assert "dcgm" not in line and "nvml" not in line
+
+
+def test_no_gpu_columns_at_all_credits_nothing():
+    """--cpu is the other case, and must not gain a GPU line from the change above:
+    None means the view prints no GPU column, so there is nothing to attribute."""
+    assert report.gpu_source_line(specs=None, host_specs=None) == ""
+
+
+def test_a_running_job_gets_no_summary_credit_without_specs():
+    """Slurm writes the jobstats summary at job end, so with nothing collected there is
+    genuinely nothing behind a running job's GPU columns to name."""
+    assert "jobstats" not in report.gpu_source_line(specs=[], have_jobstats=False,
+                                                    host_specs=None)
 
 
 def test_the_window_line_names_the_dates_behind_a_day_count():

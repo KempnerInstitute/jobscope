@@ -26,6 +26,7 @@ from jobscope.dcgm import (
     window_query,
 )
 from jobscope.jobstats import jobstats_metrics
+from jobscope.slurm import JobRecord
 
 
 class FakeClient:
@@ -244,6 +245,123 @@ def _client():
         gpus=[("UUID-A", "node01", "0"), ("UUID-B", "node01", "1")],
         values={"DCGM_FI_PROF_SM_ACTIVE": {"UUID-A": 0.80, "UUID-B": 0.40},
                 "DCGM_FI_DEV_POWER_USAGE": {"UUID-A": 300.0, "UUID-B": 500.0}})
+
+
+# --- batched discovery ------------------------------------------------------
+
+class _JoinRangeClient:
+    """Serves the join series as a range query, and counts what it was asked."""
+
+    sampling_period = 60
+
+    def __init__(self, samples):
+        # samples: [(uuid, node, minor, timestamp, jobid_value)]
+        self.samples = samples
+        self.ranges = []
+        self.instants = []
+
+    def query_range(self, query, start, end, step, timeout=None):
+        self.ranges.append((query, start, end))
+        by_card = {}
+        for uuid, node, minor, stamp, value in self.samples:
+            if start <= stamp <= end:
+                by_card.setdefault((uuid, node, minor), []).append([stamp, str(value)])
+        return [{"metric": {"uuid": u, "host": n, "minor_number": m}, "values": v}
+                for (u, n, m), v in by_card.items()]
+
+    def query(self, query, at, timeout=None):
+        self.instants.append(query)
+        return []
+
+
+def _rec(jobid, start, duration, raw=None):
+    return dataclasses.replace(
+        _RECORD, jobid=jobid, jobid_raw=raw or jobid,
+        start=start, end=start + duration, duration=duration)
+
+
+_RECORD = JobRecord(jobid="1", state="COMPLETED", name="t", runtime="00:10:00",
+                    nodes="1", gpus=1, stats={}, start=0, end=600, duration=600,
+                    jobid_raw="1", cluster="odyssey", user="alice")
+
+
+def test_batched_discovery_asks_once_per_bucket_not_once_per_job():
+    """The saving: 8587 per-job queries become one per bucket of the span."""
+    records = {str(i): _rec(str(i), 1000 + i * 60, 300) for i in range(50)}
+    client = _JoinRangeClient([("U%d" % i, "node01", str(i), 1000 + i * 60 + 10, i)
+                               for i in range(50)])
+    found = dcgm.discover_gpus_batch(records, list(records), client, None)
+    assert len(client.ranges) == 1           # the whole span fits one bucket
+    assert not client.instants               # and no per-job query was issued
+    assert found["7"] == [{"uuid": "U7", "node": "node01", "minor": "7", "model": ""}]
+
+
+def test_batched_discovery_splits_a_long_span_into_buckets():
+    # Exactly three hours end to end, so the bucket count is not an off-by-one away
+    # from being about rounding rather than about bucketing.
+    records = {"1": _rec("1", 0, 60), "2": _rec("2", 3 * 3600 - 60, 60)}
+    client = _JoinRangeClient([("U1", "node01", "0", 30, 1),
+                               ("U2", "node01", "1", 3 * 3600 - 30, 2)])
+    dcgm.discover_gpus_batch(records, ["1", "2"], client, None)
+    assert len(client.ranges) == 3
+    assert all(end - start <= dcgm.DISCOVERY_BUCKET_SECONDS
+               for _q, start, end in client.ranges)
+
+
+def test_a_card_goes_only_to_the_job_that_held_it_at_that_moment():
+    """Two jobs, one card, one bucket: the sample's timestamp decides, not the bucket's
+    span, or each would inherit the other's cards."""
+    records = {"1": _rec("1", 0, 300), "2": _rec("2", 600, 300)}
+    client = _JoinRangeClient([("U1", "node01", "0", 100, 1),      # inside job 1
+                               ("U1", "node01", "0", 700, 2)])     # same card, job 2
+    found = dcgm.discover_gpus_batch(records, ["1", "2"], client, None)
+    assert [g["uuid"] for g in found["1"]] == ["U1"]
+    assert [g["uuid"] for g in found["2"]] == ["U1"]
+
+
+def test_a_job_id_rendered_as_a_float_still_matches():
+    """Prometheus renders the join value as a float and may use scientific notation, so
+    comparing the two sides as strings matches nothing at all."""
+    records = {"38185846": _rec("38185846", 1000, 300)}
+    client = _JoinRangeClient([("U1", "node01", "0", 1100, 3.8185846e07)])
+    found = dcgm.discover_gpus_batch(records, ["38185846"], client, None)
+    assert [g["uuid"] for g in found["38185846"]] == ["U1"]
+
+
+def test_a_job_the_batch_cannot_answer_for_is_simply_absent():
+    """Which is what makes the per-job fallback in compute_dcgm load-bearing: a job
+    shorter than one step can fall between two grid points and be seen by nothing."""
+    records = {"1": _rec("1", 0, 300), "2": _rec("2", 600, 300)}
+    client = _JoinRangeClient([("U1", "node01", "0", 100, 1)])     # nothing for job 2
+    found = dcgm.discover_gpus_batch(records, ["1", "2"], client, None)
+    assert "1" in found and "2" not in found
+
+
+def test_compute_dcgm_falls_back_per_job_for_what_the_batch_missed(monkeypatch):
+    """The fallback must be exact, not approximate: a missed job gets the same per-job
+    query it always got."""
+    records = {"1": _rec("1", 0, 300), "2": _rec("2", 600, 300)}
+    monkeypatch.setattr(dcgm, "discover_gpus_batch",
+                        lambda r, ids, c, t: {"1": [{"uuid": "U1", "node": "node01",
+                                                     "minor": "0", "model": ""}]})
+    asked = []
+
+    def fake_discover(record, client, timeout):
+        asked.append(record.jobid)
+        return [{"uuid": "U2", "node": "node01", "minor": "1", "model": ""}]
+
+    monkeypatch.setattr(dcgm, "discover_gpus", fake_discover)
+    monkeypatch.setattr(dcgm, "collect_window", lambda *a, **k: None)
+    dcgm.compute_dcgm(records, ["1", "2"], [], _client(), None, workers=1)
+    # Only the job the batch could not answer for.
+    assert asked == ["2"]
+
+
+def test_batched_discovery_is_empty_without_gpu_jobs():
+    records = {"1": dataclasses.replace(_rec("1", 0, 300), gpus=0)}
+    client = _JoinRangeClient([])
+    assert dcgm.discover_gpus_batch(records, ["1"], client, None) == {}
+    assert not client.ranges          # and it did not ask the server anything
 
 
 def test_discover_gpus_sorted(gpu_record):

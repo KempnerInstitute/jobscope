@@ -83,14 +83,49 @@ def states_for(spec: Optional[str]) -> Tuple[str, ...]:
         raise JobscopeError("-t needs at least one state")
     return tuple(chosen)
 
-# Chunk bounds for the batched sacct -j queries. JOBS_PER_CHUNK is the primary
-# bound: sacct costs ~35 ms per call regardless of id count, so small batches
-# stream first rows sooner at negligible overhead. JOBID_ARG_LIMIT backstops the
-# Linux per-argument cap (MAX_ARG_STRLEN, 128 KiB) for pathologically long ids.
-# NOTE_EVERY throttles the stderr progress notes to one per that many jobs.
+# Chunk bounds for the batched sacct -j queries, which is now the *explicit JOBID*
+# path only -- a window selection is sliced by time instead, see SLICE_SECONDS.
+# JOBS_PER_CHUNK is the primary bound: a sacct call costs 85-145 ms whatever the id
+# count (measured; an older note here said ~35 ms, which no longer holds), so small
+# batches stream first rows sooner at a cost that is real but bounded by how many ids
+# were named. JOBID_ARG_LIMIT backstops the Linux per-argument cap (MAX_ARG_STRLEN,
+# 128 KiB) for pathologically long ids. NOTE_EVERY throttles the stderr progress notes
+# to one per that many jobs.
 JOBID_ARG_LIMIT = 16384
 JOBS_PER_CHUNK = 200
 NOTE_EVERY = 4096
+
+# The fields one bulk query asks for. Shared by the two bulk paths so a column added
+# for one cannot go missing from the other -- _parse_fetch_lines splits on a fixed
+# maxsplit and would silently drop every row if the two lists drifted apart.
+# AdminComment is last, and is the only '|'-free base64 blob, which is what makes that
+# fixed maxsplit safe.
+FETCH_FIELDS = ("JobID,State,JobName,Elapsed,NNodes,AllocTRES,"
+                "Start,End,JobIDRaw,Cluster,User,AdminComment")
+
+# How much of a window one sacct call may cover.
+#
+# Both sacct's wall clock *and its memory* scale with the rows it returns, and the
+# output format changes neither: measured cluster-wide over one day, 193,982 rows cost
+# 1.66 GB of RSS inside sacct whether it was asked for twelve fields or for `JobID`
+# alone. A week of that is ~1.4 M rows, or ~11 GB, which nothing about the field list
+# or the id batching can help -- the id-batched pass never reached those rows, because
+# the pass that listed the ids had already materialised every one of them.
+#
+# So the window is the unit that has to be cut, and a day is the cut because
+# _query_lastn already walks back a day at a time for the same reason, and its
+# measurement -- "a day took 1.2s and thirty days did not return inside 60" -- is this
+# same curve seen from the other end.
+SLICE_SECONDS = 86400
+
+# How many jobs a streamed chunk carries, which is a different question from how many
+# one sacct call fetches: this one is about how soon the first row appears, not about
+# what the server is asked. The two were briefly the same number and that was the bug --
+# a day fetched in one call is right, a day *yielded* in one piece means every metric
+# query runs before anything is drawn. 200 is what the id-batched path used, and the
+# report streamed acceptably at it for the same reason it does here: it is roughly one
+# screen of rows and, at two queries a job, a few seconds of fan-out.
+STREAM_CHUNK = 200
 
 # States meaning the job has not ended. `startswith`, because sacct decorates some
 # states with detail ("CANCELLED by 64336"). One definition, because two places ask:
@@ -206,6 +241,31 @@ def day_slice(from_days: int, to_days: int) -> Tuple[str, str]:
     now = time.time()
     return (time.strftime(TIMESTAMP_FORMAT, time.localtime(now - from_days * 86400)),
             time.strftime(TIMESTAMP_FORMAT, time.localtime(now - to_days * 86400)))
+
+
+def window_slices(start: str, end: str) -> List[Tuple[str, str]]:
+    """``[start, end]`` cut into :data:`SLICE_SECONDS`-wide pieces, oldest first.
+
+    The window returned unchanged, as a single slice, when either end is a form sacct
+    accepts but :func:`epoch` cannot read -- ``now-30days`` and bare dates both reach
+    here, and a window that cannot be cut is still a window that can be queried. Also
+    when the two are the same instant or inverted, where cutting has nothing to do.
+
+    Slices meet rather than overlap, so a job is returned by two of them only when it
+    genuinely spans the boundary. :func:`fetch_window` dedups those.
+    """
+    first, last = epoch(start), epoch(end)
+    if first is None or last is None or last <= first:
+        return [(start, end)]
+    def stamp(at: int) -> str:
+        return time.strftime(TIMESTAMP_FORMAT, time.localtime(at))
+
+    slices, at = [], first
+    while at < last:
+        nxt = min(at + SLICE_SECONDS, last)
+        slices.append((stamp(at), stamp(nxt)))
+        at = nxt
+    return slices
 
 
 def end_of_day(start: str) -> Optional[str]:
@@ -427,10 +487,17 @@ def expand_nodelist(nodelist: str, timeout: Optional[float] = None) -> Tuple[str
     return hosts
 
 
-def _select_cmd(selection: Selection, start: str, end: str) -> List[str]:
-    """The sacct command that lists candidate job IDs for a window."""
-    cmd = ["sacct", "-X", "-S", start, "-E", end,
-           "--noheader", "-P", "-o", "JobID,State"]
+def _window_filters(selection: Selection, start: str, end: str) -> List[str]:
+    """The sacct flags that narrow a window selection, without an output format.
+
+    Shared by the two commands that query a window -- the id listing and the bulk
+    fetch -- because they must select the *same* jobs. They drifting apart is how a
+    fetch would return rows the listing never offered, or miss rows it did.
+
+    Every one of these is pushed to slurmdbd rather than filtered here: -X alone is
+    the difference between one row per job and one per job step.
+    """
+    cmd = ["sacct", "-X", "-S", start, "-E", end]
     # -a spans every user; otherwise scope to one. Mutually exclusive by
     # construction -- the CLI rejects -a together with -u.
     cmd += ["-a"] if selection.all_users else ["-u", selection.user]
@@ -442,6 +509,24 @@ def _select_cmd(selection: Selection, start: str, end: str) -> List[str]:
     # running: `finished` reporting a RUNNING job was the bug this closed.
     cmd += ["-s", ",".join(states_for(selection.state))]
     return cmd
+
+
+def _select_cmd(selection: Selection, start: str, end: str) -> List[str]:
+    """The sacct command that lists candidate job IDs for a window."""
+    return _window_filters(selection, start, end) + [
+        "--noheader", "-P", "-o", "JobID,State"]
+
+
+def _window_fetch_cmd(selection: Selection, start: str, end: str) -> List[str]:
+    """The sacct command that fetches full records for a window, in one call.
+
+    :func:`_select_cmd` plus the columns, which is the whole difference: measured on
+    an 8587-job selection the ten extra fields cost 0.05s against that listing's
+    0.36s, while the 43 ``sacct -j`` calls the listing existed to feed cost 3.6s. The
+    columns are very nearly free; the round trips are not.
+    """
+    return _window_filters(selection, start, end) + [
+        "--noheader", "-P", "--units=G", "-o", FETCH_FIELDS]
 
 
 def _query_ids(selection: Selection, start: str, end: str,
@@ -497,8 +582,32 @@ def _query_lastn(selection: Selection, timeout: Optional[float]) -> List[str]:
     return ids
 
 
+def describe_window(selection: Selection) -> str:
+    """How a window selection reads in the header, **without querying for it**.
+
+    Separated from :func:`select_jobs` because the streaming window path
+    (:func:`fetch_window`) needs the header before it has asked sacct anything, and
+    the whole point of that path is that there is no listing pass to take it from.
+    ``-N`` keeps its description in ``select_jobs``: "last 20 jobs" is a fact about
+    what the day-walk found, not about the window.
+    """
+    if selection.days is not None:
+        desc = "last %d day%s" % (selection.days, "s" if selection.days != 1 else "")
+    else:
+        desc = format_window(*selection.window())
+    if selection.state != "all":
+        desc += ", %s" % selection.state
+    return desc
+
+
 def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[str], str]:
-    """Return ``(jobids, description)``. Per-job data is fetched afterward in bulk."""
+    """Return ``(jobids, description)``. Per-job data is fetched afterward in bulk.
+
+    The **explicit-JOBID and -N paths only**, now that a window selection streams
+    through :func:`fetch_window` without listing its ids first. Both genuinely need
+    the list up front: -N has to trim to the newest N, and explicit ids are the
+    selection.
+    """
     if selection.jobids:
         return list(selection.jobids), "%d job ID(s)" % len(selection.jobids)
 
@@ -514,17 +623,14 @@ def select_jobs(selection: Selection, timeout: Optional[float]) -> Tuple[List[st
     else:
         ids = _query_ids(selection, *selection.window(), timeout=timeout)
 
-    start, end = selection.window()
     if selection.lastn is not None:
         ids = ids[-selection.lastn:]  # sacct lists ascending, so the last N are newest
         desc = "last %d job%s" % (selection.lastn,
                                   "s" if selection.lastn != 1 else "")
-    elif selection.days is not None:
-        desc = "last %d day%s" % (selection.days, "s" if selection.days != 1 else "")
+        if selection.state != "all":
+            desc += ", %s" % selection.state
     else:
-        desc = format_window(start, end)
-    if selection.state != "all":
-        desc += ", %s" % selection.state
+        desc = describe_window(selection)
     _note_if_broad(ids, narrowings)
     return ids, desc
 
@@ -602,6 +708,67 @@ def _parse_fetch_lines(out: str, records: Dict[str, JobRecord]) -> None:
         )
 
 
+def fetch_window(selection: Selection, timeout: Optional[float],
+                 ) -> Iterator[Tuple[List[str], Dict[str, JobRecord]]]:
+    """Stream a window selection one time slice at a time, ``(ids, records)`` a slice.
+
+    The same shape :func:`fetch_chunks` yields, so ``_enrich`` cannot tell which one it
+    is draining -- but selected and fetched in *one* call per slice rather than a
+    listing pass followed by a call per 200 ids. That listing pass was not a saving:
+    it already materialised every row in the window (1.66 GB of sacct RSS for a
+    cluster-wide day, output format irrelevant), and the id batching then chunked only
+    the pass that had no memory problem. See :data:`SLICE_SECONDS`.
+
+    Unlike ``fetch_chunks`` the records dict is **per chunk, not cumulative**. Nothing
+    downstream indexes outside the ids it was handed, and holding every record to the
+    end of the run is the other half of what made a wide selection expensive.
+
+    **A slice is how much is fetched; it is not how much is yielded.** Those have to be
+    separate, and conflating them cost this function its streaming: one sacct call is
+    right for the *server* -- it is the whole point of cutting by window -- but
+    ``run_capture`` buffers that call whole, so yielding once per slice meant a default
+    ``-D 1`` produced a single chunk of nine thousand jobs. Every metric query for all
+    of them then ran before the first row could be drawn, turning a report that used to
+    start printing in seconds into one that printed nothing for minutes. So the slice's
+    records are handed out :data:`STREAM_CHUNK` at a time, which costs nothing and puts
+    the granularity back where it was.
+
+    A slice that fails is reported and skipped rather than ending the run: the rest of
+    the window is still worth having, and saying which span is missing is better than
+    either a silent hole or nothing at all.
+    """
+    slices = window_slices(*selection.window())
+    if len(slices) > 1:
+        print("note: querying %d day-slices of the window, one sacct call each"
+              % len(slices), file=sys.stderr)
+    seen: set = set()
+    for start, end in slices:
+        out = run_capture(_window_fetch_cmd(selection, start, end), timeout,
+                          "sacct query", soft=True)
+        if out is None:
+            print("note: no data for %s -- that span is missing from this report."
+                  " Narrow the window or raise --timeout to include it."
+                  % format_window(start, end), file=sys.stderr)
+            continue
+        found: Dict[str, JobRecord] = {}
+        _parse_fetch_lines(out, found)
+        # Two filters, both of which the id listing used to apply. A job spanning a
+        # slice boundary is returned by both slices, and the first to reach it owns it
+        # or it would be rendered twice; and belt-and-braces behind -s, a job that has
+        # not ended has no final numbers and does not belong in a finished report.
+        ids = [jid for jid, record in found.items()
+               if jid not in seen and not record.unfinished]
+        if not ids:
+            continue
+        seen.update(ids)
+        # Handed out in chunks, not in one piece -- see the docstring. Sacct returns a
+        # slice in ascending order and this preserves it, so a chunk is also a narrow
+        # span of time, which is what keeps the batched GPU discovery inside it cheap.
+        for at in range(0, len(ids), STREAM_CHUNK):
+            batch = ids[at:at + STREAM_CHUNK]
+            yield batch, {jid: found[jid] for jid in batch}
+
+
 def fetch_chunks(jobids: List[str], timeout: Optional[float],
                  ) -> Iterator[Tuple[List[str], Dict[str, JobRecord]]]:
     """Fetch job data batch by batch, yielding ``(ready_ids, records)`` pairs.
@@ -634,11 +801,9 @@ def fetch_chunks(jobids: List[str], timeout: Optional[float],
     queried: set = set()
     pos, done = 0, 0
     for i, chunk in enumerate(chunks, 1):
-        # AdminComment (a '|'-free base64 blob) is queried last so a fixed maxsplit is safe.
         out = run_capture(
             ["sacct", "-j", ",".join(chunk), "-X", "-P", "-n", "--units=G",
-             "-o", "JobID,State,JobName,Elapsed,NNodes,AllocTRES,"
-                   "Start,End,JobIDRaw,Cluster,User,AdminComment"],
+             "-o", FETCH_FIELDS],
             timeout, "sacct query")
         _parse_fetch_lines(out, records)
         queried.update(chunk)

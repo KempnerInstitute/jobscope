@@ -21,7 +21,6 @@ than a variation on it:
   query -- a window would hand the same GPU to every job that touched it.
 """
 
-import re
 import sys
 import time
 from collections import defaultdict
@@ -122,10 +121,19 @@ class RunningSelection:
         return ", ".join(parts + [self.describe()])
 
     def widening_hints(self) -> List[str]:
-        """Flags that would loosen this selection, most likely first."""
+        """Flags that would loosen this selection, most likely first.
+
+        The default user filter is deliberately absent from these, even though it is
+        the filter most likely to be responsible: the flag that lifts it is -a, an
+        administrator's flag, documented in docs/admin.md rather than offered to
+        whoever happens to hit an empty selection.
+
+        So an empty list is a normal result, not a bug -- :func:`_report_no_running`
+        prints no advice at all rather than advice that most readers should not take.
+        The filters themselves are still named on the line above it, so a selection
+        that found nothing because of the user filter still says so.
+        """
         hints = []
-        if self.user:
-            hints.append("add -a to include every user")
         if self.min_elapsed > 0:
             hints.append("set --min-elapsed 0s to include jobs that just started")
         if self.partition:

@@ -7,12 +7,12 @@ import time
 
 import pytest
 
-from jobscope.rows import build_rows
-
-from jobscope import dcgm, select as select_mod
+from jobscope import dcgm
+from jobscope import select as select_mod
 from jobscope.errors import JobscopeError
 from jobscope.job_ave_stats import needs_fill
 from jobscope.report import RenderOptions
+from jobscope.rows import build_rows
 from jobscope.select import (
     FINISHED,
     JOBIDS,
@@ -97,12 +97,10 @@ def test_sacct_selection_passes_all_users_through():
     assert selection.all_users and selection.user is None
 
 
-def test_historical_yields_one_chunk_per_batch(monkeypatch, gpu_record):
+def test_historical_yields_one_chunk_per_batch(monkeypatch, gpu_record, stream_window):
     rec2 = dataclasses.replace(gpu_record, jobid="101")
     records = {"100": gpu_record, "101": rec2}
-    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: (["100", "101"], "last 1 day"))
-    monkeypatch.setattr(select_mod, "fetch_chunks",
-                        lambda ids, t: iter([(["100"], records), (["101"], records)]))
+    stream_window([(["100"], records), (["101"], records)])
     monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: object())
     monkeypatch.setattr(select_mod, "compute_dcgm",
                         lambda r, ids, *a, **k: {j: ({"SM_ACT%": 1.0}, {}) for j in ids})
@@ -114,12 +112,10 @@ def test_historical_yields_one_chunk_per_batch(monkeypatch, gpu_record):
     assert all(dcgm for _i, _r, dcgm in chunks)
 
 
-def test_historical_skips_prometheus_without_specs(monkeypatch, gpu_record):
+def test_historical_skips_prometheus_without_specs(monkeypatch, gpu_record, stream_window):
     """`--cpu` over finished jobs must stay offline."""
-    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: (["100"], "x"))
+    stream_window([(["100"], {"100": gpu_record})])
     monkeypatch.setattr(select_mod, "fetch", lambda i, t: {"100": gpu_record})
-    monkeypatch.setattr(select_mod, "fetch_chunks",
-                        lambda i, t: iter([(["100"], {"100": gpu_record})]))
 
     def boom(*a, **k):
         raise AssertionError("no Prometheus client for a --cpu report")
@@ -256,14 +252,14 @@ def test_emit_timeseries_dispatches_to_combined_for_a_running_request(monkeypatc
     assert len(calls) == 1
 
 
-def test_no_matching_jobs_returns_none(monkeypatch, capsys):
-    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: ([], "last 1 day"))
+def test_no_matching_jobs_returns_none(capsys, stream_window):
+    stream_window([])
     assert resolve(Request(mode=FINISHED, user="nobody"), _cfg(), None, 1, None) is None
     assert "No matching jobs" in capsys.readouterr().err
 
 
-def test_no_matching_jobs_names_all_users(monkeypatch, capsys):
-    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, t: ([], "last 1 day"))
+def test_no_matching_jobs_names_all_users(capsys, stream_window):
+    stream_window([])
     resolve(Request(mode=FINISHED, all_users=True, user=None), _cfg(), None, 1, None)
     assert "all users" in capsys.readouterr().err
 
@@ -389,7 +385,10 @@ def test_the_empty_running_message_names_the_filters_and_how_to_widen(monkeypatc
             _cfg(), None, 1, None)
     err = capsys.readouterr().err
     assert "user alice" in err and "partition kempner" in err
-    assert "add -a to include every user" in err
+    assert "drop -p to search every partition" in err
+    # The filter that actually excluded them is the user filter, and the message still
+    # names it -- but the flag that lifts it is -a, which belongs to docs/admin.md.
+    assert "-a" not in err and "--all-users" not in err
 
 
 def test_both_branches_yield_the_same_chunk_shape(monkeypatch, gpu_record):
@@ -613,11 +612,11 @@ def test_resolve_reports_whether_the_values_span_whole_runtimes(monkeypatch):
         assert resolved.folded is expected, (records, average)
 
 
-def test_a_window_selection_is_folded_by_construction(monkeypatch):
-    """states_for() returns only finished states and _query_ids filters again, so every
-    record in a window selection already spans its whole runtime."""
-    monkeypatch.setattr(select_mod, "select_jobs", lambda *a, **kw: (["1"], "last 1 day"))
-    monkeypatch.setattr(select_mod, "fetch_chunks", lambda *a, **kw: iter([]))
+def test_a_window_selection_is_folded_by_construction(monkeypatch, stream_window):
+    """states_for() returns only finished states and fetch_window filters again on
+    JobRecord.unfinished, so every record in a window selection already spans its whole
+    runtime."""
+    stream_window([(["1"], {})])
     monkeypatch.setattr(select_mod, "_enrich", lambda chunks, *a, **kw: iter(chunks))
     resolved = resolve(Request(mode=FINISHED, user="alice"), _cfg(), None, 1, None)
     assert resolved.folded is True

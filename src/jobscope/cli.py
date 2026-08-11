@@ -39,7 +39,7 @@ from .report import (
 )
 from .running import format_duration, parse_duration
 from .select import FINISHED, JOBIDS, RUNNING, Request, emit_timeseries, resolve
-from .slurm import DEFAULT_STATE, default_user
+from .slurm import default_user
 
 MODES = (RUNNING, FINISHED)
 UTILITIES = ("plot", "describe", "config", "probe")
@@ -160,7 +160,7 @@ _EPILOG = (
     "examples:\n"
     "  jobscope                             your running jobs\n"
     "  jobscope -j <jobid>                  one job, running or finished\n"
-    "  jobscope -p <partition>              your jobs on one partition (-a for everyone)\n"
+    "  jobscope -p <partition>              your jobs on one partition\n"
     "  jobscope finished -D 2               your last 2 days\n"
     "  jobscope finished -S 2026-08-01      from an explicit start date\n"
     "  jobscope -j <jobid> --plot_ts        chart its series, one panel per metric\n"
@@ -265,8 +265,12 @@ def _add_report_args(report) -> None:
     filters = scope
     filters.add_argument("-p", "--partition", help="narrow to this partition")
     filters.add_argument("-u", "--user", help="user (default: current user, $USER)")
+    # Hidden, not removed: -a keeps working exactly as before, and every error that
+    # mentions it still does. It is an administrator's flag -- sweeping a partition
+    # across every user -- and docs/admin.md is where it is taught, so --help does not
+    # offer it to whoever is looking up how to see their own jobs.
     filters.add_argument("-a", "--all-users", dest="all_users", action="store_true",
-                         help="every user's jobs, not just your own")
+                         help=argparse.SUPPRESS)
     filters.add_argument("-A", "--account", help="narrow to this account")
     # No argparse choices: the value composes with commas ("-t failed,timeout"), so
     # sacct.states_for validates it and can say what went wrong. Default None rather
@@ -416,6 +420,13 @@ def _add_report_args(report) -> None:
                                  "even for finished jobs, instead of the summary jobstats "
                                  "stored in sacct's AdminComment (slower; use to compare "
                                  "the two, or where jobstats is not deployed)"))
+    cols.add_argument("--no-dcgm", dest="no_dcgm", action="store_true",
+                      help=_help("drop the GPU columns Prometheus serves",
+                                 "leaving what sacct already carried: CPU%%/MEM%%/GPU%%/"
+                                 "GMEM%% come from the stored jobstats summary, so the "
+                                 "report costs no queries at all. The exact opposite of "
+                                 "--no-jobstats, and the one lever that makes a wide "
+                                 "selection cheap rather than merely slower"))
     cols.add_argument("--no-blob", dest=_RETIRED_DEST, action=_Retired, nargs=0,
                        help=argparse.SUPPRESS)
     out = report.add_argument_group(
@@ -842,6 +853,14 @@ def build_request(args, cfg: Optional[config.Config] = None) -> Request:
         raise JobscopeError("-N/--lastn must be a positive integer")
     if args.all_users and args.user:
         raise JobscopeError("-a/--all-users and -u/--user are mutually exclusive")
+    if getattr(args, "no_dcgm", False) and getattr(args, "no_jobstats", False):
+        # Not merely redundant -- they ask for opposite things, and together they ask
+        # for a report with no source at all: --no-jobstats says take every metric from
+        # Prometheus, --no-dcgm says take none from it.
+        raise JobscopeError(
+            "--no-dcgm and --no-jobstats are opposites: --no-jobstats reads every metric\n"
+            "from Prometheus, --no-dcgm reads none from it. Together they leave nothing\n"
+            "to report. Pick the one you meant.")
 
     if jobids:
         ignored = [name for name, dest in _JOBID_IGNORES if _was_given(args, dest)]
@@ -1103,6 +1122,14 @@ def handle_report(args) -> None:
     # resolved headers instead, so the block follows the source preference (which
     # changes how many columns still need querying) without following this list.
     specs = list(cfg.metrics.extended if args.all_metrics else cfg.metrics.summary)
+    # An empty spec list is what select.py already reads as "never build a client", so
+    # --no-dcgm needs no path of its own -- it is the --cpu report's offline-ness,
+    # reached by flag instead of by writing `[metrics] summary = []` into a config.
+    # It empties the time-series list too: --no-dcgm --ts asking Prometheus for every
+    # scrape of the columns it was told to drop would be the opposite of what it says.
+    no_dcgm = getattr(args, "no_dcgm", False)
+    if no_dcgm:
+        specs = []
     # --ts's own view resolution: combined (GPU + CPU%/MEM% together) is the
     # default -- bare --ts behaves as --cpu --all-metrics --ts would. --cpu alone (no
     # --all-metrics) narrows to CPU-only; --all-metrics alone (no --cpu) narrows to
@@ -1113,8 +1140,11 @@ def handle_report(args) -> None:
     # was actually passed -- printing/plotting everything is opt-in, not the default.
     ts_cpu_only = (view == "cpu" and not args.all_metrics)
     ts_combined = not ts_cpu_only and not (view != "cpu" and args.all_metrics)
-    ts_specs = specs if ts_cpu_only else list(
-        cfg.metrics.extended if args.all_metrics else cfg.metrics.timeseries)
+    # Keyed to the flag, not to `specs` being empty: a site that writes
+    # `[metrics] summary = []` has said something about the summary view only, and
+    # must keep the timeseries list it also configured.
+    ts_specs = [] if no_dcgm else (specs if ts_cpu_only else list(
+        cfg.metrics.extended if args.all_metrics else cfg.metrics.timeseries))
     options = RenderOptions(
         view=view, show_dcgm=show_dcgm, csv=args.csv, header=args.header,
         # time_weighted is left at its default here and set below, once resolve() has

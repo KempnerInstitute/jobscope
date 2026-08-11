@@ -76,7 +76,7 @@ those findings and refuses to overwrite an existing one. Site setup details are 
 | `jobscope -j 36788818_3 --plot-ts-overlay` | the same series overlaid, a panel per GPU |
 
 Without a mode word, `jobscope` shows jobs running now. Use `finished` for history.
-Selections are scoped to your user by default; add `-a` to include all users.
+Selections are scoped to your user by default; `-u` picks a different one.
 
 ## Reading a Report
 

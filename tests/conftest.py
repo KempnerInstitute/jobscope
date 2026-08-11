@@ -7,8 +7,7 @@ import json
 import pytest
 
 from jobscope import config as config_module
-from jobscope import source
-from jobscope import report, running, slurm
+from jobscope import report, running, slurm, source
 from jobscope.jobstats import GIB
 from jobscope.slurm import JobRecord
 
@@ -16,6 +15,23 @@ from jobscope.slurm import JobRecord
 def make_jobstats(stats: dict) -> str:
     """Encode a stats dict as the JS1:<base64 gzip JSON> AdminComment form."""
     return "JS1:" + base64.b64encode(gzip.compress(json.dumps(stats).encode())).decode()
+
+
+@pytest.fixture
+def stream_window(monkeypatch):
+    """Stub the streaming window seam with canned ``(ids, records)`` slices.
+
+    A window selection no longer lists its job ids before fetching them -- one sacct
+    call per time slice does both -- so ``slurm.fetch_window`` is the single seam to
+    stub for it. ``select_jobs`` is now only the ``-N`` and explicit-JOBID paths, and
+    stubbing it for a window request stubs something that is never called.
+    """
+    from jobscope import select as select_mod
+
+    def install(slices):
+        monkeypatch.setattr(select_mod, "fetch_window",
+                            lambda selection, timeout: iter(list(slices)))
+    return install
 
 
 # A two-GPU job on one node. Chosen so every derived metric is a clean number:
@@ -79,6 +95,28 @@ def _clear_hostlist_caches() -> None:
     """
     slurm._HOSTLIST.clear()
     running._JOB_NODES.clear()
+
+
+@pytest.fixture(autouse=True)
+def no_real_scheduler(monkeypatch):
+    """Every scheduler call must be stubbed by the test that needs one.
+
+    Installed because a test that reaches the real ``sacct`` does not fail -- it
+    *hangs*, for as long as slurmdbd takes to answer a query nobody meant to run, and
+    with ``timeout=None`` (what most tests pass) that is unbounded. That is exactly
+    what happened when the window path moved from ``select_jobs``/``fetch_chunks`` to
+    ``fetch_window``: the tests still stubbed the old two seams, the new one fell
+    through to the cluster, and the suite stopped instead of failing.
+
+    A test that wants a canned answer still monkeypatches ``run_capture`` itself; that
+    patch is applied after this one and wins.
+    """
+    def no_scheduler(cmd, timeout, what, soft=False):
+        raise AssertionError(
+            "a test reached the real scheduler: %s. Stub jobscope.slurm.run_capture "
+            "(or the seam above it) in the test." % " ".join(map(str, cmd[:3])))
+
+    monkeypatch.setattr(slurm, "run_capture", no_scheduler)
 
 
 @pytest.fixture(autouse=True)

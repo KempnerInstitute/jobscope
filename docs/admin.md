@@ -98,6 +98,14 @@ tally, say) is commented out, since every cgroup metric is divided by an allocat
 a count has none; and an unfamiliar GPU metric gets `scale = 1` with a `# CHECK` note,
 because a wrong scale reads as a plausible value.
 
+**The opposite flag.** `--no-dcgm` reads *nothing* from Prometheus: it drops the
+exporter columns and reports only what the stored jobstats summary carried, which
+arrived free with `sacct`. That is the lever for a selection wide enough to matter —
+tens of thousands of queries become none — and the one to reach for before lowering
+`max_queries_per_second`, which spreads the same queries out rather than removing them.
+The two flags are refused together, since between them they would leave no source at
+all.
+
 **Checking the two sources agree.** `jobscope --no-jobstats` reads
 CPU%/MEM%/GPU%/GMEM% from Prometheus even for finished jobs. Slower — the summary is one
 free sacct field where this is several range queries per job — but it is what a site

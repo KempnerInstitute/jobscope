@@ -460,6 +460,172 @@ def test_fetch_progress_notes(monkeypatch, capsys):
     assert "batch 2/2 done (2/2 jobs)" in err  # the final batch always notes
 
 
+# --- the window, cut into slices --------------------------------------------
+
+def _at(stamp: str) -> str:
+    """A TIMESTAMP_FORMAT stamp, so window_slices can read it back."""
+    return time.strftime(TIMESTAMP_FORMAT, time.strptime(stamp, TIMESTAMP_FORMAT))
+
+
+def test_a_one_day_window_is_a_single_slice():
+    """The common case must not pay for the machinery: -D 1 is one call, as before."""
+    slices = slurm.window_slices(_at("2026-08-10T00:00:00"), _at("2026-08-11T00:00:00"))
+    assert slices == [("2026-08-10T00:00:00", "2026-08-11T00:00:00")]
+
+
+def test_a_week_is_seven_slices_that_meet_without_overlapping():
+    slices = slurm.window_slices(_at("2026-08-04T00:00:00"), _at("2026-08-11T00:00:00"))
+    assert len(slices) == 7
+    # Each slice starts exactly where the last ended: a gap loses jobs, an overlap
+    # fetches them twice.
+    assert all(a[1] == b[0] for a, b in zip(slices, slices[1:]))
+    assert (slices[0][0], slices[-1][1]) == ("2026-08-04T00:00:00", "2026-08-11T00:00:00")
+
+
+def test_a_ragged_window_keeps_its_ends():
+    """The last slice is short rather than the window being rounded out to a day."""
+    slices = slurm.window_slices(_at("2026-08-09T06:00:00"), _at("2026-08-11T09:30:00"))
+    assert (slices[0][0], slices[-1][1]) == ("2026-08-09T06:00:00", "2026-08-11T09:30:00")
+    assert len(slices) == 3
+
+
+@pytest.mark.parametrize("start,end", [
+    ("now-30days", "now"),          # the default lookback, sacct's own relative form
+    ("2026-08-10", "2026-08-11"),   # a bare date, which epoch() does not read
+])
+def test_a_window_that_cannot_be_read_is_left_whole(start, end):
+    """Unreadable is not unusable: sacct still understands these, so pass them through
+    as one slice rather than refusing or guessing at a cut."""
+    assert slurm.window_slices(start, end) == [(start, end)]
+
+
+def test_an_inverted_or_empty_window_is_one_slice():
+    same = _at("2026-08-10T00:00:00")
+    assert slurm.window_slices(same, same) == [(same, same)]
+    assert len(slurm.window_slices(_at("2026-08-11T00:00:00"), same)) == 1
+
+
+# --- streaming a window, one sacct call per slice ----------------------------
+
+def _window_stub(monkeypatch, by_slice, calls=None):
+    """Answer each window fetch from ``by_slice``, keyed by the slice's -S value."""
+    summary = make_jobstats(GPU_STATS)
+
+    def fake(cmd, timeout, what, soft=False):
+        assert cmd[:2] == ["sacct", "-X"], cmd
+        start = cmd[cmd.index("-S") + 1]
+        if calls is not None:
+            calls.append(start)
+        ids = by_slice.get(start)
+        if ids is None:
+            return None                     # a slice that failed
+        return "".join(_record_line(j, summary) for j in ids)
+
+    monkeypatch.setattr(slurm, "run_capture", fake)
+
+
+def _week(**by_day):
+    """``{slice start: ids}`` for a week beginning 2026-08-04, keyed d0..d6."""
+    return {"2026-08-0%dT00:00:00" % (4 + int(k[1:])): v for k, v in by_day.items()}
+
+
+def _selection():
+    return Selection(user="alice", starttime=_at("2026-08-04T00:00:00"),
+                     endtime=_at("2026-08-11T00:00:00"))
+
+
+def test_fetch_window_yields_one_slice_at_a_time(monkeypatch):
+    calls = []
+    _window_stub(monkeypatch, _week(d0=["100"], d1=["101"], d2=["102"]), calls)
+    chunks = list(slurm.fetch_window(_selection(), None))
+    assert [ids for ids, _r in chunks] == [["100"], ["101"], ["102"]]
+    assert len(calls) == 7          # every slice is asked, even the empty ones
+
+
+def test_one_slice_is_still_streamed_in_chunks(monkeypatch):
+    """How much is *fetched* and how much is *yielded* are different questions.
+
+    One sacct call per slice is right for the server, but run_capture buffers that call
+    whole -- so yielding a slice in one piece made a default -D 1 a single chunk of nine
+    thousand jobs, and every metric query for all of them ran before the first row could
+    be drawn. This is the regression guard for that: a slice is handed out in chunks.
+    """
+    monkeypatch.setattr(slurm, "STREAM_CHUNK", 3)
+    ids = ["10%02d" % i for i in range(7)]
+    _window_stub(monkeypatch, _week(d0=ids))
+    chunks = list(slurm.fetch_window(_selection(), None))
+    assert [len(batch) for batch, _r in chunks] == [3, 3, 1]
+    # Order is preserved across the chunk boundaries, and nothing is dropped or repeated.
+    assert [j for batch, _r in chunks for j in batch] == ids
+    # Each chunk carries only its own records.
+    assert all(set(recs) == set(batch) for batch, recs in chunks)
+
+
+def test_fetch_window_records_are_per_slice_not_cumulative(monkeypatch):
+    """The other half of what made a wide selection expensive: fetch_chunks kept every
+    record to the end of the run, and nothing downstream ever needed it to."""
+    _window_stub(monkeypatch, _week(d0=["100"], d1=["101"]))
+    chunks = list(slurm.fetch_window(_selection(), None))
+    assert list(chunks[0][1]) == ["100"]
+    assert list(chunks[1][1]) == ["101"]
+
+
+def test_fetch_window_dedups_a_job_that_spans_a_boundary(monkeypatch):
+    """sacct returns such a job from both slices; the first to reach it owns it, or the
+    report would show the same job twice."""
+    _window_stub(monkeypatch, _week(d0=["100", "200"], d1=["200", "201"]))
+    chunks = list(slurm.fetch_window(_selection(), None))
+    assert [ids for ids, _r in chunks] == [["100", "200"], ["201"]]
+
+
+def test_fetch_window_skips_a_job_that_has_not_finished(monkeypatch):
+    """The same belt-and-braces the id listing used to apply behind the -s filter."""
+    summary = make_jobstats(GPU_STATS)
+
+    def fake(cmd, timeout, what, soft=False):
+        if cmd[cmd.index("-S") + 1] != "2026-08-04T00:00:00":
+            return ""
+        return (_record_line("100", summary)
+                + _record_line("101", summary).replace("|COMPLETED|", "|RUNNING|"))
+
+    monkeypatch.setattr(slurm, "run_capture", fake)
+    chunks = list(slurm.fetch_window(_selection(), None))
+    assert [ids for ids, _r in chunks] == [["100"]]
+
+
+def test_a_failed_slice_is_named_and_the_rest_still_arrive(monkeypatch, capsys):
+    """A hole the reader is told about beats both a silent hole and no report at all."""
+    _window_stub(monkeypatch, _week(d0=["100"], d2=["102"]))   # d1 missing -> None
+    chunks = list(slurm.fetch_window(_selection(), None))
+    assert [ids for ids, _r in chunks] == [["100"], ["102"]]
+    err = capsys.readouterr().err
+    assert "that span is missing from this report" in err
+    assert "2026-08-05" in err          # names which span, not just that one failed
+
+
+def test_a_single_slice_window_says_nothing(monkeypatch, capsys):
+    """The slice note is for a window worth explaining, not for every -D 1."""
+    _window_stub(monkeypatch, {"2026-08-10T00:00:00": ["100"]})
+    selection = Selection(user="alice", starttime=_at("2026-08-10T00:00:00"),
+                          endtime=_at("2026-08-11T00:00:00"))
+    assert [ids for ids, _r in slurm.fetch_window(selection, None)] == [["100"]]
+    assert capsys.readouterr().err == ""
+
+
+def test_the_window_fetch_and_the_id_listing_select_the_same_jobs(monkeypatch):
+    """They must agree on *which* jobs, or a fetch returns rows the listing never
+    offered. One filter builder feeds both; this pins that it stays that way."""
+    selection = Selection(user="alice", partition="kempner", account="lab",
+                          state="failed", starttime="2026-08-04T00:00:00",
+                          endtime="2026-08-05T00:00:00")
+    listing = slurm._select_cmd(selection, *selection.window())
+    fetching = slurm._window_fetch_cmd(selection, *selection.window())
+    # Everything up to the output format is identical.
+    assert listing[:listing.index("--noheader")] == fetching[:fetching.index("--noheader")]
+    assert "-r" in fetching and "kempner" in fetching
+    assert "-X" in fetching          # allocations only; steps would multiply the rows
+
+
 def test_fetch_chunks_empty():
     assert list(slurm.fetch_chunks([], None)) == []
 

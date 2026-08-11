@@ -3,7 +3,6 @@
 import pytest
 
 from jobscope import cpu
-
 from jobscope.cpu import RATE_LOOKBACK_SCRAPES, host_series, spec_named, specs_named
 
 

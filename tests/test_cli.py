@@ -1,8 +1,8 @@
 """Tests for the argument tree: mode resolution, validation, and dispatch."""
 
 import argparse
-import re
 import dataclasses
+import re
 import sys
 
 import pytest
@@ -292,13 +292,21 @@ def test_version(capsys):
 
 
 def _patch_sacct(monkeypatch, records, chunks=None, ids=None):
-    """Stub the sacct side of the selection layer."""
+    """Stub the sacct side of the selection layer.
+
+    Three seams, because a selection reaches sacct three ways: a window streams slice
+    by slice through ``fetch_window`` without listing ids at all, while ``-N`` and
+    explicit JOBIDs list through ``select_jobs`` and then fetch by id.
+    """
     ids = ids if ids is not None else list(records)
+    slices = chunks if chunks is not None else [(ids, records)]
     monkeypatch.setattr(select_mod, "select_jobs", lambda sel, timeout: (ids, "last 1 day"))
     monkeypatch.setattr(select_mod, "fetch", lambda i, timeout: records)
     monkeypatch.setattr(select_mod, "fetch_chunks",
                         lambda i, timeout: iter(chunks if chunks is not None
                                                 else [(list(i), records)]))
+    monkeypatch.setattr(select_mod, "fetch_window",
+                        lambda sel, timeout: iter(list(slices)))
 
 
 def test_finished_cpu_view(monkeypatch, capsys, cpu_record):
@@ -306,6 +314,60 @@ def test_finished_cpu_view(monkeypatch, capsys, cpu_record):
     main(["finished", "--cpu", "-D", "1", "-u", "bob"])
     out = capsys.readouterr().out
     assert "200" in out and "CPU%" in out and "SM_ACT%" not in out
+
+
+def test_no_dcgm_never_contacts_prometheus(monkeypatch, capsys, gpu_record):
+    """The whole point of the flag: a wide selection stops costing queries, rather than
+    costing the same queries more slowly."""
+    _patch_sacct(monkeypatch, {"100": gpu_record})
+
+    def boom(*a, **k):
+        raise AssertionError("--no-dcgm must not build a Prometheus client")
+
+    monkeypatch.setattr(select_mod, "client_from_config", boom)
+    monkeypatch.setattr(select_mod, "compute_dcgm", boom)
+    main(["finished", "--no-dcgm", "-D", "1", "-u", "bob"])
+    out = capsys.readouterr().out
+    # The jobstats columns survive -- they arrived with sacct and cost nothing.
+    assert "100" in out and "CPU%" in out and "GPU%" in out
+    # The exporter columns are what the flag drops.
+    assert "SM_ACT%" not in out and "TENSOR%" not in out
+
+
+def test_no_dcgm_and_no_jobstats_are_refused_together(monkeypatch, capsys):
+    """They ask for opposite things, and together for a report with no source at all."""
+    with pytest.raises(SystemExit):
+        main(["finished", "--no-dcgm", "--no-jobstats", "-D", "1", "-u", "bob"])
+    err = capsys.readouterr().err
+    assert "opposites" in err and "--no-dcgm" in err and "--no-jobstats" in err
+
+
+def test_no_dcgm_is_offered_when_a_selection_would_be_expensive(monkeypatch, capsys,
+                                                                gpu_record):
+    """The note has to name a lever, not just report that this will take a while.
+
+    The threshold is lowered rather than the fixture inflated: what is worth pinning is
+    that crossing it names --no-dcgm and the pacing knob, not the particular job count
+    that happens to cross it today.
+    """
+    monkeypatch.setattr(select_mod, "NOTEWORTHY_QUERIES", 5)
+    many = {str(i): dataclasses.replace(gpu_record, jobid=str(i)) for i in range(4)}
+    _patch_sacct(monkeypatch, many)
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: object())
+    monkeypatch.setattr(select_mod, "compute_dcgm", lambda r, ids, *a, **k: {})
+    main(["finished", "-D", "1", "-u", "bob"])
+    err = capsys.readouterr().err
+    assert "Prometheus queries" in err and "queries/s" in err
+    assert "--no-dcgm" in err and "max_queries_per_second" in err
+
+
+def test_an_ordinary_selection_is_not_warned_about(monkeypatch, capsys, gpu_record):
+    """A note that fires on normal use is a note nobody reads."""
+    _patch_sacct(monkeypatch, {"100": gpu_record})
+    monkeypatch.setattr(select_mod, "client_from_config", lambda cfg, t: object())
+    monkeypatch.setattr(select_mod, "compute_dcgm", lambda r, ids, *a, **k: {})
+    main(["finished", "-D", "1", "-u", "bob"])
+    assert "Prometheus queries" not in capsys.readouterr().err
 
 
 def test_finished_streams_chunks_per_batch(monkeypatch, capsys, gpu_record):
@@ -354,7 +416,7 @@ def test_per_gpu_renders_one_row_per_gpu(monkeypatch, capsys, gpu_record):
 
 
 def test_no_matching_jobs_is_not_an_error(monkeypatch, capsys):
-    monkeypatch.setattr(select_mod, "select_jobs", lambda sel, timeout: ([], "last 1 day"))
+    monkeypatch.setattr(select_mod, "fetch_window", lambda sel, timeout: iter([]))
     main(["finished", "--cpu", "-u", "nobody"])
     assert "No matching jobs" in capsys.readouterr().err
 
@@ -447,6 +509,7 @@ def test_running_is_the_default_mode(monkeypatch, capsys):
         raise AssertionError("a bare invocation must not reach sacct")
 
     monkeypatch.setattr(select_mod, "select_jobs", no_sacct)
+    monkeypatch.setattr(select_mod, "fetch_window", no_sacct)
     main([])
     assert "RUNNING" in capsys.readouterr().out
 
@@ -869,9 +932,13 @@ def test_the_help_hides_the_flags_an_explicit_jobid_makes_inert(capsys):
     body, hidden = _help_for(["-j", "36441613", "--per-gpu"], capsys)
     # The job ID *is* the selection, so no window and no filter can narrow it.
     for flag in ("--days", "--lastn", "--starttime", "--endtime",
-                 "--partition", "--user", "--all-users", "--account", "--state"):
+                 "--partition", "--user", "--account", "--state"):
         assert flag in hidden
         assert flag not in body
+    # --all-users is inert here too, but it is suppressed from every help, so it is not
+    # *newly* hidden and the footer must not name it: that footer is help text, and -a
+    # is taught in docs/admin.md rather than advertised to whoever runs --help.
+    assert "--all-users" not in hidden and "--all-users" not in body
     assert "--ts" in hidden           # mutually exclusive with --per-gpu
     assert "--step" in hidden         # only emit_timeseries reads it
     # --runtime-avg is NOT hidden here, though it used to be: an explicit JOBID can name

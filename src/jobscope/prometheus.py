@@ -19,7 +19,6 @@ from typing import Callable, List, Optional
 
 from . import config
 
-
 # A token is "whole enough" within this much. Refilling from two timestamps accumulates
 # float error -- monotonic() 100.1 minus 100.0 is 0.09999999999999432, so a refill that
 # should land on exactly one token lands a hair under it. Comparing for >= 1.0 exactly then

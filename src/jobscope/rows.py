@@ -32,7 +32,7 @@ from .jobstats import (
     jobstats_metrics,
     jobstats_per_node,
 )
-from .models import GPU_LEVEL, JobRow, NODE_LEVEL, ReportContext
+from .models import GPU_LEVEL, NODE_LEVEL, JobRow, ReportContext
 from .slurm import JobRecord, Selection, format_window
 
 

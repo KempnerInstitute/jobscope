@@ -53,7 +53,7 @@ over 300,000 jobs.
 
 ### Filters
 
-`-p` partition · `-u` user · `-a` all users · `-A` account · `-t` how the job ended
+`-p` partition · `-u` user · `-A` account · `-t` how the job ended
 (`finished` only) · `--min-elapsed` runtime floor (`running` only, default 10m — a job
 still loading data reads as idle; `0s` disables it).
 
@@ -91,6 +91,7 @@ this way, so `jobscope <jobid>` still reports a job running right now.
 | `--plot-ts-overlay [WINDOW]` | overlaid: one panel per GPU, shared axis, one row per node |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--all-metrics` | the full DCGM catalog |
+| `--no-dcgm` | drop the exporter columns and query nothing — see [Wide selections](#wide-selections) |
 | `--runtime-avg` | running: average over the job's runtime (the default, said explicitly) |
 | `--instant` | running: the newest scrape instead — one query per metric, so the fast one |
 
@@ -135,6 +136,42 @@ host.
 
 `--cpu` narrows to the host columns — for *finished* jobs that needs no Prometheus at
 all. `--gpu` narrows to the GPU columns. `--all-metrics` widens the profiling block.
+
+### Wide selections
+
+A wide selection costs almost nothing at the scheduler and a great deal at Prometheus,
+and the two are not close. Selecting and fetching 8 587 finished jobs is one `sacct`
+call per day of the window — under half a second for a day. Their GPU metrics are
+**two queries per GPU job**: one per group of metrics sharing a reducer and a UUID
+label, which the seven default columns come to two of. Finding which cards ran each
+job used to be a third, but that is now one range query per hour of the window however
+many jobs there are, so it no longer scales with the selection. For 8 889 jobs it is
+~17 800 queries, which the default pacing of 50 queries/s spreads over about six
+minutes.
+
+jobscope says so before it spends it:
+
+```text
+note: 8889 jobs, 8889 with GPUs -- about 17802 Prometheus queries, ~5.9 min at the
+      configured 50 queries/s.
+```
+
+The figure is projected from the first day-slice rather than counted, because counting
+would mean listing every row up front — the thing that makes a wide window expensive in
+the first place. Expect it to run somewhat high.
+
+Three ways to spend less:
+
+- **`--no-dcgm`** drops the columns an exporter serves and queries nothing at all.
+  `CPU%`, `MEM%`, `GPU%` and `GMEM%` still print: they come from the jobstats summary
+  Slurm stored in `AdminComment`, which arrives free with `sacct`. The same selection
+  above renders in about two seconds. `SM_ACT%`, `TENSOR%`, `DRAM%` and `POWER_W` are
+  what you give up. It is the exact opposite of [`--no-jobstats`](admin.md), and the
+  two are refused together.
+- **`[prometheus] max_queries_per_second`** trades wall clock for load on the shared
+  server. Lowering it does not reduce the number of queries, only the rate the server
+  sees them at.
+- **Narrow the selection** — `-p`, a shorter window, or `-N`.
 
 ---
 
@@ -461,7 +498,7 @@ from `squeue` and averaging each job over its own runtime.
 
 ```bash
 jobscope                          # your running jobs
-jobscope -p kempner -a            # every user in a partition
+jobscope -p kempner               # your running jobs in one partition
 jobscope --instant                # the newest scrape instead of the runtime average
 jobscope --min-elapsed 0s         # no runtime floor at all
 ```
@@ -486,7 +523,7 @@ On a **MIG node** `--per-gpu` and `--ts` show the instances, but the DCGM column
 ```bash
 # what is running right now
 jobscope                                          # your jobs
-jobscope -p kempner_eng -a                        # everyone on a partition
+jobscope -p kempner_eng                           # your jobs on one partition
 
 # what already ran
 jobscope finished                                 # your last day
@@ -497,9 +534,9 @@ jobscope -j 36499551_64                           # summary, with efficiency bar
 jobscope -j 36612315 --plot-ts 60m                # its metrics charted, last hour
 jobscope -j 36441613 --ts 60m --stats job         # the last hour, averaged
 
-# a whole partition, triaged
-jobscope -p kempner_h100 -a --ts 60m --eff
-jobscope -p kempner_h100 -a --ts 10m --eff --csv > triage.csv
+# triaged by efficiency
+jobscope -p kempner_h100 --ts 60m --eff
+jobscope -p kempner_h100 --ts 10m --eff --csv > triage.csv
 ```
 
 The window goes on whichever flag you are already using — `--plot-ts 60m`, not
@@ -549,7 +586,7 @@ where this averages it. That is the honest reading of "the average over this win
 ### Triage: `--eff`
 
 ```console
-$ jobscope -p kempner_h100 -a --ts 10m --eff
+$ jobscope -p kempner_h100 --ts 10m --eff
   142 jobs, by best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM% (POWER_W caps the verdict when idle)
 
   wasteful (GPU% <2%, SM_ACT% <2%, ...)  15 jobs

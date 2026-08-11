@@ -13,7 +13,6 @@ import pytest
 from jobscope import dcgm, source
 from jobscope.errors import JobscopeError
 
-
 # --- parsing ----------------------------------------------------------------
 
 def test_naming_one_source_promotes_it_and_keeps_the_rest():

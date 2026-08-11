@@ -4,7 +4,8 @@ import io
 
 import pytest
 
-from jobscope import dcgm, timeseries as ts
+from jobscope import dcgm
+from jobscope import timeseries as ts
 from jobscope.cpu import host_stats_many
 from jobscope.dcgm import spec_named, window_query
 from jobscope.errors import JobscopeError
@@ -330,12 +331,23 @@ def test_describe_filters_says_all_users_when_unfiltered():
 
 
 def test_widening_hints_cover_only_the_active_filters():
-    """Suggesting -a when every user is already included would be noise."""
     assert RunningSelection(user="alice", partition="p", min_elapsed=600).widening_hints() == [
-        "add -a to include every user",
         "set --min-elapsed 0s to include jobs that just started",
         "drop -p to search every partition"]
     assert RunningSelection(user=None, partition=None, min_elapsed=0).widening_hints() == []
+
+
+def test_the_user_filter_is_never_widened_by_a_hint():
+    """-a lifts it, and -a is an administrator's flag taught in docs/admin.md.
+
+    So the user filter contributes no hint even though it is the filter most often
+    responsible for an empty selection, and a selection narrowed by nothing else
+    offers no advice at all rather than advice most readers should not take.
+    """
+    for selection in (RunningSelection(user="alice", partition="p", min_elapsed=600),
+                      RunningSelection(user="alice", partition=None, min_elapsed=0)):
+        assert not [hint for hint in selection.widening_hints() if "-a" in hint]
+    assert RunningSelection(user="alice", partition=None, min_elapsed=0).widening_hints() == []
 
 
 def test_explicit_job_ids_keep_the_plain_description():

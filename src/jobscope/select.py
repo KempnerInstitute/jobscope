@@ -14,6 +14,7 @@ behind one interface is what lets the CLI treat "which jobs" and "how to show
 them" as independent choices.
 """
 
+import itertools
 import sys
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
@@ -62,13 +63,17 @@ from .running import (
     running_records,
 )
 from .slurm import (
+    SLICE_SECONDS,
     JobRecord,
     Selection,
     days_to_window,
+    describe_window,
     end_of_day,
     fetch,
     fetch_chunks,
+    fetch_window,
     select_jobs,
+    window_slices,
 )
 
 # {jobid: JobGpuData(job-level by header, per-GPU by (node, minor), per-node by node)}
@@ -417,6 +422,15 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
     """
     narrowing = narrowing_pairs(nodename, gpu_ids)
     selection = sacct_selection(request)
+
+    # A plain window selection never lists its ids: it streams slice by slice, and the
+    # first slice is drawn here so an empty selection can still be reported as empty
+    # and so the detail views get their "one job or many" answer before rendering.
+    # -N and explicit JOBIDs keep the listing pass; both need every id up front.
+    if not selection.jobids and not _walks_back(selection):
+        return _resolve_streamed(request, selection, cfg, timeout, workers, specs,
+                                 narrowing, nodename, gpu_ids, host_specs)
+
     jobids, desc = select_jobs(selection, timeout)
     if not jobids:
         print("No matching jobs for %s (%s)."
@@ -451,6 +465,149 @@ def _resolve_historical(request: Request, cfg: config.Config, timeout: Optional[
                                      nodename=nodename, gpu_ids=gpu_ids,
                                      host_specs=host_specs, average=request.average),
                     folded=folded, total=len(jobids))
+
+
+def _walks_back(selection) -> bool:
+    """Whether ``-N`` will day-walk this selection instead of taking the window.
+
+    The same condition ``select_jobs`` applies, named once so the two cannot disagree
+    about which path a selection is on -- they would disagree silently, by one of them
+    listing ids the other had already streamed.
+    """
+    return (selection.lastn is not None
+            and not selection.starttime and not selection.endtime)
+
+
+# Below this many projected Prometheus queries, the fan-out finishes before anyone
+# would have read a warning about it. Chosen against the pacing default: 3000 queries
+# at 50/s is a minute, which is about where a command stops feeling like it is working
+# and starts feeling like it is stuck.
+NOTEWORTHY_QUERIES = 3000
+
+
+def _projected_cost(ids: List[str], records: Dict[str, JobRecord], slices: int,
+                    specs: Optional[List[MetricSpec]], cfg: config.Config):
+    """``(jobs, gpu_jobs, queries, seconds)`` this selection is heading for.
+
+    **Projected from the first slice, not counted.** Counting means asking sacct for
+    every row before rendering any, which is the expensive thing the streaming path
+    exists to avoid -- measured, listing a cluster-wide day cost 1.66 GB inside sacct
+    whatever output format it was asked for, and no field list or id batching changes
+    that. A one-hour probe over-projected a full day by ~31%, which is the direction a
+    warning should be wrong in.
+
+    ``None`` when there is nothing to warn about: no GPU jobs, no specs (``--cpu`` and
+    ``--no-dcgm`` never contact Prometheus), or no pacing configured to project against.
+    """
+    if not specs or not ids or cfg.max_queries_per_second <= 0:
+        return None
+    with_gpus = sum(1 for jid in ids if jid in records and records[jid].gpus)
+    if not with_gpus:
+        return None
+    jobs = len(ids) * slices
+    gpu_jobs = with_gpus * slices
+    # One per (reducer, uuid_label) group rather than one per metric -- seven metrics
+    # come to two groups, and projecting per metric would overstate it by 3.5x.
+    per_job = len({dcgm.group_key(spec) for spec in specs})
+    # Discovery is no longer one of them: it is batched by bucket, so it costs roughly
+    # the span in buckets however many jobs there are (dcgm.discover_gpus_batch), plus
+    # a per-job fallback for the few a step grid cannot see -- measured at a few
+    # percent, and inside the "about" this figure is already hedged with.
+    queries = gpu_jobs * per_job + _buckets(selection_span(slices))
+    return jobs, gpu_jobs, queries, queries / cfg.max_queries_per_second
+
+
+def selection_span(slices: int) -> int:
+    """Seconds the selection covers, from its slice count.
+
+    A slice is a day by construction (:data:`jobscope.slurm.SLICE_SECONDS`), which is
+    close enough for a projection and avoids re-parsing the window here.
+    """
+    return slices * SLICE_SECONDS
+
+
+def _buckets(span: int) -> int:
+    return max(1, -(-span // dcgm.DISCOVERY_BUCKET_SECONDS))
+
+
+def _note_cost(ids, records, selection, specs, cfg: config.Config) -> None:
+    """Say what a wide selection is about to cost Prometheus, before it spends it.
+
+    Replaces the note the id listing used to print, which could open with an exact
+    count because it had already paid for one. This cannot, and says the two things
+    that count instead: roughly how many queries, and roughly how long at the rate the
+    server will actually see them. Both are levers the reader can pull -- which the
+    bare "this will be slow" was not.
+    """
+    slices = len(window_slices(*selection.window()))
+    projected = _projected_cost(ids, records, slices, specs, cfg)
+    if projected is None:
+        return
+    jobs, gpu_jobs, queries, seconds = projected
+    if queries < NOTEWORTHY_QUERIES:
+        return
+    about = "~%d" % jobs if slices > 1 else "%d" % jobs
+    print("note: %s jobs, %s with GPUs -- about %d Prometheus queries, ~%s at the"
+          " configured %g queries/s.\n"
+          "      --no-dcgm skips Prometheus entirely (jobstats columns only);"
+          " [prometheus] max_queries_per_second\n"
+          "      trades wall clock for load on the server. Or narrow the selection."
+          % (about, "~%d" % gpu_jobs if slices > 1 else "%d" % gpu_jobs,
+             queries, _duration(seconds), cfg.max_queries_per_second),
+          file=sys.stderr)
+
+
+def _duration(seconds: float) -> str:
+    """``45s`` / ``8.6 min`` / ``1.4 h`` -- one figure, in the unit a reader thinks in."""
+    if seconds < 90:
+        return "%ds" % round(seconds)
+    if seconds < 5400:
+        return "%.1f min" % (seconds / 60)
+    return "%.1f h" % (seconds / 3600)
+
+
+def _resolve_streamed(request: Request, selection, cfg: config.Config,
+                      timeout: Optional[float], workers: int,
+                      specs: Optional[List[MetricSpec]], narrowing,
+                      nodename: Optional[str], gpu_ids, host_specs) -> Optional[Resolved]:
+    """A window selection, streamed a time slice at a time and never listed first.
+
+    One sacct call per slice replaces a listing call plus one per 200 ids -- see
+    :func:`jobscope.slurm.fetch_window` for why the listing was not buying anything.
+
+    The cost is that nothing here knows the job count in advance, and two things used
+    to be taken from it. The header description is now computed from the selection
+    (:func:`describe_window`), which never needed the ids. ``total`` cannot be, so the
+    first slice is drawn eagerly and answers the only question anything asks of it --
+    whether this is one job or many.
+    """
+    desc = describe_window(selection)
+    chunks = fetch_window(selection, timeout)
+    first = next(chunks, None)
+    if first is None:
+        print("No matching jobs for %s (%s)."
+              % ("all users" if request.all_users else "user '%s'" % selection.user, desc),
+              file=sys.stderr)
+        return None
+
+    # Before the metrics are collected, which is what makes it worth printing: the
+    # first slice is in hand and the rest of the run has not been paid for yet.
+    _note_cost(first[0], first[1], selection, specs, cfg)
+
+    # Only ever read as `total > 1` (see report.DetailRenderer), so the first slice
+    # settles it whenever it holds two jobs -- which any selection wide enough for this
+    # to matter does. A single-job first slice is reported as one job; that is wrong
+    # only if a later slice holds another, and only for a detail view over a window
+    # thin enough to split one job per day.
+    context = context_pairs(rows.build_context(selection, desc, {}),
+                            specs, host_specs, average=request.average) + narrowing
+    return Resolved(context,
+                    _enrich(itertools.chain([first], chunks), cfg, timeout, workers, specs,
+                            no_jobstats=request.no_jobstats,
+                            nodename=nodename, gpu_ids=gpu_ids,
+                            host_specs=host_specs, average=request.average),
+                    folded=True,        # a window selection holds only finished jobs
+                    total=len(first[0]))
 
 
 def _enrich(chunks, cfg: config.Config, timeout: Optional[float], workers: int,

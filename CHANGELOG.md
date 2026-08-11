@@ -2,6 +2,68 @@
 
 ## Unreleased
 
+### A wide selection now costs a fraction of what it did, and says so up front
+
+**Who this affects:** anyone selecting more than a few hundred finished jobs —
+`jobscope finished -u someone`, a partition sweep, anything with a multi-day window.
+
+**sacct is now queried once per day of the window, not once plus once per 200 jobs.**
+Selecting 8 587 jobs used to be one listing call followed by 43 `sacct -j` calls: 44
+round trips, ~4.0 s. It is now one call for a one-day window and seven for a week.
+
+The listing pass was not buying anything. It already materialised every row in the
+window — measured cluster-wide over one day, 193 982 rows cost 1.66 GB of RSS inside
+`sacct`, and asking for `JobID` alone cost the same as asking for all twelve fields —
+and the id batching then chunked the *second* pass, the one with no memory problem.
+Cutting the window instead bounds both. Records are also held per slice rather than
+accumulated for the whole run.
+
+**Streaming granularity is unchanged**, and deliberately so: a slice is how much is
+fetched, not how much is yielded. `run_capture` buffers an `sacct` call whole, so
+handing out a whole slice at once would mean every metric query for nine thousand jobs
+running before the first row was drawn. Records are still handed downstream 200 at a
+time, and the first row of a 9 000-job report appears in about eight seconds.
+
+Unchanged: explicit `JOBID`s and `-N` still list first, because both need every id up
+front. A job spanning a slice boundary is returned by both slices and reported once. A
+slice that fails is named and skipped rather than ending the run.
+
+**New `--no-dcgm`.** Drops the columns an exporter serves and queries Prometheus not at
+all. `CPU%`, `MEM%`, `GPU%` and `GMEM%` still print — they come from the jobstats
+summary in `AdminComment`, which arrives free with `sacct`. On an 8 889-job selection
+that is ~26 700 queries against none, and 1.8 s against about nine minutes. The cost is
+`SM_ACT%`, `TENSOR%`, `DRAM%` and `POWER_W`. It is the exact opposite of
+`--no-jobstats` and the two are refused together.
+
+**GPU discovery is batched, so it no longer scales with the job count.** Finding which
+cards ran a job was one query per job — 8 587 of them for the selection above, a third
+of everything it issued. It is now one range query per hour of the window, however many
+jobs there are. Measured on 300 real jobs: 300 queries and 78 s become 4 queries and
+2.1 s, with identical card sets for all 300. End to end that selection went from 900
+queries to 614.
+
+A range query lands on a fixed step grid, so a job shorter than the scrape interval can
+fall between two grid points; those fall back to the per-job query and stay exact. This
+reverses one of three batching experiments recorded in `compute_dcgm` — that one
+measured a single unbucketed query for the whole selection against *wall clock* on
+25-and 120-job selections, and it lost. Bucketed, and measured against server load at
+8 587 jobs, it wins. Both results are now recorded there.
+
+**The broad-selection note now states the cost instead of the count.** It used to say a
+selection was large and would be slow. It now projects the query count and the time at
+the configured rate, and names the two levers:
+
+```text
+note: 8889 jobs, 8889 with GPUs -- about 17802 Prometheus queries, ~5.9 min at the
+      configured 50 queries/s.
+      --no-dcgm skips Prometheus entirely (jobstats columns only); [prometheus]
+      max_queries_per_second trades wall clock for load on the server.
+```
+
+Projected from the first day-slice, not counted — counting means listing every row
+first, which is the expensive thing. It runs high, which is the right direction for a
+warning.
+
 ### Breaking: `--classify --csv` no longer emits `wasteful-cpu-gpu` or `wasteful-gpu`
 
 **Who this affects:** anything that reads the `LABEL` column of

@@ -851,6 +851,107 @@ def _sorted_gpus(gpus: List[dict]) -> List[dict]:
     return sorted(gpus, key=lambda g: (g["node"], gpu_minor_key(g["minor"])))
 
 
+# How much of a selection's span one discovery range query may cover.
+#
+# Measured against this cluster's join series: a bucket costs about 0.8s and 3.8 MB an
+# hour and scales flat from there -- 6h/20 MB, 12h/39 MB, 24h/76 MB in a single
+# response. The whole day in one query is the cheapest by round trips and the worst by
+# peak memory, on both ends: 76 MB of JSON parses to several hundred in Python. An hour
+# keeps a bucket smaller than a single sacct slice's records while still replacing
+# hundreds of per-job queries with one.
+DISCOVERY_BUCKET_SECONDS = 3600
+
+
+def _raw_jobid(value) -> Optional[int]:
+    """A job id as an int, from either a record's field or a sample's value.
+
+    Both sides of the join have to be compared as numbers: sacct writes ``JobIDRaw`` as
+    digits, while Prometheus renders the same id as a float and may do it in scientific
+    notation, so ``"38185846" == "3.8185846e+07"`` is false and would match nothing.
+    """
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def discover_gpus_batch(records: Dict[str, JobRecord], jobids: List[str],
+                        client: PrometheusClient,
+                        timeout: Optional[float]) -> Dict[str, List[dict]]:
+    """Every job's cards, from one range query per bucket rather than one per job.
+
+    The same question :func:`discover_gpus` asks, asked once for a span instead of once
+    for a job: read the join series over the bucket, and a card belongs to a job when it
+    reported that job's id at any sample inside the job's own window.
+
+    **This reverses one of the three results recorded in :func:`compute_dcgm`.** That
+    one measured a single unbucketed query for the whole selection, on 25- and 120-job
+    selections, against wall clock -- and it lost, because it returned one to two
+    million samples serially to save a hundred round trips that the pool was already
+    overlapping. Measured again on 200 jobs, bucketed, against *server load*: 200
+    queries and 53s of server time become one query, 0.56s, and 8 MB. The earlier
+    finding was not wrong; a hundred round trips and 8587 of them are different
+    questions, and so are wall clock and load.
+
+    Jobs this cannot answer for are simply absent from the result, and the caller falls
+    back to the per-job query for those -- see :func:`compute_dcgm`. That is not a rare
+    safety net but a required one: a range query lands on a fixed step grid, so a job
+    shorter than the scrape interval can fall between two grid points and be seen by
+    nothing. One job in the 200 measured was a 53-second job, found per-job and missed
+    here. The fallback makes those exact rather than approximate.
+    """
+    wanted = [records[jid] for jid in jobids
+              if jid in records and records[jid].gpus
+              and records[jid].jobid_raw and records[jid].duration]
+    if not wanted:
+        return {}
+    by_raw: Dict[int, List[JobRecord]] = {}
+    for record in wanted:
+        raw = _raw_jobid(record.jobid_raw)
+        if raw is not None:
+            by_raw.setdefault(raw, []).append(record)
+    if not by_raw:
+        return {}
+
+    step = max(1, int(getattr(client, "sampling_period", 60) or 60))
+    cluster = wanted[0].cluster
+    selector = "%s{%s}" % (config.gpu_join(),
+                           "slurm_cluster='%s'" % cluster if cluster else "")
+    found: Dict[str, List[dict]] = {}
+    lo = min(r.end - r.duration for r in wanted)
+    hi = max(r.end for r in wanted)
+    at = lo
+    while at < hi:
+        upto = min(at + DISCOVERY_BUCKET_SECONDS, hi)
+        try:
+            series = client.query_range(selector, at, upto, step, timeout)
+        except Exception:
+            series = []
+        # Keyed by the id the card reported, so each job is one lookup rather than a
+        # scan of every series -- a bucket holds thousands of them.
+        seen: Dict[int, List[Tuple[dict, int]]] = {}
+        for one in series:
+            gpu = gpu_from_series(one.get("metric", {}))
+            if not gpu:
+                continue
+            for stamp, value in one.get("values", ()):
+                raw = _raw_jobid(value)
+                if raw is not None and raw in by_raw:
+                    seen.setdefault(raw, []).append((gpu, int(float(stamp))))
+        for raw, hits in seen.items():
+            for record in by_raw[raw]:
+                # Its *own* window, not the bucket's: two jobs sharing a card in one
+                # bucket must not inherit each other's cards.
+                start = record.end - record.duration
+                for gpu, stamp in hits:
+                    if start <= stamp <= record.end:
+                        found.setdefault(record.jobid, [])
+                        if gpu["uuid"] not in {g["uuid"] for g in found[record.jobid]}:
+                            found[record.jobid].append(gpu)
+        at = upto
+    return {jid: _sorted_gpus(gpus) for jid, gpus in found.items() if gpus}
+
+
 def discover_gpus(record: JobRecord, client: PrometheusClient,
                   timeout: Optional[float]) -> List[dict]:
     """The GPUs that ran a job, as ``{uuid, node, minor, model}``, by (node, minor).
@@ -1135,22 +1236,37 @@ def compute_dcgm(records: Dict[str, JobRecord], jobids: List[str],
     holds serially; across the pool the effective cost is nearer 10ms, and payload
     size then dominates. Anything tried next should be measured against the *pooled*
     path, not a serial baseline.
+
+    **The first of those three has since been reversed, and the note is kept because
+    the reasoning still applies to the other two.** Discovery is now batched, by
+    bucket rather than for the whole selection at once, and measured against load
+    rather than wall clock: on 200 jobs that is one query and 0.56s where the per-job
+    form was 200 queries and 53s of server time. What changed is the question. That
+    experiment asked whether one big query beat a hundred small ones the pool was
+    already overlapping; this one asks what 8587 of them do to a shared server, where
+    pacing means they arrive over minutes however wide the pool is. See
+    :func:`discover_gpus_batch`.
     """
     gpu_jobs = [jid for jid in jobids if jid in records and records[jid].gpus]
     if not gpu_jobs:
         return {}
 
     workers = max(1, min(workers, len(gpu_jobs)))
+    # One query per bucket for the whole chunk, in place of one per job. Jobs it cannot
+    # answer for are absent, and dcgm_for_job falls back to its own discovery query for
+    # those -- which is what keeps a job shorter than one step exact rather than blank.
+    discovered = discover_gpus_batch(records, gpu_jobs, client, timeout)
     # `average` rides with the narrowing kwargs: it is per call, not per record, and
     # dcgm_for_job combines it with each record's own state.
     narrow = {"nodename": nodename, "gpu_ids": gpu_ids, "average": average}
     if workers == 1:
-        return {jid: dcgm_for_job(records[jid], specs, client, timeout, **narrow)
+        return {jid: dcgm_for_job(records[jid], specs, client, timeout,
+                                  gpus_found=discovered.get(jid), **narrow)
                 for jid in gpu_jobs}
     results: Dict[str, JobGpuData] = {}
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(dcgm_for_job, records[jid], specs, client, timeout,
-                                   **narrow): jid
+                                   gpus_found=discovered.get(jid), **narrow): jid
                    for jid in gpu_jobs}
         for future, jid in futures.items():
             try:

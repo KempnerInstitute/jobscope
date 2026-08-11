@@ -4,8 +4,8 @@ import io
 
 import pytest
 
-from jobscope import config as config_module, dcgm
-from jobscope import probe
+from jobscope import config as config_module
+from jobscope import dcgm, probe
 from jobscope.config import redact_url
 from jobscope.slurm import JobRecord
 
@@ -318,7 +318,6 @@ def test_the_output_is_a_loadable_config(gpu_record, monkeypatch, tmp_path,
                                         hermetic_config):
     """The whole point: `probe --toml >> config.toml` has to produce a config file,
     and the live blocks have to take effect."""
-    from jobscope import dcgm
     monkeypatch.setattr("jobscope.slurm.fetch", lambda ids, t: {gpu_record.jobid: gpu_record})
     text = _emit({"cgroup": ["cgroup_memory_rss_bytes", "cgroup_memsw_used_bytes"],
                   "dcgm": ["DCGM_FI_PROF_SM_ACTIVE", "DCGM_FI_DEV_XID_ERRORS"]},
