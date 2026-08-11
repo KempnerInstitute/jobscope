@@ -28,3 +28,9 @@ config.toml
 
 # Local design notes kept out of the repo but on disk while a branch is in flight.
 docs/superpowers/
+
+# The pre-package script and its work log. Kept on disk for whoever still has the old
+# command lines in a shell history, but not shipped: the logic moved into the package
+# and the notes describe a layout the repo no longer has.
+contrib/jobscope_live.py
+contrib/jobscope_live_notes.md
