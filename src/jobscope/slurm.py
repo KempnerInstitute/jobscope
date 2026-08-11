@@ -96,12 +96,20 @@ JOBS_PER_CHUNK = 200
 NOTE_EVERY = 4096
 
 # The fields one bulk query asks for. Shared by the two bulk paths so a column added
-# for one cannot go missing from the other -- _parse_fetch_lines splits on a fixed
-# maxsplit and would silently drop every row if the two lists drifted apart.
-# AdminComment is last, and is the only '|'-free base64 blob, which is what makes that
-# fixed maxsplit safe.
+# for one cannot go missing from the other.
+#
+# **AdminComment stays last.** It is the one field that may itself contain a '|' (it is
+# a base64 blob), so the parser splits with a maxsplit that stops before it and takes
+# the remainder whole. Move it and every job's stored summary is truncated at its first
+# stray character.
 FETCH_FIELDS = ("JobID,State,JobName,Elapsed,NNodes,AllocTRES,"
-                "Start,End,JobIDRaw,Cluster,User,AdminComment")
+                "Start,End,JobIDRaw,Cluster,User,Account,Partition,AdminComment")
+
+# Derived, never written down twice. The maxsplit and this list disagreeing is the one
+# failure here that does not raise: the parser's length guard would `continue` on every
+# row, and the report would come back empty for a selection that matched thousands of
+# jobs. Counting the fields it was actually asked for makes that unrepresentable.
+FETCH_FIELD_COUNT = FETCH_FIELDS.count(",") + 1
 
 # How much of a window one sacct call may cover.
 #
@@ -185,6 +193,12 @@ class JobRecord:
     jobid_raw: str
     cluster: str
     user: str
+    # Identity the table shows only under --show, but collected always: sacct charges
+    # for rows, not for columns (ten extra fields cost 0.05s against an 8587-row
+    # query's 0.36s), so varying the field list by flag would buy nothing and give the
+    # two bulk paths two different record shapes.
+    account: str = ""
+    partition: str = ""
 
     @property
     def unfinished(self) -> bool:
@@ -682,13 +696,19 @@ def _joined(items: List[str]) -> str:
 
 
 def _parse_fetch_lines(out: str, records: Dict[str, JobRecord]) -> None:
-    """Parse one bulk-query output into records, keyed by JobID."""
+    """Parse one bulk-query output into records, keyed by JobID.
+
+    The split is bounded by :data:`FETCH_FIELD_COUNT` rather than by a literal, so the
+    field list is the only place the shape is written down. The order below still has
+    to match that list -- but a *count* that drifts is the silent failure, and this is
+    what stops it.
+    """
     for line in out.splitlines():
-        parts = line.split("|", 11)
-        if len(parts) < 12:
+        parts = line.split("|", FETCH_FIELD_COUNT - 1)
+        if len(parts) < FETCH_FIELD_COUNT:
             continue
         (jobid, state, name, elapsed, nnodes, alloc_tres,
-         start, end, jobid_raw, cluster, user, admin) = parts
+         start, end, jobid_raw, cluster, user, account, partition, admin) = parts
         start_epoch = epoch(start)
         end_epoch = epoch(end) or int(time.time())  # running job -> now
         records[jobid] = JobRecord(
@@ -705,6 +725,8 @@ def _parse_fetch_lines(out: str, records: Dict[str, JobRecord]) -> None:
             jobid_raw=jobid_raw,
             cluster=cluster,
             user=user or "?",
+            account=account,
+            partition=partition,
         )
 
 

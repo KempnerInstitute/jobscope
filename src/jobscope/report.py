@@ -136,6 +136,59 @@ SUMMARY_COLUMNS: List[Column] = [
 FIXED_POSITION_HEADERS: Tuple[str, ...] = ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "GMEM%")
 
 
+# `--show` -> the column it adds and the JobRow field that fills it. Opt-in rather than
+# always on because these are wide: measured over 31,029 real jobs, account runs to 23
+# characters (mean 16.7) and partition to 22 (mean 11.0), which is ~36 characters on a
+# row already near 90 and far wider under --all-metrics.
+#
+# The widths sit near those means rather than at the maxima, so most rows line up and
+# the long tail overflows. Overflow rather than truncation because this table *streams*
+# -- a width is fixed before the first row is seen, so there is nothing to size to --
+# and an overflowing cell still gets its separator from `_line`'s " ".join, so it
+# misaligns the row without ever running into the next value.
+#
+# All in the "id" group, which is what puts them in every view: cols_for passes id
+# columns through unconditionally, so --cpu and --gpu need no further thought.
+EXTRA_ID_COLUMNS: Dict[str, Tuple[Column, str]] = {
+    "account": (Column("ACCOUNT", "{:<20}", "id"), "account"),
+    "partition": (Column("PARTITION", "{:<16}", "id"), "partition"),
+    "name": (Column("NAME", "{:<16}", "id"), "name"),
+    "cluster": (Column("CLUSTER", "{:<10}", "id"), "cluster"),
+}
+
+# The vocabulary `--show` accepts, plus the word for all of it. Named here rather than
+# in cli because the columns are a rendering fact; cli validates against this so the two
+# cannot disagree about what is spellable.
+SHOW_KEYWORDS: Tuple[str, ...] = tuple(EXTRA_ID_COLUMNS)
+SHOW_ALL = "all"
+
+
+def resolve_show(chosen) -> Tuple[str, ...]:
+    """Selected keywords in :data:`SHOW_KEYWORDS` order, whatever order they were typed.
+
+    Fixed rather than as-given so two people running the same report with the flags
+    written differently get the same columns in the same places -- a table whose column
+    order depended on typing order could not be diffed against itself.
+    """
+    wanted = set(chosen or ())
+    if SHOW_ALL in wanted:
+        return SHOW_KEYWORDS
+    return tuple(key for key in SHOW_KEYWORDS if key in wanted)
+
+
+def extra_id_columns(chosen) -> List[Column]:
+    return [EXTRA_ID_COLUMNS[key][0] for key in resolve_show(chosen)]
+
+
+def extra_id_cells(job, chosen) -> Dict[str, str]:
+    """``{header: value}`` for the selected extras, read off a :class:`JobRow`."""
+    cells = {}
+    for key in resolve_show(chosen):
+        column, attribute = EXTRA_ID_COLUMNS[key]
+        cells[column.header] = str(getattr(job, attribute, "") or "-")
+    return cells
+
+
 def _block_column(header: str, index: Optional[int] = None) -> Column:
     """One profiling column, at the width both tables use.
 
@@ -146,8 +199,14 @@ def _block_column(header: str, index: Optional[int] = None) -> Column:
     return Column(header, "{:<%d}" % max(7, len(header) + 1), "dcgm", index)
 
 
-def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
+def summary_columns(specs: Optional[List[MetricSpec]] = None, show=()) -> List[Column]:
     """:data:`SUMMARY_COLUMNS` with its DCGM block taken from ``specs``.
+
+    ``show`` adds the :data:`EXTRA_ID_COLUMNS` selected by ``--show``, spliced in after
+    USER so the identity reads left to right: who ran it, under what, then where. They
+    land here rather than in a view of their own, which is what makes ``--all-metrics``
+    need no separate handling -- that flag varies only the profiling block below, and
+    the identity columns in front of it are the same either way.
 
     The identity and jobstats columns are fixed; only the profiling block varies, which
     is what lets `--all-metrics` widen the table without becoming a different view.
@@ -157,17 +216,22 @@ def summary_columns(specs: Optional[List[MetricSpec]] = None) -> List[Column]:
     jobstats-backed) and would give GPU% a second column beside its fixed one. Which
     source *fills* the fixed cell is settled in :meth:`SummaryRenderer.add`.
     """
-    if specs is None:
-        return list(SUMMARY_COLUMNS)
-    block = [_block_column(header) for _key, header, _dec in columns_for(specs)
-             if header not in FIXED_POSITION_HEADERS]
-    out = []
+    extra = extra_id_columns(show)
+    block = ([] if specs is None else
+             [_block_column(header) for _key, header, _dec in columns_for(specs)
+              if header not in FIXED_POSITION_HEADERS])
+    out: List[Column] = []
     for col in SUMMARY_COLUMNS:
         if col.group == "dcgm":
+            if specs is None:
+                out.append(col)     # the fixed block, unchanged
+                continue
             out.extend(block)
             block = []          # splice the whole block in at the first dcgm slot
         else:
             out.append(col)
+        if col.header == "USER":
+            out.extend(extra)
     return out
 
 
@@ -330,6 +394,9 @@ class RenderOptions:
     show_dcgm: bool = False
     csv: bool = False
     header: bool = True
+    # Extra identity columns from --show, already resolved to a fixed order by
+    # report.resolve_show. See EXTRA_ID_COLUMNS for why they are opt-in.
+    show_ids: Tuple[str, ...] = ()
     # Weight the mean by allocated resource-time (GPU-hours, core-hours) instead
     # of by GPU count. Valid only where each job's value already covers its whole
     # runtime -- a finished job's summary, or running --runtime-avg. On an instantaneous
@@ -1351,7 +1418,7 @@ class SummaryRenderer:
         # rather than a second copy of the tallies, which is also what keeps the aggregate
         # identical to the per-job view's for the same selection.
         self.footer_only = footer_only
-        self.columns = cols_for(summary_columns(specs), options.view,
+        self.columns = cols_for(summary_columns(specs, options.show_ids), options.view,
                                 options.show_dcgm)
         self.headers = [c.header for c in self.columns]
         self.dcgm_headers = [c.header for c in self.columns if c.group == "dcgm"]
@@ -1586,6 +1653,9 @@ class SummaryRenderer:
                 "#GPU": str(job.gpus) if job.gpus else "-",
                 "RUNTIME": job.runtime,
             }
+            # Only the headers --show selected; a cell with no column is never read,
+            # and a column with no cell renders blank, so the two come from one place.
+            row.update(extra_id_cells(job, self.options.show_ids))
             weights = self._weights(job)
             # Read before the summary block, not inside the DCGM one below: a column the
             # summary does not own has to be overridden *before* it is tallied, or the row
@@ -2176,7 +2246,9 @@ class DetailRenderer:
         if self.options.csv:
             for label, value in self.context:
                 self.writer.writerow([label, value])
-            self.writer.writerow(["JOBID"] + [c.header for c in self.columns])
+            self.writer.writerow(
+                ["JOBID"] + [c.header for c in extra_id_columns(self.options.show_ids)]
+                + [c.header for c in self.columns])
         else:
             for label, value in self.context:
                 print(fmt_context(label, value), file=self.out)
@@ -2214,12 +2286,21 @@ class DetailRenderer:
         self.count += len(rows)
         if options.csv:
             for job in rows:
+                extra = extra_id_cells(job, options.show_ids)
+                lead = [job.jobid] + [extra[c.header]
+                                      for c in extra_id_columns(options.show_ids)]
                 for row in self._rows_for(job):
-                    self.writer.writerow([job.jobid]
-                                         + [row[c.index] for c in self.columns])
+                    self.writer.writerow(lead + [row[c.index] for c in self.columns])
         else:
             for job in rows:
-                print("Job %s  [%s]  %s" % (job.jobid, job.state, job.name),
+                # On the job's own line, not as a column: a detail row is about one card
+                # or one host, and the account a job ran under is the same on every one
+                # of them. A column would repeat it down the block to say nothing new.
+                extra = extra_id_cells(job, options.show_ids)
+                print("Job %s  [%s]  %s%s"
+                      % (job.jobid, job.state, job.name,
+                         "".join("  %s" % extra[c.header]
+                                 for c in extra_id_columns(options.show_ids))),
                       file=self.out)
                 unit_rows = self._rows_for(job)
                 if not unit_rows:

@@ -83,6 +83,58 @@ def test_cols_for_views():
     assert all("NODE" in cols and "JOBID" in cols for cols in (everything, cpu, gpu))
 
 
+# --- the --show identity columns --------------------------------------------
+
+def _headers(show=(), specs=None):
+    return [c.header for c in report.summary_columns(specs, show)]
+
+
+def test_show_adds_nothing_by_default():
+    """The columns are wide; the default table must be byte-identical without them."""
+    assert _headers() == [c.header for c in SUMMARY_COLUMNS]
+
+
+def test_show_splices_after_user():
+    """Identity reads left to right: who ran it, under what, then where."""
+    headers = _headers(("account", "partition"))
+    assert headers[:4] == ["JOBID", "USER", "ACCOUNT", "PARTITION"]
+    assert headers[4] == "STATE"
+
+
+def test_show_order_is_fixed_not_typing_order():
+    """Two people running the same report with the flags written differently must get
+    the same table, or it cannot be diffed against itself."""
+    assert _headers(("partition", "account")) == _headers(("account", "partition"))
+
+
+def test_show_all_selects_every_extra():
+    assert _headers(("all",)) == _headers(("account", "partition", "name", "cluster"))
+
+
+def test_show_survives_all_metrics(gpu_record):
+    """--all-metrics varies the profiling block only, so the identity columns in front
+    of it must be untouched -- that is why they are spliced into the same list."""
+    from jobscope.dcgm import catalog
+    wide = _headers(("account", "partition"), list(catalog().all_specs))
+    assert wide[:4] == ["JOBID", "USER", "ACCOUNT", "PARTITION"]
+    assert "TENSOR%" in wide and len(wide) > len(_headers(("account", "partition")))
+
+
+def test_show_columns_survive_a_narrowed_view():
+    """id columns pass through cols_for unconditionally, so --cpu and --gpu keep them."""
+    for view in ("all", "cpu", "gpu"):
+        headers = [c.header
+                   for c in cols_for(report.summary_columns(None, ("account",)), view)]
+        assert "ACCOUNT" in headers, view
+
+
+def test_extra_cells_read_the_row_and_dash_when_empty():
+    from jobscope.models import JobRow
+    job = JobRow(jobid="1", account="kempner_lab", partition="", cluster="odyssey")
+    cells = report.extra_id_cells(job, ("account", "partition", "cluster"))
+    assert cells == {"ACCOUNT": "kempner_lab", "PARTITION": "-", "CLUSTER": "odyssey"}
+
+
 def test_context_pairs_explicit_ids(gpu_record):
     pairs = context_pairs(build_context(Selection(user="alice", jobids=["100"]),
                                         "1 job ID(s)", {"100": gpu_record}))

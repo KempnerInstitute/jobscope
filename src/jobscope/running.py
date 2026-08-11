@@ -58,7 +58,16 @@ RunningMetrics = Dict[int, Dict[str, Dict[str, Optional[float]]]]
 # Note %b (tres-per-node, e.g. "gres/gpu:1") for the GPU request -- NOT %G, which
 # is the numeric group ID. GPU rows come from Prometheus regardless; this field is
 # only the job's allocation as Slurm records it.
-SQUEUE_FORMAT = "%A|%i|%u|%N|%g|%j|%b|%C|%S"
+# %a (account) and %P (partition) are appended rather than inserted: parse_squeue
+# reads these positionally, so a field added in the middle silently shifts every one
+# after it. Both are shown only under --show, and asked for always -- squeue costs the
+# same either way, and a running job must carry the same identity a finished one does.
+SQUEUE_FORMAT = "%A|%i|%u|%N|%g|%j|%b|%C|%S|%a|%P"
+
+# Derived for the same reason slurm.FETCH_FIELD_COUNT is: parse_squeue's length guard
+# skips a short line, so a count that drifted from the format string would drop every
+# running job rather than raise.
+SQUEUE_FIELD_COUNT = SQUEUE_FORMAT.count("|") + 1
 
 class Gpu(NamedTuple):
     """Identity of one schedulable GPU: a whole card, or a single MIG instance."""
@@ -209,9 +218,10 @@ def parse_squeue(stdout: str) -> Dict[int, RunningJob]:
         if not line or line.startswith("JOBID"):
             continue
         parts = line.split("|")
-        if len(parts) < 9:
+        if len(parts) < SQUEUE_FIELD_COUNT:
             continue
-        raw_id, disp_id, user, nodelist, group, name, gres, cpus, start_time = parts[:9]
+        (raw_id, disp_id, user, nodelist, group, name, gres, cpus, start_time,
+         account, partition) = parts[:SQUEUE_FIELD_COUNT]
         try:
             raw_jobid = int(raw_id)
         except ValueError:
@@ -225,6 +235,8 @@ def parse_squeue(stdout: str) -> Dict[int, RunningJob]:
             "name": name,
             "gres": gres,       # as Slurm records it, e.g. "gres/gpu:1"
             "cpus": cpus,
+            "account": account,
+            "partition": partition,
             "start_time": start_time,
             # Runtime drives the --min-elapsed filter, the --runtime-avg window and the
             # --ts range, so derive it once here.
@@ -889,6 +901,8 @@ def running_records(jobs: Dict[int, RunningJob], gpus: Dict[str, Gpu],
             jobid_raw=str(raw_jobid),
             cluster="",
             user=job.get("user", "?"),
+            account=job.get("account", ""),
+            partition=job.get("partition", ""),
         )
     return records
 

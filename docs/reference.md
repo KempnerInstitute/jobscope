@@ -91,6 +91,7 @@ this way, so `jobscope <jobid>` still reports a job running right now.
 | `--plot-ts-overlay [WINDOW]` | overlaid: one panel per GPU, shared axis, one row per node |
 | `--cpu` / `--gpu` | narrow the columns to one resource |
 | `--all-metrics` | the full DCGM catalog |
+| `--show LIST` | extra identity columns — see [Identity columns](#identity-columns) |
 | `--no-dcgm` | drop the exporter columns and query nothing — see [Wide selections](#wide-selections) |
 | `--runtime-avg` | running: average over the job's runtime (the default, said explicitly) |
 | `--instant` | running: the newest scrape instead — one query per metric, so the fast one |
@@ -136,6 +137,49 @@ host.
 
 `--cpu` narrows to the host columns — for *finished* jobs that needs no Prometheus at
 all. `--gpu` narrows to the GPU columns. `--all-metrics` widens the profiling block.
+
+### Identity columns
+
+Every row names the job and its owner. `--show` adds more, comma-separated:
+
+| keyword | column |
+|---|---|
+| `account` | `ACCOUNT` — the Slurm account the job was charged to |
+| `partition` | `PARTITION` — the partition it ran in |
+| `name` | `NAME` — the job name |
+| `cluster` | `CLUSTER` |
+| `all` | all four |
+
+```console
+$ jobscope finished -u alice --show account,partition
+JOBID        USER         ACCOUNT              PARTITION        STATE     NODE  CPU% ...
+38191538     ehuttlin     kempner_wharper_lab  kempner_h100_priority COMPLETED 1     33   ...
+```
+
+They sit after `USER`, so identity reads left to right — who ran it, under what, then
+where — and the order is fixed regardless of the order you type the keywords, so two
+runs of the same report can be diffed against each other.
+
+**They are opt-in because they are wide.** Measured over 31,029 jobs here, an account
+runs to 23 characters and a partition to 22. The table streams — a column's width is
+fixed before the first row is read — so a long value overflows its column and pushes
+the rest of the row right rather than being truncated. Nothing is ever lost or run
+together; the row just stops lining up. `--csv` has no width problem and carries the
+full values.
+
+`--show` composes with everything: `--all-metrics` only widens the profiling block, so
+the identity columns in front of it are unaffected. On `--per-gpu` and `--per-node` the
+extras name the job's block instead of becoming columns, since a detail row is about one
+card and the account is the same on all of them:
+
+```console
+$ jobscope -j 38191538 --show account --per-gpu
+Job 38191538  [COMPLETED]  TestJob2  kempner_wharper_lab
+  NODE             GPU  CPU%  ...
+```
+
+An unknown keyword is an error naming the valid set, rather than a table quietly
+missing a column you asked for.
 
 ### Wide selections
 

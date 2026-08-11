@@ -18,6 +18,7 @@ from jobscope.report import (
     running_timeseries,
 )
 from jobscope.running import (
+    SQUEUE_FIELD_COUNT,
     SQUEUE_FORMAT,
     Gpu,
     RunningSelection,
@@ -54,11 +55,29 @@ def _render_running_cpu(jobs, client, options, out, workers=1):
                            options, out=out)
     match.check()
 
-# squeue -o "%A|%i|%u|%N|%g|%j|%b|%C|%S": raw id, display id, user, nodelist,
-# group, name, gres, cpus, start. For array element 12345_6 the raw id differs --
-# and Prometheus keys on the raw one, which is the whole reason %A is read.
-ARRAY_LINE = "34843629|34843528_6|alice|holygpu01|kempner|train|gpu:1|16|2026-07-24T09:00:00"
-PLAIN_LINE = "34622920|34622920|bob|holygpu02|kempner|infer|gpu:2|8|2026-07-24T10:00:00"
+# squeue -o "%A|%i|%u|%N|%g|%j|%b|%C|%S|%a|%P": raw id, display id, user, nodelist,
+# group, name, gres, cpus, start, account, partition. For array element 12345_6 the
+# raw id differs -- and Prometheus keys on the raw one, which is why %A is read.
+def squeue_line(raw="1", disp="1", user="alice", node="node01", group="g", name="n",
+                gres="gpu:1", cpus="8", start="2026-07-24T09:00:00",
+                account="kempner_lab", partition="gpu") -> str:
+    """One squeue line, in :data:`SQUEUE_FORMAT` order.
+
+    Built rather than spelled out, and checked against the format string: parse_squeue
+    reads these positionally and *skips* a line with too few fields, so a literal that
+    fell behind the format would silently drop every running job instead of failing.
+    """
+    fields = [raw, disp, user, node, group, name, gres, cpus, start, account, partition]
+    assert len(fields) == SQUEUE_FIELD_COUNT, (
+        "this helper builds %d fields; SQUEUE_FORMAT asks for %d"
+        % (len(fields), SQUEUE_FIELD_COUNT))
+    return "|".join(fields)
+
+
+ARRAY_LINE = squeue_line("34843629", "34843528_6", "alice", "holygpu01", "kempner",
+                         "train", "gpu:1", "16", "2026-07-24T09:00:00")
+PLAIN_LINE = squeue_line("34622920", "34622920", "bob", "holygpu02", "kempner",
+                         "infer", "gpu:2", "8", "2026-07-24T10:00:00")
 
 
 def test_parse_squeue_keys_on_the_raw_id_for_array_elements():
@@ -76,7 +95,8 @@ def test_parse_squeue_raw_and_display_agree_for_plain_jobs():
 
 
 def test_parse_squeue_skips_headers_short_and_unparseable_lines():
-    text = "\n".join(["JOBID|...", "", "too|few|fields", "notanid|x|u|n|g|j|G|C|S", PLAIN_LINE])
+    text = "\n".join(["JOBID|...", "", "too|few|fields",
+                     squeue_line(raw="notanid"), PLAIN_LINE])
     assert list(parse_squeue(text)) == [34622920]
 
 
@@ -89,18 +109,35 @@ def test_squeue_format_asks_for_gres_not_the_group_id():
     assert "%b" in SQUEUE_FORMAT and "%G" not in SQUEUE_FORMAT
 
 
+def test_parse_squeue_reads_the_account_and_partition():
+    """A running job has to carry the same identity a finished one does, or --show
+    would answer for half a mixed selection."""
+    job = parse_squeue(squeue_line(account="kempner_wharper_lab",
+                                   partition="kempner_h100"))[1]
+    assert job["account"] == "kempner_wharper_lab"
+    assert job["partition"] == "kempner_h100"
+
+
+def test_the_squeue_format_and_the_parser_agree_on_how_many_fields():
+    """parse_squeue *skips* a short line, so a count that fell behind the format string
+    would drop every running job rather than raise."""
+    assert SQUEUE_FIELD_COUNT == len(SQUEUE_FORMAT.split("|"))
+    assert SQUEUE_FORMAT.endswith("|%a|%P")     # appended, never inserted
+    assert list(parse_squeue(squeue_line(raw="7", disp="7"))) == [7]
+
+
 def test_parse_squeue_records_the_gres_request():
     assert parse_squeue(ARRAY_LINE)[34843629]["gres"] == "gpu:1"
 
 
 def test_parse_squeue_keeps_the_whole_nodelist():
     # Splitting on "," would mangle a compressed range like holygpu8a[10402,10404].
-    line = "1|1|alice|holygpu8a[10402,10404]|g|n|gpu:2|8|2026-07-24T09:00:00"
+    line = squeue_line(node="holygpu8a[10402,10404]", gres="gpu:2")
     assert parse_squeue(line)[1]["node"] == "holygpu8a[10402,10404]"
 
 
 def test_parse_squeue_tolerates_a_missing_start_time():
-    line = "1|1|alice|node01|g|n|gpu:1|8|N/A"
+    line = squeue_line(start="N/A")
     job = parse_squeue(line)[1]
     assert job["start_epoch"] is None and job["elapsed_seconds"] is None
 

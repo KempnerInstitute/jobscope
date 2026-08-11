@@ -28,11 +28,14 @@ from . import config, dcgm, plot, probe, report, rows
 from .errors import JobscopeError
 from .models import GPU_LEVEL, JOB_LEVEL, NODE_LEVEL
 from .report import (
+    SHOW_ALL,
+    SHOW_KEYWORDS,
     DetailRenderer,
     RenderOptions,
     SummaryRenderer,
     describe,
     describe_dcgm,
+    resolve_show,
     timeseries_eff,
     timeseries_stats,
     verify_report,
@@ -420,6 +423,14 @@ def _add_report_args(report) -> None:
                                  "even for finished jobs, instead of the summary jobstats "
                                  "stored in sacct's AdminComment (slower; use to compare "
                                  "the two, or where jobstats is not deployed)"))
+    cols.add_argument("--show", dest="show", metavar="LIST", default=None,
+                      help=_help("extra identity columns, comma-separated",
+                                 "%s, or 'all'. Added after USER on the per-job table "
+                                 "and to --csv; on --per-gpu/--per-node they name the "
+                                 "job's block rather than repeating down it. These are "
+                                 "wide -- an account runs to 23 characters -- which is "
+                                 "why they are asked for rather than always shown"
+                                 % ", ".join(SHOW_KEYWORDS)))
     cols.add_argument("--no-dcgm", dest="no_dcgm", action="store_true",
                       help=_help("drop the GPU columns Prometheus serves",
                                  "leaving what sacct already carried: CPU%%/MEM%%/GPU%%/"
@@ -782,6 +793,26 @@ _FINISHED_ONLY = (("-D/--days", "-D", "days"), ("-N/--lastn", "-N", "lastn"),
                   ("-E/--endtime", "-E", "endtime"))
 
 
+def _show_ids(value: Optional[str]) -> Tuple[str, ...]:
+    """``--show``'s comma list, validated against the render layer's vocabulary.
+
+    Named back rather than silently dropped: a typo'd column is one the reader then
+    goes looking for in the output, and "--show has no acount" beats a table that
+    quietly lacks one. The same choice ``[metrics]`` makes about its unknown keys.
+    """
+    if not value:
+        return ()
+    wanted = [word.strip().lower() for word in value.split(",") if word.strip()]
+    known = set(SHOW_KEYWORDS) | {SHOW_ALL}
+    unknown = [word for word in wanted if word not in known]
+    if unknown:
+        raise JobscopeError(
+            "--show has no %s; it takes %s, or '%s' for all of them"
+            % (", ".join(sorted(set(unknown))), ", ".join(SHOW_KEYWORDS),
+               SHOW_ALL))
+    return resolve_show(wanted)
+
+
 def _min_elapsed(args, cfg: config.Config) -> int:
     """The runtime floor in seconds: the flag if given, else the configured default.
 
@@ -1130,6 +1161,7 @@ def handle_report(args) -> None:
     no_dcgm = getattr(args, "no_dcgm", False)
     if no_dcgm:
         specs = []
+    show_ids = _show_ids(getattr(args, "show", None))
     # --ts's own view resolution: combined (GPU + CPU%/MEM% together) is the
     # default -- bare --ts behaves as --cpu --all-metrics --ts would. --cpu alone (no
     # --all-metrics) narrows to CPU-only; --all-metrics alone (no --cpu) narrows to
@@ -1147,6 +1179,7 @@ def handle_report(args) -> None:
         cfg.metrics.extended if args.all_metrics else cfg.metrics.timeseries))
     options = RenderOptions(
         view=view, show_dcgm=show_dcgm, csv=args.csv, header=args.header,
+        show_ids=show_ids,
         # time_weighted is left at its default here and set below, once resolve() has
         # both the records and the cap: no time-series path reads it, and neither the mode
         # nor the flag alone can answer it.

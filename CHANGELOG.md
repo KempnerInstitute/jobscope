@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### New `--show`: account, partition, name and cluster as table columns
+
+Every row already named the job and its owner. `--show account,partition` adds the
+other two identity fields, `--show all` adds those plus `NAME` and `CLUSTER`, and an
+unknown keyword is an error naming the valid set.
+
+```console
+$ jobscope finished -u alice --show account,partition
+JOBID        USER         ACCOUNT              PARTITION        STATE     NODE  CPU% ...
+```
+
+They sit after `USER` in a fixed order regardless of how the keywords are typed, so two
+runs of the same report can be diffed. `--all-metrics` is unaffected — it varies only
+the profiling block — and `--csv` carries the full values. On `--per-gpu`/`--per-node`
+they name the job's block rather than becoming columns, since a detail row is about one
+card and the account is the same on all of them.
+
+**Opt-in because they are wide.** Measured over 31,029 jobs, an account runs to 23
+characters and a partition to 22. The table streams, so a column's width is fixed before
+the first row is read and there is nothing to auto-size to: a long value overflows and
+pushes the row right rather than being truncated. Nothing is lost or run together.
+
+Neither field was previously collected — `sacct` gains `Account,Partition` and `squeue`
+gains `%a|%P`, both fetched unconditionally, since sacct charges for rows and not for
+columns. Both parsers now derive their field count from the format string they were
+built for: a count that drifted did not raise, it made the length guard skip every row,
+so a selection matching thousands of jobs would have come back empty in silence.
+
 ### A wide selection now costs a fraction of what it did, and says so up front
 
 **Who this affects:** anyone selecting more than a few hundred finished jobs —

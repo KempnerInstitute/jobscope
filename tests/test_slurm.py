@@ -309,12 +309,10 @@ def test_select_jobs_days_desc(monkeypatch):
 
 
 def test_fetch_parses_record(monkeypatch):
-    summary = make_jobstats(GPU_STATS)
-    line = "|".join(["100", "COMPLETED", "train", "01:00:00", "1",
-                     "billing=2,cpu=2,gres/gpu=2,mem=16G",
-                     "2020-01-01T00:00:00", "2020-01-01T01:00:00", "100", "odyssey",
-                     "alice", summary])
-    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line + "\n")
+    line = _record_line("100", make_jobstats(GPU_STATS),
+                        tres="billing=2,cpu=2,gres/gpu=2,mem=16G",
+                        account="kempner_wharper_lab", partition="kempner_h100")
+    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line)
     records = fetch(["100"], None)
     record = records["100"]
     assert record.state == "COMPLETED"
@@ -323,6 +321,25 @@ def test_fetch_parses_record(monkeypatch):
     assert record.duration == 3600
     assert record.user == "alice"
     assert record.stats == GPU_STATS
+    # AdminComment is last precisely so its base64 blob cannot be split on; the two
+    # fields added before it must not have eaten into it.
+    assert record.account == "kempner_wharper_lab"
+    assert record.partition == "kempner_h100"
+
+
+def test_the_field_list_and_the_parser_agree_on_how_many_fields():
+    """The one failure here that does not raise.
+
+    A maxsplit that drifted from FETCH_FIELDS would make the parser's length guard
+    `continue` on every row, and a selection matching thousands of jobs would come
+    back empty with no error anywhere. Both are derived from the same string now;
+    this pins that they stay derived.
+    """
+    assert slurm.FETCH_FIELD_COUNT == len(slurm.FETCH_FIELDS.split(","))
+    assert slurm.FETCH_FIELDS.split(",")[-1] == "AdminComment"
+    records = {}
+    slurm._parse_fetch_lines(_record_line("100", make_jobstats(GPU_STATS)), records)
+    assert list(records) == ["100"]
 
 
 def test_fetch_empty():
@@ -332,19 +349,31 @@ def test_fetch_empty():
 def test_fetch_aliases_array_base_id(monkeypatch):
     # sacct returns the record keyed under the base id; fetch must alias it back
     # to the bracketed id the caller asked for.
-    line = "|".join(["18114115", "COMPLETED", "arr", "00:10:00", "1", "gres/gpu=1",
-                     "2020-01-01T00:00:00", "2020-01-01T00:10:00", "18114115",
-                     "odyssey", "alice", make_jobstats(GPU_STATS)])
-    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line + "\n")
+    line = _record_line("18114115", make_jobstats(GPU_STATS), name="arr",
+                        elapsed="00:10:00", end="2020-01-01T00:10:00")
+    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line)
     records = fetch(["18114115_[0-719%64]"], None)
     assert "18114115_[0-719%64]" in records
     assert records["18114115_[0-719%64]"].state == "COMPLETED"
 
 
-def _record_line(jobid: str, summary: str, name: str = "train") -> str:
-    return "|".join([jobid, "COMPLETED", name, "01:00:00", "1", "gres/gpu=1",
-                     "2020-01-01T00:00:00", "2020-01-01T01:00:00", jobid,
-                     "odyssey", "alice", summary]) + "\n"
+def _record_line(jobid: str, summary: str, name: str = "train",
+                 tres: str = "gres/gpu=1", elapsed: str = "01:00:00",
+                 end: str = "2020-01-01T01:00:00",
+                 account: str = "kempner_lab", partition: str = "gpu") -> str:
+    """One bulk-fetch line, in :data:`slurm.FETCH_FIELDS` order.
+
+    The single builder for these. Three tests used to spell the order out themselves,
+    so a field added to FETCH_FIELDS meant finding all three -- and missing one does
+    not fail loudly, it makes the parser's length guard skip the row.
+    """
+    fields = [jobid, "COMPLETED", name, elapsed, "1", tres,
+              "2020-01-01T00:00:00", end, jobid, "odyssey", "alice",
+              account, partition, summary]
+    assert len(fields) == slurm.FETCH_FIELD_COUNT, (
+        "this helper builds %d fields; FETCH_FIELDS asks sacct for %d"
+        % (len(fields), slurm.FETCH_FIELD_COUNT))
+    return "|".join(fields) + "\n"
 
 
 def _fake_fetch_run_capture(calls, summary):

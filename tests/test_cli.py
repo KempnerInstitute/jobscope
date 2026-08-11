@@ -316,6 +316,63 @@ def test_finished_cpu_view(monkeypatch, capsys, cpu_record):
     assert "200" in out and "CPU%" in out and "SM_ACT%" not in out
 
 
+def _record_with_identity(record, **kw):
+    return dataclasses.replace(record, **kw)
+
+
+def test_show_adds_the_identity_columns_to_the_table(monkeypatch, capsys, gpu_record):
+    _patch_sacct(monkeypatch, {"100": _record_with_identity(
+        gpu_record, account="kempner_wharper_lab", partition="kempner_h100")})
+    main(["finished", "--no-dcgm", "--show", "account,partition", "-D", "1", "-u", "bob"])
+    out = capsys.readouterr().out
+    assert "ACCOUNT" in out and "PARTITION" in out
+    assert "kempner_wharper_lab" in out and "kempner_h100" in out
+
+
+def test_without_show_the_table_is_unchanged(monkeypatch, capsys, gpu_record):
+    """These columns are wide enough that appearing uninvited would be the bug."""
+    _patch_sacct(monkeypatch, {"100": _record_with_identity(
+        gpu_record, account="kempner_wharper_lab", partition="kempner_h100")})
+    main(["finished", "--no-dcgm", "-D", "1", "-u", "bob"])
+    out = capsys.readouterr().out
+    assert "ACCOUNT" not in out and "kempner_wharper_lab" not in out
+
+
+def test_show_reaches_the_csv_at_full_width(monkeypatch, capsys, gpu_record):
+    """CSV has no column-width problem, so nothing is abbreviated there."""
+    _patch_sacct(monkeypatch, {"100": _record_with_identity(
+        gpu_record, account="kempner_wharper_lab", partition="kempner_h100_priority")})
+    main(["finished", "--no-dcgm", "--show", "account,partition", "--csv",
+          "-D", "1", "-u", "bob"])
+    out = capsys.readouterr().out
+    assert "JOBID,USER,ACCOUNT,PARTITION,STATE" in out
+    assert "kempner_wharper_lab,kempner_h100_priority" in out
+
+
+def test_show_names_the_job_block_rather_than_repeating_down_it(monkeypatch, capsys,
+                                                                gpu_record):
+    """A detail row is about one card; the account is the same on every one of them."""
+    _patch_sacct(monkeypatch, {"100": _record_with_identity(
+        gpu_record, account="kempner_wharper_lab", partition="kempner_h100")})
+    main(["finished", "--no-dcgm", "--show", "account", "--per-gpu", "-D", "1", "-u", "bob"])
+    out = capsys.readouterr().out
+    assert "Job 100" in out and "kempner_wharper_lab" in out
+    # Once on the block line, not once per card.
+    assert out.count("kempner_wharper_lab") == 1
+    assert "ACCOUNT" not in out          # and not as a column header either
+
+
+def test_show_rejects_an_unknown_column_by_name(monkeypatch, capsys, gpu_record):
+    _patch_sacct(monkeypatch, {"100": gpu_record})
+    with pytest.raises(SystemExit):
+        main(["finished", "--show", "acount", "-D", "1", "-u", "bob"])
+    err = capsys.readouterr().err
+    assert "--show has no acount" in err
+    # The error has to name what *is* spellable, or the reader is left guessing.
+    for word in ("account", "partition", "name", "cluster"):
+        assert word in err
+
+
 def test_no_dcgm_never_contacts_prometheus(monkeypatch, capsys, gpu_record):
     """The whole point of the flag: a wide selection stops costing queries, rather than
     costing the same queries more slowly."""

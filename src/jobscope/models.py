@@ -239,6 +239,13 @@ class JobRow:
     nodes: str = "-"
     name: str = "?"
     runtime: str = "-"
+    # Identity beyond the job and its owner. Carried always and shown only under
+    # --show: they cost nothing to fetch (sacct charges for rows, not columns) and a
+    # row that had to be rebuilt to answer "which account was that?" would defeat the
+    # point of building it once.
+    account: str = ""
+    partition: str = ""
+    cluster: str = ""
     gpus: int = 0
     duration: Optional[int] = None
     # Whether the scheduler returned a record for this jobid at all. False means every
