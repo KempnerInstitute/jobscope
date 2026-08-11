@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### `--eff` and `--verify` now judge the last 3 hours by default
+
+Given no window of their own, both used to reduce over the job's **whole runtime**.
+That answers a different question from the one they are asked: a job that ran well for
+two days and stalled an hour ago still averages well, so a verdict over its lifetime
+says it is fine. They now look back over `[defaults] verdict_window`, `180m` by default:
+
+```console
+$ jobscope -j 38138738 --verify
+  Window:   16:16 .. 19:16   3h01m          # was the job's full runtime
+```
+
+An explicit span still wins (`--verify 30m`), and the window is settable per site:
+
+```toml
+[defaults]
+verdict_window = "180m"
+```
+
+**A bare `--ts` and `--plot-ts` are deliberately unchanged** and still mean the whole
+run. Those dump or chart a series rather than judging one, and truncating them would
+have silently changed what `jobscope plot` is handed.
+
+One knock-on: `--verify`'s ladder shows the collected window as its first rung, so that
+column is now `3h` rather than the full job — with `[report] verify_windows`' `2h` and
+`30m` sitting inside it, which is what makes them rungs *below* it.
+
 ### New `--show`: account, partition, name and cluster as table columns
 
 Every row already named the job and its owner. `--show account,partition` adds the

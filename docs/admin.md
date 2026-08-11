@@ -45,6 +45,7 @@ What it detects, all measured rather than assumed:
 | `[prometheus] max_queries_per_second` | pacing for the running view's per-job fan-out; `0` disables it |
 | `[prometheus] query_burst` | how many queries run unpaced first — keeps small commands untouched |
 | `[defaults] max_running_jobs` | the job count a running selection refuses past, as a typo backstop |
+| `[defaults] verdict_window` | how far back `--eff`/`--verify` look with no window given (`180m`); a bare `--ts` still means the whole run |
 | `[site]` labels | probed against real series, trying `instance`/`host`/`node`/`nodename` |
 | `[metrics]` lists | narrowed to series this server carries, so a missing exporter does not leave columns blank forever |
 | `[eff.floor.power]` | per GPU model: idle p90 vs busy p10, floor between them |

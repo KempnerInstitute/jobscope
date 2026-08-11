@@ -1002,11 +1002,31 @@ def _reclaim_jobid_after_ts(args) -> None:
           "e.g. %s 60m" % (str(value), flag, flag), file=sys.stderr)
 
 
-def _ts_window(args) -> Optional[int]:
-    """``--ts WINDOW`` / ``--plot_ts WINDOW`` in seconds, or None for the whole run."""
+def _ts_window(args, cfg: Optional[config.Config] = None) -> Optional[int]:
+    """The collection window in seconds, or ``None`` for the job's whole run.
+
+    An explicit ``--ts 90m`` / ``--verify 30m`` always wins. Given nothing, the answer
+    depends on what is being asked:
+
+    * ``--eff`` and ``--verify`` fall back to ``[defaults] verdict_window`` (180m). Both
+      ask whether a job is wasting its allocation *now*, and a mean over a whole runtime
+      answers a different question -- a job that ran well for two days and stalled an
+      hour ago still averages well.
+    * everything else keeps meaning the whole run. A bare ``--ts``/``--plot-ts`` dumps
+      or charts a series rather than judging one, and silently truncating it to three
+      hours would change what ``jobscope plot`` is handed.
+
+    ``cfg`` is optional so the many call sites that only need the explicit value -- and
+    the tests that predate the default -- keep working; without it the fallback is the
+    built-in rather than the site's.
+    """
     flag, value = _ts_value(args)
     if value in (None, False, True):
-        return None
+        if not (getattr(args, "verify", False) or getattr(args, "eff", False)):
+            return None
+        window = (cfg.defaults.verdict_window if cfg is not None
+                  else config.DEFAULT_VERDICT_WINDOW)
+        return parse_duration(window)
     try:
         return parse_duration(value)
     except JobscopeError:
@@ -1047,8 +1067,14 @@ def _stats_timeseries(text: str, options, level: str) -> None:
         timeseries_stats(found[1], plot.metric_cols(found[0]), options, level=level)
 
 
-def _plot_timeseries(text: str, args) -> None:
+def _plot_timeseries(text: str, args, window: Optional[int] = None) -> None:
     """Chart the series ``--plot_ts`` just emitted, in place of writing its CSV.
+
+    ``window`` is what was actually collected, taken from the caller's RenderOptions
+    rather than re-resolved from ``args`` here. The title exists to say which span is
+    charted, so deriving it a second way is how it comes to disagree with the data
+    under it -- which is exactly what would have happened once the window gained a
+    configurable default.
 
     The two guards are here rather than in the renderer because only the emitted CSV
     knows how many nodes and jobs it covers, and because the fix for each is a flag on
@@ -1078,7 +1104,6 @@ def _plot_timeseries(text: str, args) -> None:
             % (len(nodes), ", ".join(nodes)))
     # Name what is being charted. Without it a windowed chart is indistinguishable
     # from a whole-run one -- the x axis counts minutes from the window's own start.
-    window = _ts_window(args)
     # A count once there is more than one, since the overlay labels each row with its
     # own node and naming only the first here would contradict the rows below it.
     where = nodes[0] if len(nodes) == 1 else ("%d nodes" % len(nodes) if nodes else "?")
@@ -1189,7 +1214,7 @@ def handle_report(args) -> None:
         # nor the flag alone can answer it.
         plot_avgeff=not args.no_plot,
         nodename=args.nodename, gpu_ids=tuple(plot.gpu_list(args.gpuid)) if args.gpuid else (),
-        window=_ts_window(args), verify_full=args.verify_full,
+        window=_ts_window(args, cfg), verify_full=args.verify_full,
         color=_want_color(args), combined=ts_combined,
         worst_jobs=cfg.defaults.worst_jobs,
         long_running=parse_duration(cfg.defaults.long_running),
@@ -1246,7 +1271,7 @@ def handle_report(args) -> None:
         emit_timeseries(request, cfg, timeout, workers, ts_specs, args.step, options,
                         out=buffer)
         if args.plot_ts:
-            _plot_timeseries(buffer.getvalue(), args)
+            _plot_timeseries(buffer.getvalue(), args, options.window)
         elif args.eff:
             # The unit of "which jobs are idle" is the job, so that is the default
             # level; --stats node grades hosts on the same rule.

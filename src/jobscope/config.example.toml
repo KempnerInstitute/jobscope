@@ -69,6 +69,12 @@ state = "completed"
 # Runtime floor for the running view: younger jobs are hidden, because a job still
 # loading data or compiling kernels reads as idle. "0s" shows everything.
 min_elapsed = "10m"
+# How far back --eff and --verify look when neither was given a window. Both ask
+# whether a job is wasting its allocation *now*, and a mean over a whole runtime
+# answers a different question -- a job that ran well for two days and stalled an hour
+# ago still averages well. A bare --ts/--plot-ts is unaffected: those dump or chart a
+# series rather than judging one.
+verdict_window = "180m"
 # Concurrent Prometheus query-sets for the GPU view.
 workers = 8
 # Seconds per sacct / Prometheus call (0 disables the sacct timeout).

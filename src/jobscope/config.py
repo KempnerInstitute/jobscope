@@ -52,11 +52,25 @@ DEFAULT_QUERY_BURST = 200
 # selection is thousands of jobs, and the pacing above would work through it for minutes.
 DEFAULT_MAX_RUNNING_JOBS = 2000
 
-# --verify's rungs below the whole run, widest first. Two, because the ladder has to show a
-# direction and three columns of numbers is already a lot to read; and these two because an
-# hour is the span a stalled job becomes worth acting on and half an hour is the shortest
-# window with enough samples at a 60s scrape to mean anything.
+# --verify's rungs below its collected window, widest first. Two, because the ladder has
+# to show a direction and three columns of numbers is already a lot to read; and these two
+# because an hour is the span a stalled job becomes worth acting on and half an hour is the
+# shortest window with enough samples at a 60s scrape to mean anything. Both sit inside
+# DEFAULT_VERDICT_WINDOW, which is what makes them rungs *below* it rather than a
+# second, wider question.
 DEFAULT_VERIFY_WINDOWS: Tuple[Tuple[str, int], ...] = (("2h", 7200), ("30m", 1800))
+# How far back --eff and --verify look when neither was given a window of its own.
+#
+# Those two ask a question about *now* -- is this job wasting its allocation, and is it
+# still doing so -- and a mean over a job's whole runtime answers a different one: a job
+# that ran well for two days and stalled an hour ago still averages well. Three hours is
+# long enough to be about the job rather than about a checkpoint pause, and short enough
+# that a verdict is about the present.
+#
+# Deliberately not applied to a bare --ts or --plot-ts. Those dump or chart a series
+# rather than judging one, and truncating them to three hours would silently change what
+# `jobscope plot` is given.
+DEFAULT_VERDICT_WINDOW = "180m"
 # The `finished` window when no -D/-N/-S/-E is given.
 DEFAULT_DAYS = 1
 # Which job endings `finished` reports without -t. See slurm.STATE_GROUPS.
@@ -712,6 +726,9 @@ class Defaults:
     # How many running jobs one selection will sweep before refusing. See
     # DEFAULT_MAX_RUNNING_JOBS -- a backstop, deliberately far above any real partition.
     max_running_jobs: int = DEFAULT_MAX_RUNNING_JOBS
+    # What --eff and --verify look back over when given no window. See
+    # DEFAULT_VERDICT_WINDOW; a bare --ts is deliberately not covered.
+    verdict_window: str = DEFAULT_VERDICT_WINDOW
 
 
 # The summary block's sections, in the order they print by default. Each answers a
@@ -750,10 +767,12 @@ class Report:
     """
 
     sections: Tuple[str, ...] = REPORT_SECTIONS
-    # --verify's window ladder, narrowest last. The whole run is always the first rung and
-    # is not listed here. Two by default: enough to show a trend without making the table
-    # wide, and 30m is 31 samples at a 60s scrape -- thin, which is why max and the
-    # idle-stretch figure carry the decision rather than the mean alone.
+    # --verify's window ladder, narrowest last. The *collected* window is always the
+    # first rung and is not listed here -- that is DEFAULT_VERDICT_WINDOW (180m) unless
+    # --verify was given a span of its own, and it was the job's whole runtime before
+    # that default existed. Two rungs by default: enough to show a trend without making
+    # the table wide, and 30m is 31 samples at a 60s scrape -- thin, which is why max and
+    # the idle-stretch figure carry the decision rather than the mean alone.
     verify_windows: Tuple[Tuple[str, int], ...] = DEFAULT_VERIFY_WINDOWS
 
 
@@ -1100,6 +1119,8 @@ def load_config(path: Optional[str] = None,
         long_running=str(dfl.get("long_running", DEFAULT_LONG_RUNNING)),
         max_running_jobs=_positive(dfl.get("max_running_jobs", DEFAULT_MAX_RUNNING_JOBS),
                                    "[defaults] max_running_jobs"),
+        verdict_window=_duration(dfl.get("verdict_window", DEFAULT_VERDICT_WINDOW),
+                                 "[defaults] verdict_window"),
     )
     return Config(
         prometheus_url=(env.get(PROM_URL_ENV) or prom.get("url")) or None,
@@ -1148,6 +1169,22 @@ def _non_negative(raw, where: str) -> int:
     if value < 0:
         raise JobscopeError("%s cannot be negative, got %d" % (where, value))
     return value
+
+
+def _duration(raw, where: str) -> str:
+    """A duration-valued key, checked here and kept as written.
+
+    Validated at load rather than at use, because this one is read by every ``--verify``
+    and ``--eff``: a typo that surfaced at render time would look like a broken report
+    rather than a bad line of config. Returned as the string it was written as, so
+    ``jobscope config`` echoes back what the file says.
+    """
+    text = str(raw).strip()
+    try:
+        parse_duration(text)
+    except JobscopeError as exc:
+        raise JobscopeError("%s: %s" % (where, exc))
+    return text
 
 
 def _positive(raw, where: str) -> int:

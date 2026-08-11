@@ -7,9 +7,10 @@ import sys
 
 import pytest
 
-from jobscope import cli, dcgm
+from jobscope import cli, config, dcgm
 from jobscope import select as select_mod
 from jobscope.cli import build_parser, build_request, default_mode, main, resolve_argv
+from jobscope.config import parse_duration
 from jobscope.errors import JobscopeError
 from jobscope.select import FINISHED, JOBIDS, RUNNING
 
@@ -1860,12 +1861,63 @@ def test_verify_takes_a_window_through_the_same_machinery_as_ts(capsys):
         _reclaim_jobid_after_ts(args)
         return args
 
-    assert _ts_window(parsed(["--verify"])) is None
     assert _ts_window(parsed(["--verify", "2h"])) == 7200
     # The regression: this used to raise "--verify takes a duration with a unit".
     reclaimed = parsed(["--verify", "30012345"])
     assert reclaimed.jobids == ["30012345"] and reclaimed.verify is True
     assert "as a job ID" in capsys.readouterr().err
+
+
+def _window_for(argv):
+    """The collection window --ts/--verify/--eff resolves to, with no config loaded."""
+    from jobscope.cli import _reclaim_jobid_after_ts, _ts_window
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(argv)
+    _reclaim_jobid_after_ts(args)
+    return _ts_window(args)
+
+
+def test_a_bare_verify_or_eff_looks_back_over_the_verdict_window():
+    """Both ask whether a job is wasting its allocation *now*, and a mean over a whole
+    runtime answers a different question -- a job that ran well for two days and stalled
+    an hour ago still averages well."""
+    three_hours = parse_duration(config.DEFAULT_VERDICT_WINDOW)
+    assert _window_for(["--verify"]) == three_hours
+    assert _window_for(["--ts", "--eff"]) == three_hours
+
+
+def test_an_explicit_window_still_wins():
+    assert _window_for(["--verify", "30m"]) == 1800
+    assert _window_for(["--ts", "30m", "--eff"]) == 1800
+
+
+def test_a_bare_ts_still_means_the_whole_run():
+    """The default is deliberately not applied here: --ts and --plot-ts dump or chart a
+    series rather than judging one, and truncating them would change what
+    `jobscope plot` is handed."""
+    assert _window_for(["--ts"]) is None
+    assert _window_for(["--plot-ts"]) is None
+    assert _window_for(["--ts", "--stats"]) is None
+
+
+def test_the_verdict_window_is_configurable():
+    from jobscope.cli import _reclaim_jobid_after_ts, _ts_window
+    _, subparsers = build_parser()
+    args = subparsers.choices[RUNNING].parse_intermixed_args(["--verify"])
+    _reclaim_jobid_after_ts(args)
+    cfg = dataclasses.replace(
+        config.get_config(),
+        defaults=dataclasses.replace(config.get_config().defaults,
+                                     verdict_window="45m"))
+    assert _ts_window(args, cfg) == 2700
+
+
+def test_a_bad_verdict_window_is_a_config_error_at_load():
+    """Read by every --verify, so a typo must fail as a bad line of config rather than
+    surfacing later as a broken report."""
+    with pytest.raises(JobscopeError) as exc:
+        config._duration("3 hours", "[defaults] verdict_window")
+    assert "[defaults] verdict_window" in str(exc.value)
 
 
 def test_verify_is_exclusive_with_the_other_granularities():
