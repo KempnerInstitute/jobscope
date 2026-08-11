@@ -162,6 +162,13 @@ EXTRA_ID_COLUMNS: Dict[str, Tuple[Column, str]] = {
 SHOW_KEYWORDS: Tuple[str, ...] = tuple(EXTRA_ID_COLUMNS)
 SHOW_ALL = "all"
 
+# What `all` selects, which is deliberately not every keyword: `name` is excluded.
+# A job name is free text -- often templated, frequently longer than the account and
+# partition put together, and carrying no information the reader is scanning a *table*
+# for. `all` is meant to be the useful wide view, not the widest possible one, so the
+# name stays available as `--show name` for whoever actually wants it.
+SHOW_ALL_KEYWORDS: Tuple[str, ...] = tuple(k for k in SHOW_KEYWORDS if k != "name")
+
 
 def resolve_show(chosen) -> Tuple[str, ...]:
     """Selected keywords in :data:`SHOW_KEYWORDS` order, whatever order they were typed.
@@ -169,10 +176,12 @@ def resolve_show(chosen) -> Tuple[str, ...]:
     Fixed rather than as-given so two people running the same report with the flags
     written differently get the same columns in the same places -- a table whose column
     order depended on typing order could not be diffed against itself.
+
+    ``all`` means :data:`SHOW_ALL_KEYWORDS`; naming `name` alongside it still adds it.
     """
     wanted = set(chosen or ())
     if SHOW_ALL in wanted:
-        return SHOW_KEYWORDS
+        wanted.update(SHOW_ALL_KEYWORDS)
     return tuple(key for key in SHOW_KEYWORDS if key in wanted)
 
 

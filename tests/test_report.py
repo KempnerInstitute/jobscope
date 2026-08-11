@@ -107,8 +107,18 @@ def test_show_order_is_fixed_not_typing_order():
     assert _headers(("partition", "account")) == _headers(("account", "partition"))
 
 
-def test_show_all_selects_every_extra():
-    assert _headers(("all",)) == _headers(("account", "partition", "name", "cluster"))
+def test_show_all_leaves_out_the_job_name():
+    """`all` is the useful wide view, not the widest possible one.
+
+    A job name is free text -- often templated and longer than account and partition
+    together -- and carries nothing a reader scanning a table is looking for. It stays
+    reachable by name for whoever wants it.
+    """
+    assert _headers(("all",)) == _headers(("account", "partition", "cluster"))
+    assert "NAME" not in _headers(("all",))
+    assert "NAME" in _headers(("name",))
+    # Asked for alongside `all`, it still appears -- `all` widens, it does not exclude.
+    assert "NAME" in _headers(("all", "name"))
 
 
 def test_show_survives_all_metrics(gpu_record):

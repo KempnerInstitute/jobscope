@@ -148,7 +148,11 @@ Every row names the job and its owner. `--show` adds more, comma-separated:
 | `partition` | `PARTITION` — the partition it ran in |
 | `name` | `NAME` — the job name |
 | `cluster` | `CLUSTER` |
-| `all` | all four |
+| `all` | `account`, `partition`, `cluster` — **not** `name` |
+
+`all` is the useful wide view rather than the widest possible one. A job name is free
+text, often templated and longer than the account and partition together, and carries
+nothing you are scanning a table for; ask for it with `--show name` when you want it.
 
 ```console
 $ jobscope finished -u alice --show account,partition

@@ -128,12 +128,34 @@ SLICE_SECONDS = 86400
 
 # How many jobs a streamed chunk carries, which is a different question from how many
 # one sacct call fetches: this one is about how soon the first row appears, not about
-# what the server is asked. The two were briefly the same number and that was the bug --
-# a day fetched in one call is right, a day *yielded* in one piece means every metric
-# query runs before anything is drawn. 200 is what the id-batched path used, and the
-# report streamed acceptably at it for the same reason it does here: it is roughly one
-# screen of rows and, at two queries a job, a few seconds of fan-out.
-STREAM_CHUNK = 200
+# what the server is asked.
+#
+# Sized for latency, which is the only thing it controls. dcgm.compute_dcgm is a barrier
+# -- every job in a chunk finishes before any of its rows is drawn -- so the chunk is
+# exactly the wait before the table starts moving, at roughly two queries a job against
+# [prometheus] max_queries_per_second.
+#
+# This was briefly 200, inherited from the id-batched path where a chunk *was* one sacct
+# call and the number answered an argv-size question instead. Measured on one user's
+# 8983-job day:
+#
+#   chunk   queries per 1000 jobs   first row
+#     200                   2,011        8.0s
+#      25                   2,092        4.9s   <-
+#   (before any batching:   3,000)
+#
+# Smaller chunks cost discovery queries, since dcgm.discover_gpus_batch buckets per
+# chunk and sacct returns a slice ordered by job id rather than tightly by time -- a
+# 25-job chunk still spans a couple of hours here, so it needs more than one bucket.
+# Measured, that is 4% more queries for a table that starts moving in half the time,
+# and still 30% below what per-job discovery cost.
+#
+# It does not go lower because the remaining wait is not the chunk: of those 4.9s,
+# 1.1s is the sacct slice and ~0.5s is startup, both fixed. Eight, what the running
+# path uses (select.RUNNING_JOBS_PER_CHUNK), would buy about a second more and pay
+# another few percent for it -- that path can afford eight because a running selection
+# is hundreds of jobs rather than thousands.
+STREAM_CHUNK = 25
 
 # States meaning the job has not ended. `startswith`, because sacct decorates some
 # states with detail ("CANCELLED by 64336"). One definition, because two places ask:

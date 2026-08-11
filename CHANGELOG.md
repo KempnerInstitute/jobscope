@@ -5,8 +5,10 @@
 ### New `--show`: account, partition, name and cluster as table columns
 
 Every row already named the job and its owner. `--show account,partition` adds the
-other two identity fields, `--show all` adds those plus `NAME` and `CLUSTER`, and an
-unknown keyword is an error naming the valid set.
+other two identity fields, `--show all` adds `account`, `partition` and `cluster`, and
+an unknown keyword is an error naming the valid set. `all` deliberately leaves out the
+job name — free text, often templated and longer than the other two together — which
+stays available as `--show name`.
 
 ```console
 $ jobscope finished -u alice --show account,partition
@@ -46,11 +48,18 @@ and the id batching then chunked the *second* pass, the one with no memory probl
 Cutting the window instead bounds both. Records are also held per slice rather than
 accumulated for the whole run.
 
-**Streaming granularity is unchanged**, and deliberately so: a slice is how much is
-fetched, not how much is yielded. `run_capture` buffers an `sacct` call whole, so
-handing out a whole slice at once would mean every metric query for nine thousand jobs
-running before the first row was drawn. Records are still handed downstream 200 at a
-time, and the first row of a 9 000-job report appears in about eight seconds.
+**Streaming granularity is now sized for latency**, which is the only thing it
+controls: a slice is how much is fetched, not how much is yielded. `run_capture`
+buffers an `sacct` call whole, so handing out a whole slice at once would mean every
+metric query for nine thousand jobs running before the first row was drawn.
+
+Records go downstream **25 at a time**, not the 200 the id-batched path used — that
+number answered an argv-size question, back when a chunk *was* one sacct call. Since
+`compute_dcgm` finishes a whole chunk before any of its rows is drawn, the chunk is
+exactly the wait before the table starts moving. Measured on a 9 000-job day, the first
+row now appears in **4.9 s rather than 8.0 s**, for 4% more queries (2 092 per 1 000
+jobs against 2 011) — still 30% below what per-job discovery cost. The rest of that 4.9 s
+is fixed: 1.1 s of sacct and ~0.5 s of startup.
 
 Unchanged: explicit `JOBID`s and `-N` still list first, because both need every id up
 front. A job spanning a slice boundary is returned by both slices and reported once. A

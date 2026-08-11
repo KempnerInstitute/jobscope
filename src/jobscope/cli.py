@@ -29,6 +29,7 @@ from .errors import JobscopeError
 from .models import GPU_LEVEL, JOB_LEVEL, NODE_LEVEL
 from .report import (
     SHOW_ALL,
+    SHOW_ALL_KEYWORDS,
     SHOW_KEYWORDS,
     DetailRenderer,
     RenderOptions,
@@ -425,12 +426,15 @@ def _add_report_args(report) -> None:
                                  "the two, or where jobstats is not deployed)"))
     cols.add_argument("--show", dest="show", metavar="LIST", default=None,
                       help=_help("extra identity columns, comma-separated",
-                                 "%s, or 'all'. Added after USER on the per-job table "
-                                 "and to --csv; on --per-gpu/--per-node they name the "
-                                 "job's block rather than repeating down it. These are "
-                                 "wide -- an account runs to 23 characters -- which is "
-                                 "why they are asked for rather than always shown"
-                                 % ", ".join(SHOW_KEYWORDS)))
+                                 "%s, or 'all' for %s. Added after USER on the per-job "
+                                 "table and to --csv; on --per-gpu/--per-node they name "
+                                 "the job's block rather than repeating down it. These "
+                                 "are wide -- an account runs to 23 characters -- which "
+                                 "is why they are asked for rather than always shown. "
+                                 "'all' leaves out the job name, which is free text and "
+                                 "usually the longest of them; ask for it by name"
+                                 % (", ".join(SHOW_KEYWORDS),
+                                    ", ".join(SHOW_ALL_KEYWORDS))))
     cols.add_argument("--no-dcgm", dest="no_dcgm", action="store_true",
                       help=_help("drop the GPU columns Prometheus serves",
                                  "leaving what sacct already carried: CPU%%/MEM%%/GPU%%/"
