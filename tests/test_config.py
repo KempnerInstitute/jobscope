@@ -16,11 +16,15 @@ from jobscope.config import (
 )
 from jobscope.errors import JobscopeError
 
+# Captured at import, before conftest's autouse no_repo_config fixture stubs the module
+# attribute: the handful of cases that exercise the real walk need the real function.
+_REAL_REPO_ROOT = config_module._repo_root
+
 CONFIG_TOML = """\
 [prometheus]
 url = "https://file.example/api/prom"
 sampling_period = 30
-site_jobstats_config_path = "/opt/jobstats"
+site_prom_config_path = "/opt/jobstats"
 
 [thresholds]
 power_w = 250
@@ -61,7 +65,7 @@ def test_load_from_file(tmp_path):
     assert cfg.prometheus_url == "https://file.example/api/prom"
     assert cfg.sampling_period == 30
     assert cfg.sampling_period_explicit is True
-    assert cfg.site_jobstats_config_path == "/opt/jobstats"
+    assert cfg.site_prom_config_path == "/opt/jobstats"
     assert cfg.thresholds.edges() == (5, 40, 60, 90)
     assert cfg.thresholds.edges("CPU%") == (7, 40, 60, 90)   # its own wasteful edge
     assert cfg.thresholds.power_w == 250
@@ -117,9 +121,219 @@ def test_missing_explicit_file_raises():
         load_config(path="/nonexistent/jobscope/config.toml", env={})
 
 
+# --- the repo tiers --------------------------------------------------------
+#
+# conftest's autouse no_repo_config fixture stubs _repo_root to None for the whole
+# suite; every case here puts a temporary one back, so none of them can see the real
+# checkout's jobscope.toml.
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """A stand-in checkout, with the per-user tier pointed somewhere empty."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    monkeypatch.setattr(config_module, "_repo_root", lambda: root)
+    return root
+
+
+def test_tracked_jobscope_toml_is_read(repo, tmp_path):
+    (repo / "jobscope.toml").write_text("[defaults]\nworkers = 3\n")
+    cfg = load_config(env={"XDG_CONFIG_HOME": str(tmp_path / "xdg")})
+    assert cfg.defaults.workers == 3
+    assert cfg.source_path == repo / "jobscope.toml"
+
+
+def test_local_config_toml_beats_tracked_jobscope_toml(repo, tmp_path):
+    """The git-ignored override is the narrower statement of intent, so it wins."""
+    (repo / "jobscope.toml").write_text("[defaults]\nworkers = 3\n")
+    (repo / "config.toml").write_text("[defaults]\nworkers = 9\n")
+    cfg = load_config(env={"XDG_CONFIG_HOME": str(tmp_path / "xdg")})
+    assert cfg.defaults.workers == 9
+    assert cfg.source_path == repo / "config.toml"
+
+
+def test_repo_tier_beats_the_per_user_path(repo, tmp_path):
+    xdg = tmp_path / "xdg" / "jobscope"
+    xdg.mkdir(parents=True)
+    (xdg / "config.toml").write_text("[defaults]\nworkers = 5\n")
+    (repo / "jobscope.toml").write_text("[defaults]\nworkers = 3\n")
+    cfg = load_config(env={"XDG_CONFIG_HOME": str(tmp_path / "xdg")})
+    assert cfg.defaults.workers == 3
+
+
+def test_env_var_beats_every_repo_tier(repo, tmp_path):
+    (repo / "config.toml").write_text("[defaults]\nworkers = 9\n")
+    named = tmp_path / "named.toml"
+    named.write_text("[defaults]\nworkers = 7\n")
+    cfg = load_config(env={"JOBSCOPE_CONFIG": str(named)})
+    assert cfg.defaults.workers == 7
+
+
+def test_per_user_path_is_the_fallback_when_no_repo_file_exists(repo, tmp_path):
+    """An empty checkout must not shadow ~/.config -- the tiers are files, not the dir."""
+    xdg = tmp_path / "xdg" / "jobscope"
+    xdg.mkdir(parents=True)
+    (xdg / "config.toml").write_text("[defaults]\nworkers = 5\n")
+    cfg = load_config(env={"XDG_CONFIG_HOME": str(tmp_path / "xdg")})
+    assert cfg.defaults.workers == 5
+
+
+def test_no_repo_means_the_search_is_what_it_always_was(tmp_path):
+    paths = config_module.config_search_paths(env={"XDG_CONFIG_HOME": str(tmp_path)})
+    assert paths == (tmp_path / "jobscope" / "config.toml",)
+
+
+def _installed_at(tmp_path, monkeypatch, *, marker=None):
+    """Pretend this module lives in a site-packages under ``tmp_path``, and resolve."""
+    pkg = tmp_path / "venv" / "lib" / "python3" / "site-packages" / "jobscope"
+    pkg.mkdir(parents=True)
+    if marker is not None:
+        (tmp_path / "venv" / marker).write_text("[project]\nname = 'other'\n")
+    monkeypatch.setattr(config_module, "__file__", str(pkg / "config.py"))
+    return _REAL_REPO_ROOT()
+
+
+def test_repo_root_ignores_a_stray_marker_above_the_install(tmp_path, monkeypatch):
+    """A marker we do not own must never become the root.
+
+    The live case: an empty /tmp/.git owned by another user exists on this cluster. An
+    upward walk would make /tmp the root and read /tmp/config.toml from it -- a file that
+    user can write, naming the endpoint jobscope authenticates to.
+    """
+    assert _installed_at(tmp_path, monkeypatch, marker="pyproject.toml") is None
+    assert _installed_at(tmp_path / "b", monkeypatch, marker=".git") is None
+
+
+def test_repo_root_is_none_for_a_wheel_install(tmp_path, monkeypatch):
+    """No marker anywhere above: `pip install jobscope` keeps the pre-tier behaviour."""
+    assert _installed_at(tmp_path, monkeypatch) is None
+
+
+def test_repo_root_finds_a_real_checkout(tmp_path, monkeypatch):
+    root = tmp_path / "clone"
+    (root / "src" / "jobscope").mkdir(parents=True)
+    (root / "pyproject.toml").write_text("[project]\nname = 'jobscope'\n")
+    monkeypatch.setattr(config_module, "__file__",
+                        str(root / "src" / "jobscope" / "config.py"))
+    assert _REAL_REPO_ROOT() == root
+
+
+def test_init_target_is_the_ignored_tier_not_the_tracked_one(repo):
+    assert config_module.init_target_path(env={}) == repo / "config.toml"
+
+
+def test_init_target_honours_the_env_var(repo, tmp_path):
+    named = tmp_path / "named.toml"
+    assert config_module.init_target_path(env={"JOBSCOPE_CONFIG": str(named)}) == named
+
+
+# --- credentials_file ------------------------------------------------------
+
+def _creds(tmp_path, text="user:tok", mode=0o600):
+    path = tmp_path / "prom_creds"
+    path.write_text(text)
+    path.chmod(mode)
+    return path
+
+
+def _with_creds(tmp_path, creds, url="https://prom.example.net/api/prom"):
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[prometheus]\nurl = "%s"\ncredentials_file = "%s"\n'
+                        % (url, creds))
+    return cfg_file
+
+
+def test_credentials_file_is_spliced_into_the_netloc(tmp_path):
+    _creds(tmp_path)
+    cfg = load_config(path=str(_with_creds(tmp_path, "prom_creds")), env={})
+    assert cfg.prometheus_url == "https://user:tok@prom.example.net/api/prom"
+    assert cfg.prometheus_from == "[prometheus] url + credentials_file"
+
+
+def test_credentials_file_resolves_beside_the_config_not_the_cwd(tmp_path):
+    """The whole point under cron, whose working directory is nobody's choice."""
+    (tmp_path / "secrets").mkdir()
+    creds = tmp_path / "secrets" / "prom_creds"
+    creds.write_text("user:tok")
+    creds.chmod(0o600)
+    cfg = load_config(path=str(_with_creds(tmp_path, "secrets/prom_creds")), env={})
+    assert cfg.prometheus_url == "https://user:tok@prom.example.net/api/prom"
+
+
+def test_a_group_readable_credentials_file_is_refused(tmp_path):
+    _creds(tmp_path, mode=0o640)
+    with pytest.raises(JobscopeError, match="chmod 600"):
+        load_config(path=str(_with_creds(tmp_path, "prom_creds")), env={})
+
+
+def test_a_credentials_file_holding_a_whole_url_is_refused(tmp_path):
+    _creds(tmp_path, text="https://user:tok@prom.example.net/api/prom")
+    with pytest.raises(JobscopeError, match="looks like a URL"):
+        load_config(path=str(_with_creds(tmp_path, "prom_creds")), env={})
+
+
+def test_an_empty_credentials_file_is_refused(tmp_path):
+    _creds(tmp_path, text="   \n")
+    with pytest.raises(JobscopeError, match="empty"):
+        load_config(path=str(_with_creds(tmp_path, "prom_creds")), env={})
+
+
+def test_a_missing_credentials_file_is_refused(tmp_path):
+    with pytest.raises(JobscopeError, match="not found"):
+        load_config(path=str(_with_creds(tmp_path, "prom_creds")), env={})
+
+
+def test_two_sources_for_one_secret_are_refused(tmp_path):
+    _creds(tmp_path)
+    cfg_file = _with_creds(tmp_path, "prom_creds",
+                           url="https://u:t@prom.example.net/api/prom")
+    with pytest.raises(JobscopeError, match="already embeds a credential"):
+        load_config(path=str(cfg_file), env={})
+
+
+def test_credentials_file_without_a_url_is_refused(tmp_path):
+    _creds(tmp_path)
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[prometheus]\ncredentials_file = "prom_creds"\n')
+    with pytest.raises(JobscopeError, match="url is not"):
+        load_config(path=str(cfg_file), env={})
+
+
+def test_a_schemeless_url_with_credentials_file_is_refused(tmp_path):
+    _creds(tmp_path)
+    with pytest.raises(JobscopeError, match="must include a scheme"):
+        load_config(path=str(_with_creds(tmp_path, "prom_creds",
+                                         url="prom.example.net/api/prom")), env={})
+
+
+def test_env_url_wins_over_credentials_file_and_says_so(tmp_path, capsys):
+    _creds(tmp_path)
+    cfg = load_config(path=str(_with_creds(tmp_path, "prom_creds")),
+                      env={"JOBSCOPE_PROM_URL": "https://env.example/api/prom"})
+    assert cfg.prometheus_url == "https://env.example/api/prom"
+    assert "credentials_file is not being read" in capsys.readouterr().err
+
+
+def test_the_spliced_url_still_redacts(tmp_path):
+    _creds(tmp_path)
+    cfg = load_config(path=str(_with_creds(tmp_path, "prom_creds")), env={})
+    assert config_module.redact_url(cfg.prometheus_url) == \
+        "https://***@prom.example.net/api/prom"
+
+
+def test_the_renamed_prometheus_key_is_named_rather_than_ignored(tmp_path, capsys):
+    """[prometheus] takes keys with plain .get(), so silence is the default failure."""
+    path = tmp_path / "config.toml"
+    path.write_text('[prometheus]\nsite_jobstats_config_path = "/opt/jobstats"\n')
+    cfg = load_config(path=str(path), env={})
+    assert cfg.site_prom_config_path is None          # not honoured
+    err = capsys.readouterr().err
+    assert "site_jobstats_config_path" in err and "site_prom_config_path" in err
+
+
 def _cfg(**kw):
     base = dict(prometheus_url=None, sampling_period=60, sampling_period_explicit=False,
-                site_jobstats_config_path=None,
+                site_prom_config_path=None,
                 thresholds=Thresholds(),
                 defaults=Defaults(8, 60.0, 180))
     base.update(kw)
@@ -141,21 +355,21 @@ def test_resolve_prometheus_missing_raises(monkeypatch):
 def test_resolve_prometheus_site_import(monkeypatch):
     monkeypatch.setattr(config_module, "_import_site_prometheus",
                         lambda path, required=True: ("http://site:9090", 30))
-    cfg = _cfg(site_jobstats_config_path="/opt/jobstats")
+    cfg = _cfg(site_prom_config_path="/opt/jobstats")
     assert resolve_prometheus(cfg) == ("http://site:9090", 30)
 
 
 def test_resolve_prometheus_site_keeps_explicit_period(monkeypatch):
     monkeypatch.setattr(config_module, "_import_site_prometheus",
                         lambda path, required=True: ("http://site:9090", 30))
-    cfg = _cfg(site_jobstats_config_path="/opt/jobstats",
+    cfg = _cfg(site_prom_config_path="/opt/jobstats",
                sampling_period=120, sampling_period_explicit=True)
     assert resolve_prometheus(cfg) == ("http://site:9090", 120)
 
 
 def test_resolve_prometheus_auto_discovers_site(monkeypatch, tmp_path):
     # With nothing else configured, jobscope discovers the config next to the
-    # jobstats binary on PATH -- no config file or site_jobstats_config_path.
+    # jobstats binary on PATH -- no config file or site_prom_config_path.
     (tmp_path / "config.py").write_text("PROM_SERVER='http://auto:9090'\nSAMPLING_PERIOD=45\n")
     monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: str(tmp_path))
     assert resolve_prometheus(_cfg()) == ("http://auto:9090", 45)
@@ -169,7 +383,7 @@ def test_resolve_prometheus_explicit_site_overrides_discovery(monkeypatch, tmp_p
     explicit_dir.mkdir()
     (explicit_dir / "config.py").write_text("PROM_SERVER='http://explicit:9090'\n")
     monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: str(discovered))
-    url, _ = resolve_prometheus(_cfg(site_jobstats_config_path=str(explicit_dir)))
+    url, _ = resolve_prometheus(_cfg(site_prom_config_path=str(explicit_dir)))
     assert url == "http://explicit:9090"
 
 
@@ -1153,7 +1367,7 @@ def test_endpoint_source_names_which_of_the_three_answered(hermetic_config, tmp_
 
 
 def test_endpoint_source_marks_an_auto_discovered_jobstats_config(monkeypatch, tmp_path):
-    """The distinction worth drawing: an explicit site_jobstats_config_path is
+    """The distinction worth drawing: an explicit site_prom_config_path is
     something you set, auto-discovery is something that happened to you."""
     from jobscope.config import endpoint_source
 
@@ -1163,7 +1377,7 @@ def test_endpoint_source_marks_an_auto_discovered_jobstats_config(monkeypatch, t
     monkeypatch.setattr(config_module, "_discover_site_jobstats_dir", lambda: str(site))
     assert "auto-discovered" in endpoint_source(_cfg())
 
-    explicit = endpoint_source(_cfg(site_jobstats_config_path=str(site)))
+    explicit = endpoint_source(_cfg(site_prom_config_path=str(site)))
     assert "config.py (jobstats)" in explicit and "auto-discovered" not in explicit
 
 

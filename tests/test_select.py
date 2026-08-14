@@ -503,7 +503,7 @@ def test_no_jobstats_without_an_endpoint_is_an_error_not_a_silent_table_of_dashe
     dashes and no explanation."""
     records = {"1": _record("COMPLETED", {"total_time": 1, "nodes": {}})}
     broken = dataclasses.replace(_cfg(), prometheus_url=None,
-                                 site_jobstats_config_path="/nonexistent")
+                                 site_prom_config_path="/nonexistent")
     with pytest.raises(JobscopeError) as exc:
         select_mod._fill_running(records, ["1"], broken, None, 1, None, force=True)
     assert "--no-jobstats" in str(exc.value)

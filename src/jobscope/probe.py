@@ -294,7 +294,7 @@ def check_jobstats(out, sample: Optional[List[Tuple[str, str, str]]]) -> bool:
 # --- config ----------------------------------------------------------------
 
 def check_config(out, path: Optional[str]) -> None:
-    resolved = path or os.environ.get(config.CONFIG_ENV) or config.default_config_path()
+    resolved = config.resolve_config_path(path)
     if not os.path.exists(str(resolved)):
         _line(out, "config", "%s (not present; built-in defaults in use)" % resolved)
         return
@@ -1436,8 +1436,9 @@ def _print_config_guide(out) -> None:
     ``[metrics]``, ``[thresholds]`` and ``[eff]`` accept, and a ``new`` row
     needs a definition before any of them will take it.
     """
+    target = config.resolve_config_path()
     print("""
-Mapping this to ~/.config/jobscope/config.toml
+Mapping this to %s
 ----------------------------------------------
 The left column is a metric's jobscope name. Config takes the part after the
 family prefix -- `dcgm-sm_act` is written `sm_act` -- because the names are
@@ -1498,7 +1499,7 @@ the efficiency ballot:
 
 A row marked "%s" is in jobscope's catalog but your server does not carry it --
 usually hardware, e.g. DFMA%% exists on H100 and not on A100. Nothing to do; the
-column stays blank.""" % (NEW, ABSENT), file=out)
+column stays blank.""" % (target, NEW, ABSENT), file=out)
 
 
 # --- entry point -----------------------------------------------------------
@@ -1560,11 +1561,15 @@ def write_config(out, notes, client, cfg, config_path: Optional[str],
     emit_config(buffer, client, cfg, timeout, jobid, sample, full)
     text = buffer.getvalue()
 
-    # The same precedence load_config reads: the -c argument, then $JOBSCOPE_CONFIG,
-    # then the default path. Writing somewhere other than where jobscope will look for
-    # it is the one outcome that would make this command actively misleading.
-    path = (config_path or os.environ.get(config.CONFIG_ENV)
-            or str(config.default_config_path()))
+    # Somewhere load_config will read: the -c argument, then $JOBSCOPE_CONFIG, then
+    # init_target_path. Writing somewhere other than where jobscope will look for it is
+    # the one outcome that would make this command actively misleading.
+    #
+    # Not resolve_config_path: inside a checkout that answers with the tracked
+    # jobscope.toml, and generated output should not land in a file several admins share
+    # and review. init_target_path picks the git-ignored config.toml above it, which
+    # jobscope reads first anyway -- so this is still the file that wins.
+    path = config_path or str(config.init_target_path())
     if os.path.exists(path):
         print("\nnote: %s already exists, so this is stdout rather than a write.\n"
               "      Compare it, or redirect if you mean to replace it." % path,
@@ -1816,11 +1821,12 @@ def emit_toml(out, client, jobid: Optional[str], timeout: Optional[float],
           "# live are series this server has that jobscope does not name yet -- append\n"
           "# this file to your config and they take effect.\n"
           "#\n"
-          "#   jobscope probe --toml >> ~/.config/jobscope/config.toml\n"
+          "#   jobscope probe --toml >> %s\n"
           "#\n"
           "# A defined metric joins the *extended* catalog: it shows under --dcgm, or in\n"
           "# any view that names it. It never joins the default view on its own."
-          % (record.jobid, record.state, record.gpus), file=out)
+          % (record.jobid, record.state, record.gpus, config.resolve_config_path()),
+          file=out)
 
     for family, found in families:
         if not found:

@@ -167,6 +167,15 @@ BAND_VIEWS = ("summary", "timeslice")
 LEGACY_THRESHOLD_KEYS = ("gpu", "gmem", "mem", "default", "red", "cpu",
                          "wasteful", "inefficient", "improvement", "average")
 
+# Renamed keys in [prometheus], as {old: new}. The value is *not* honoured -- this only
+# exists so the rename cannot happen in silence. [prometheus] takes its keys with plain
+# .get(), so an old name is not rejected the way [eff] or [site] would reject it; it is
+# read by nobody and the section still resolves, which is the worst of both. Worse here
+# than elsewhere because the fallback hides it: a site that dropped this key still gets
+# an endpoint from `which("jobstats")`, so the only symptom is a *quietly different*
+# server, at whichever site pointed the key somewhere non-default.
+RENAMED_PROMETHEUS_KEYS = {"site_jobstats_config_path": "site_prom_config_path"}
+
 # Every top-level name load_config consumes. Its purpose is the inverse of the tables
 # above: those name what *was* legal, this names what is, so that anything else can be
 # reported instead of ignored. Every inner table already rejects a name it does not know
@@ -952,7 +961,7 @@ class Config:
     prometheus_url: Optional[str]
     sampling_period: int
     sampling_period_explicit: bool
-    site_jobstats_config_path: Optional[str]
+    site_prom_config_path: Optional[str]
     # The whole-elapsed-time job summary's bands. Named plainly because it is the
     # default view; the time-slice table below is the one that needs qualifying.
     thresholds: Thresholds
@@ -1016,10 +1025,96 @@ class Host:
 
 
 def default_config_path(env: Optional[Mapping[str, str]] = None) -> Path:
-    """Path jobscope reads when neither an explicit path nor $JOBSCOPE_CONFIG is set."""
+    """Per-user path, the last tier of :func:`config_search_paths` and its fallback."""
     env = os.environ if env is None else env
     base = env.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
     return Path(base) / "jobscope" / "config.toml"
+
+
+def _repo_root() -> Optional[Path]:
+    """The checkout jobscope is running from, or None for a non-editable install.
+
+    Resolved from this module's own location rather than the working directory: a
+    site's config should not change depending on where someone happened to `cd`, and
+    the runs that matter here are cron lines and sbatch scripts, whose cwd is nobody's
+    choice. An editable install leaves ``__file__`` inside the clone, so the walk finds
+    it; a wheel in site-packages has no marker above it and this returns None, which is
+    what keeps `pip install jobscope` behaving exactly as it did before repo tiers.
+
+    Anchored on this file's own position rather than walked upward, and that is a
+    security property, not a tidiness one. A walk looking for ``.git`` or
+    ``pyproject.toml`` finds the *nearest* one, which on a shared login node is not
+    necessarily ours: an empty ``/tmp/.git`` owned by another user is enough to make
+    ``/tmp`` the root, and jobscope would then read ``/tmp/config.toml`` -- a file that
+    user can write, naming the Prometheus endpoint we authenticate to. (There is such a
+    directory on this cluster already, which is how this was found.) So the layout must
+    match exactly: only ``<root>/src/jobscope/config.py`` yields a root, which a wheel in
+    ``site-packages/jobscope/`` never does.
+
+    The marker is still required on top of the layout, so that a source tree someone
+    merely copied around is not mistaken for a checkout.
+    """
+    here = Path(__file__).resolve()
+    if here.parent.name != "jobscope" or here.parent.parent.name != "src":
+        return None
+    root = here.parent.parent.parent
+    if (root / "pyproject.toml").is_file() or (root / ".git").exists():
+        return root
+    return None
+
+
+def config_search_paths(env: Optional[Mapping[str, str]] = None) -> Tuple[Path, ...]:
+    """Where jobscope looks, in order, once -c and $JOBSCOPE_CONFIG have had their say.
+
+    The two repo tiers exist only inside a checkout, and they are ordered
+    override-before-tracked for the same reason ``-c`` beats everything: the narrower
+    statement of intent wins. ``jobscope.toml`` is the site's policy, reviewed like code
+    and shared by every admin; ``config.toml`` beside it is git-ignored and belongs to
+    whoever is trying something out, so it has to be able to win locally without a commit.
+    """
+    paths = []
+    root = _repo_root()
+    if root is not None:
+        paths.append(root / "config.toml")
+        paths.append(root / "jobscope.toml")
+    paths.append(default_config_path(env))
+    return tuple(paths)
+
+
+def resolve_config_path(path: Optional[str] = None,
+                        env: Optional[Mapping[str, str]] = None) -> Path:
+    """The file jobscope reads, whether or not it exists.
+
+    The single answer to "which config is in play", so that ``jobscope config``,
+    ``probe``'s config line and :func:`load_config` cannot drift apart -- they used to
+    each spell the precedence out again, which was survivable while it was two tiers.
+    Falls back to the per-user path when nothing exists: that is the one a reader can
+    be told to create, since a checkout is not something everyone has.
+    """
+    env = os.environ if env is None else env
+    explicit = path if path is not None else env.get(CONFIG_ENV)
+    if explicit:
+        return Path(explicit)
+    searched = config_search_paths(env)
+    return next((p for p in searched if p.exists()), searched[-1])
+
+
+def init_target_path(env: Optional[Mapping[str, str]] = None) -> Path:
+    """Where ``probe --init`` writes when nothing named a path.
+
+    Deliberately *not* :func:`resolve_config_path`'s answer inside a checkout. ``--init``
+    emits a generated file from what probe just measured, and the repo's tracked
+    ``jobscope.toml`` is shared policy that several admins read through pull requests --
+    machine output should not land there by default. It goes to the git-ignored
+    ``config.toml`` beside it instead, and promoting anything worth keeping into the
+    tracked file stays a deliberate act.
+    """
+    env = os.environ if env is None else env
+    explicit = env.get(CONFIG_ENV)
+    if explicit:
+        return Path(explicit)
+    root = _repo_root()
+    return (root / "config.toml") if root is not None else default_config_path(env)
 
 
 def _read_toml(path: Path) -> dict:
@@ -1033,9 +1128,11 @@ def load_config(path: Optional[str] = None,
     """Build a Config from a TOML file plus environment overrides.
 
     Resolution order for the file: ``path`` argument, then ``$JOBSCOPE_CONFIG``,
-    then :func:`default_config_path`. A file named explicitly (argument or env
-    var) must exist; the default path may be absent, in which case built-in
-    defaults apply. The Prometheus URL prefers ``$JOBSCOPE_PROM_URL`` over the file.
+    then the first existing entry of :func:`config_search_paths` -- the repo's
+    ``config.toml``, the repo's tracked ``jobscope.toml``, the per-user path. A file
+    named explicitly (argument or env var) must exist; the searched paths may all be
+    absent, in which case built-in defaults apply. The Prometheus URL prefers
+    ``$JOBSCOPE_PROM_URL`` over the file.
 
     ``gpu_source`` overrides ``[gpu] source``, and is taken here rather than applied
     afterwards because the order decides which candidate wins each column *and* which
@@ -1045,12 +1142,9 @@ def load_config(path: Optional[str] = None,
     """
     env = os.environ if env is None else env
     explicit = path if path is not None else env.get(CONFIG_ENV)
-    if explicit:
-        chosen = Path(explicit)
-        if not chosen.exists():
-            raise JobscopeError("jobscope config not found: %s" % chosen)
-    else:
-        chosen = default_config_path(env)
+    chosen = resolve_config_path(path, env)
+    if explicit and not chosen.exists():
+        raise JobscopeError("jobscope config not found: %s" % chosen)
     data = _read_toml(chosen) if chosen.exists() else {}
 
     # First, before any section's *contents* are validated: everything below can raise
@@ -1062,6 +1156,12 @@ def load_config(path: Optional[str] = None,
     prom = data.get("prometheus") or {}
     thr = data.get("thresholds") or {}
     dfl = data.get("defaults") or {}
+
+    for old, new in sorted(RENAMED_PROMETHEUS_KEYS.items()):
+        if old in prom:
+            print("note: [prometheus] %s has been renamed to %s and its value is no"
+                  " longer read. Rename the key in %s; the value is unchanged."
+                  % (old, new, chosen), file=sys.stderr)
 
     # Before anything resolves a metric name. [metrics.<family>.<name>] tables add to
     # the catalogs and the preference decides which candidate wins each column, so the
@@ -1122,10 +1222,10 @@ def load_config(path: Optional[str] = None,
         verdict_window=_duration(dfl.get("verdict_window", DEFAULT_VERDICT_WINDOW),
                                  "[defaults] verdict_window"),
     )
+    url, url_from = _prometheus_url(prom, env, chosen)
     return Config(
-        prometheus_url=(env.get(PROM_URL_ENV) or prom.get("url")) or None,
-        prometheus_from=("$" + PROM_URL_ENV if env.get(PROM_URL_ENV)
-                         else "[prometheus] url" if prom.get("url") else ""),
+        prometheus_url=url,
+        prometheus_from=url_from,
         sampling_period=int(prom.get("sampling_period", DEFAULT_SAMPLING_PERIOD)),
         sampling_period_explicit="sampling_period" in prom,
         # Zero is a real setting for the rate and means "do not pace".
@@ -1134,7 +1234,7 @@ def load_config(path: Optional[str] = None,
             "[prometheus] max_queries_per_second"),
         query_burst=_positive(prom.get("query_burst", DEFAULT_QUERY_BURST),
                               "[prometheus] query_burst"),
-        site_jobstats_config_path=prom.get("site_jobstats_config_path"),
+        site_prom_config_path=prom.get("site_prom_config_path"),
         thresholds=bands["summary"],
         defaults=defaults,
         source_path=chosen if chosen.exists() else None,
@@ -1822,7 +1922,7 @@ def resolve_prometheus(cfg: Config) -> Tuple[str, int]:
     """Return ``(url, sampling_period)`` for Prometheus.
 
     When no URL is configured directly, the site jobstats config supplies it: an
-    explicit ``site_jobstats_config_path`` (which must import cleanly), otherwise
+    explicit ``site_prom_config_path`` (which must import cleanly), otherwise
     the directory of the ``jobstats`` binary auto-discovered on ``PATH`` (skipped
     silently when it holds no usable config). Raises :class:`JobscopeError` with
     actionable guidance when none is available. The URL can embed a credential,
@@ -1854,7 +1954,7 @@ def _resolve_endpoint(cfg: Config) -> Tuple[str, int, str]:
     sampling_period = cfg.sampling_period
     source = cfg.prometheus_from
     if not url:
-        explicit = cfg.site_jobstats_config_path
+        explicit = cfg.site_prom_config_path
         site_path = explicit or _discover_site_jobstats_dir()
         if site_path:
             site_url, site_sp = _import_site_prometheus(site_path, required=bool(explicit))
@@ -1896,6 +1996,88 @@ def _import_site_prometheus(config_path: str,
     return getattr(site, "PROM_SERVER", None), getattr(site, "SAMPLING_PERIOD", None)
 
 
+def _read_credentials(spec: str, config_path: Path) -> str:
+    """``user:token`` from the file named by ``[prometheus] credentials_file``.
+
+    A relative path resolves against the config file's own directory, not the working
+    directory: the point of the key is that a repo-local config can say
+    ``secrets/prom_creds`` and stay true when cron runs it from ``$HOME``.
+    """
+    path = Path(os.path.expanduser(spec))
+    if not path.is_absolute():
+        path = config_path.parent / path
+    if not path.exists():
+        raise JobscopeError("[prometheus] credentials_file not found: %s" % path)
+
+    # A credential readable by the rest of the cluster is not a credential. An error
+    # rather than the note this module uses elsewhere, because carrying on would mean
+    # authenticating with a secret we have just established that everyone can read.
+    mode = path.stat().st_mode
+    if mode & 0o077:
+        raise JobscopeError(
+            "[prometheus] credentials_file %s is readable by group or other (mode %s)."
+            " It holds a Prometheus credential: chmod 600 %s" % (path, oct(mode & 0o777), path))
+
+    text = path.read_text().strip()
+    if not text:
+        raise JobscopeError("[prometheus] credentials_file is empty: %s" % path)
+    if "://" in text:
+        # The whole URL in the file is the obvious misreading, and it would otherwise be
+        # spliced into a netloc and produce an unresolvable host rather than an error.
+        raise JobscopeError(
+            "[prometheus] credentials_file %s looks like a URL. It should hold only the"
+            " credential, as USER:TOKEN on one line; the endpoint goes in [prometheus] url."
+            % path)
+    if "@" in text:
+        raise JobscopeError(
+            "[prometheus] credentials_file %s must not contain '@' -- write USER:TOKEN"
+            " only, without the host." % path)
+    return text
+
+
+def _prometheus_url(prom: Mapping, env: Mapping[str, str],
+                    config_path: Path) -> Tuple[Optional[str], str]:
+    """``(url, source)`` from ``[prometheus]``, splicing in a credentials_file.
+
+    Precedence is unchanged at the top: ``$JOBSCOPE_PROM_URL`` carries a whole URL and
+    wins outright, since it is the one form a single cron line or sbatch script can pass.
+    ``credentials_file`` composes with ``url`` below it, which is what lets the endpoint
+    be committed while the secret is not.
+    """
+    if env.get(PROM_URL_ENV):
+        if prom.get("credentials_file"):
+            # Not silently: the file is the thing an admin just went to the trouble of
+            # creating, and an inherited export in a login shell is exactly how it ends
+            # up ignored without anyone noticing.
+            print("note: $%s is set, so [prometheus] credentials_file is not being read."
+                  " Unset it to use the file." % PROM_URL_ENV, file=sys.stderr)
+        return env[PROM_URL_ENV], "$" + PROM_URL_ENV
+
+    url = prom.get("url")
+    creds = prom.get("credentials_file")
+    if not creds:
+        return (url or None), ("[prometheus] url" if url else "")
+    if not url:
+        raise JobscopeError(
+            "[prometheus] credentials_file is set but url is not. The file holds only the"
+            " credential; the endpoint it belongs to goes in [prometheus] url.")
+
+    scheme, sep, rest = str(url).partition("://")
+    if not sep:
+        # Only reached with credentials_file set. Without a scheme there is no netloc to
+        # splice into, and guessing one would build a URL the admin never wrote.
+        raise JobscopeError(
+            "[prometheus] url must include a scheme (https://...) to use credentials_file;"
+            " got %r" % str(url))
+    if "@" in rest.partition("/")[0]:
+        raise JobscopeError(
+            "[prometheus] url already embeds a credential and credentials_file is also"
+            " set. Keep the secret in one place: strip the 'USER:TOKEN@' from url.")
+
+    spliced = "%s://%s@%s" % (scheme, _read_credentials(str(creds), config_path), rest)
+    return spliced, "[prometheus] url + credentials_file"
+
+
 def redact_url(url: str) -> str:
     """``url`` with any embedded credential replaced, safe to print.
 
@@ -1926,7 +2108,7 @@ def _no_endpoint_message(cfg: Config) -> str:
         "Fix any one of:\n"
         "  - set the JOBSCOPE_PROM_URL environment variable, or\n"
         '  - add [prometheus] url = "https://.../api/prom" to %s, or\n'
-        "  - set [prometheus] site_jobstats_config_path to a dir holding a jobstats config.py.\n"
+        "  - set [prometheus] site_prom_config_path to a dir holding a jobstats config.py.\n"
         "The offline --cpu / --cgpu views need no Prometheus." % target)
 
 

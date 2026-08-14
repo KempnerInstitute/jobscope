@@ -119,7 +119,7 @@ def test_the_module_does_not_import_requests():
 
 def _cfg(url):
     return Config(prometheus_url=url, sampling_period=45, sampling_period_explicit=True,
-                  site_jobstats_config_path=None, thresholds=Thresholds(),
+                  site_prom_config_path=None, thresholds=Thresholds(),
                   defaults=Defaults(workers=8, timeout=90.0))
 
 

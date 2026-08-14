@@ -2,6 +2,73 @@
 
 ## Unreleased
 
+### The config can live in the repository, and be committed
+
+jobscope read one file, found under `~/.config`. That is right for one person and wrong
+for a tool several admins maintain together: distributing a tuned policy meant telling
+everyone to copy a file, and a cron line or sbatch script had to be told where it was.
+
+Two tiers now sit above the per-user path, and both are found from jobscope's own
+position on disk rather than the working directory — so cron, whose `cwd` is `$HOME`,
+picks them up with nothing set:
+
+| | path | who it is for |
+|---|---|---|
+| 1 | `jobscope -c PATH` | one invocation |
+| 2 | `$JOBSCOPE_CONFIG` | one shell, job, or module file |
+| 3 | `<repo>/config.toml` | git-ignored — local experiments, and `probe --init` |
+| 4 | `<repo>/jobscope.toml` | **tracked** — the site's policy, reviewed through PRs |
+| 5 | `~/.config/jobscope/config.toml` | a user with no checkout |
+
+Tiers 3 and 4 exist only when running from a clone, so `uv tool install jobscope` is
+unchanged. `jobscope config` names the file that answered.
+
+The layout is matched exactly — only `<root>/src/jobscope/config.py` yields a root —
+rather than walked upward looking for `.git`. A walk finds the *nearest* marker, and on
+a shared login node that is not necessarily ours: an empty `/tmp/.git` owned by another
+user (there is one on this cluster) would make `/tmp` the root, and jobscope would then
+read `/tmp/config.toml` — a file that user can write, naming the endpoint we
+authenticate to.
+
+**`probe --init` writes tier 3, not tier 4.** It already refused to write a URL into a
+config; the point here is narrower — generated output should not land in a file other
+admins review. It still wins, being the higher tier.
+
+### `[prometheus] credentials_file`, so an endpoint with a token is still committable
+
+The URL was the only place a credential could go, which made any config carrying one
+unpublishable. Split them: the endpoint in the tracked file, the secret in a git-ignored
+file beside it.
+
+```toml
+[prometheus]
+url = "https://prometheus.example.net/api/prom"   # no secret -- safe to commit
+credentials_file = "secrets/prom_creds"           # git-ignored; USER:TOKEN, one line
+```
+
+A relative path resolves against the config file's own directory, not the working
+directory. jobscope refuses a file readable by group or other (`chmod 600`), one holding
+a whole URL, and a `url` that already embeds a credential — two sources for one secret.
+`$JOBSCOPE_PROM_URL` still wins over both, and now says so rather than ignoring the file
+in silence. `redact_url` masks the assembled URL as before.
+
+`.gitignore` gained `/secrets/`, and `config.toml` became `config.toml*` — the bare name
+never matched `config.toml_1`, which had sat untracked in the repository root for months.
+
+### `[prometheus] site_jobstats_config_path` is now `site_prom_config_path`
+
+"jobstats" was a surprising word to meet inside `[prometheus]`, when what the key names
+is where the Prometheus endpoint comes from.
+
+**The old name is no longer read.** It is reported rather than ignored, because
+`[prometheus]` takes its keys with a plain lookup and would otherwise drop it in
+silence — and the fallback hides that: a site losing this key still gets an endpoint
+from `which("jobstats")`, so the only symptom is a quietly *different* server.
+
+The value is unchanged: a directory holding a jobstats-style `config.py` that defines
+`PROM_SERVER` — not `/etc/prometheus`, which holds `prometheus.yml` and no `config.py`.
+The docs now say so, since neither name conveys it.
+
 ### `PARTITION` and `GPU_TYPE` are now the last two columns
 
 Every row already said what a job *did*. Neither said what it ran **on**, so a

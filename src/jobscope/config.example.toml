@@ -25,13 +25,27 @@
 # secret never lands in a file -- a value here is used only when that is unset.
 # url = "https://USER:TOKEN@prometheus.example.net/api/prom"
 
+# To keep this file committable when the URL does carry a credential, split them:
+# write the endpoint above WITHOUT the "USER:TOKEN@" part, and point this at a file
+# holding just the credential, as USER:TOKEN on one line. jobscope splices the two at
+# load time. A relative path resolves against this config file's directory, not the
+# working directory, so it stays true under cron.
+#
+# The file must not be readable by group or other -- jobscope refuses it otherwise:
+#     mkdir -p secrets && chmod 600 secrets/prom_creds
+# $JOBSCOPE_PROM_URL still wins over both if it is set.
+# credentials_file = "secrets/prom_creds"
+
 # Seconds between scrapes on your cluster.
 sampling_period = 60
 
 # If your site runs jobstats, you probably need none of the above: jobscope reads
 # PROM_SERVER from the config.py next to the `jobstats` binary on your PATH. Set this
 # only to point at a config.py somewhere else.
-# site_jobstats_config_path = "/opt/jobstats"
+#
+# This is a DIRECTORY holding a jobstats-style config.py that defines PROM_SERVER --
+# not /etc/prometheus, which holds prometheus.yml and no config.py.
+# site_prom_config_path = "/opt/jobstats"
 
 # [site] -- only when porting to a cluster that labels series differently. Each of
 # these fails SILENTLY when wrong (every node reads "?", CPU%/MEM% come back blank),

@@ -1,0 +1,42 @@
+# jobscope -- site configuration for the Kempner AI Cluster.
+#
+# THIS FILE IS TRACKED. It is the site's policy, shared by every admin and changed
+# through pull requests like any other code. Keep it free of secrets: nothing here may
+# be a credential, and nothing here should need to be.
+#
+# jobscope finds this file from its own location, so a cron line or an sbatch script
+# picks it up with no environment set and no --config flag. The full order is:
+#
+#   1. jobscope -c PATH ...             one invocation
+#   2. $JOBSCOPE_CONFIG                 one shell, one job, one module file
+#   3. <repo>/config.toml               git-ignored; your local experiments
+#   4. <repo>/jobscope.toml             this file
+#   5. ~/.config/jobscope/config.toml   a user with no checkout
+#
+# To try something without touching shared policy, copy this to config.toml beside it
+# and edit that -- it is git-ignored and wins over this file. `jobscope config` prints
+# which one actually answered, along with every resolved value.
+#
+# Every setting is optional and every omitted one falls back to a built-in default.
+# `jobscope config --example` prints the full annotated template of what can go here;
+# docs/admin.md explains how to choose the trickier numbers.
+
+[prometheus]
+# Where the GPU metrics come from. This site runs jobstats, so jobscope reads
+# PROM_SERVER out of the config.py beside the `jobstats` binary rather than storing an
+# endpoint here. That is deliberate and is what keeps this file secret-free: the
+# Grafana Cloud token stays in FASRC's file, and a rotation there needs no change here.
+#
+# This is a DIRECTORY holding a jobstats-style config.py that defines PROM_SERVER --
+# not /etc/prometheus, which holds prometheus.yml and no config.py.
+site_prom_config_path = "/usr/local/bin"
+
+# Seconds between scrapes. jobscope would otherwise take this from the same jobstats
+# config.py; set here so a change on that side cannot silently re-window every query.
+sampling_period = 60
+
+# If this cluster ever moves off jobstats, the committable form is an endpoint here
+# with the credential in a git-ignored file beside it -- never a URL with a token in it:
+#
+#   url = "https://prometheus.example.net/api/prom"
+#   credentials_file = "secrets/prom_creds"     # chmod 600; USER:TOKEN on one line

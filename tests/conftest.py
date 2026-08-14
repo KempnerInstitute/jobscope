@@ -69,7 +69,7 @@ DEFAULT_CONFIG = config_module.Config(
     prometheus_url=None,
     sampling_period=60,
     sampling_period_explicit=False,
-    site_jobstats_config_path=None,
+    site_prom_config_path=None,
     thresholds=config_module.Thresholds(),
     defaults=config_module.Defaults(workers=8, timeout=60.0),
 )
@@ -117,6 +117,23 @@ def no_real_scheduler(monkeypatch):
             "(or the seam above it) in the test." % " ".join(map(str, cmd[:3])))
 
     monkeypatch.setattr(slurm, "run_capture", no_scheduler)
+
+
+@pytest.fixture(autouse=True)
+def no_repo_config(monkeypatch):
+    """Hide the checkout's own config tiers from every test that resolves a path.
+
+    ``hermetic_config`` below pins the *process-wide* Config, but a test that calls
+    ``load_config`` builds a fresh one and resolves paths for real. The suite runs from
+    inside the checkout, so without this the repo's tracked ``jobscope.toml`` -- a real
+    file with real thresholds -- would answer every case that means to describe a machine
+    with no config at all, and ``test_defaults_when_no_file`` would assert the site's
+    policy against the built-in defaults.
+
+    Scoped to the repo tiers alone: ``$XDG_CONFIG_HOME`` is still how a test isolates the
+    per-user path, and the cases that cover the repo tiers put ``_repo_root`` back.
+    """
+    monkeypatch.setattr(config_module, "_repo_root", lambda: None)
 
 
 @pytest.fixture(autouse=True)

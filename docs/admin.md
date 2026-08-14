@@ -32,10 +32,13 @@ jobscope probe              # what does this cluster expose, and can jobscope re
 jobscope probe --init       # write a config from what it just found
 ```
 
-`--init` writes to the path jobscope will read (`-c`, then `$JOBSCOPE_CONFIG`, then
-`~/.config/jobscope/config.toml`) — but **only if nothing is there**. An existing file
-turns it into stdout plus a note, because a config is hand-tuned within a week of being
-written and that tuning has no other copy.
+`--init` writes to a path jobscope will read — but **only if nothing is there**. An
+existing file turns it into stdout plus a note, because a config is hand-tuned within a
+week of being written and that tuning has no other copy.
+
+Inside a checkout it writes `<repo>/config.toml`, which is git-ignored, rather than the
+tracked `jobscope.toml` beside it: generated output should not land in shared policy
+that other admins review. It still wins, being the higher tier.
 
 What it detects, all measured rather than assumed:
 
@@ -66,6 +69,39 @@ moment, so it emits floors only for those and **comments the rest with the reaso
 
 **A wrong floor is worse than none**: it silently caps healthy jobs at `inefficient`.
 
+### Where the config comes from
+
+jobscope reads the **first of these that exists**:
+
+| | path | who it is for |
+|---|---|---|
+| 1 | `jobscope -c PATH` | one invocation |
+| 2 | `$JOBSCOPE_CONFIG` | one shell, job, or module file |
+| 3 | `<repo>/config.toml` | git-ignored — your local experiments, and `probe --init` |
+| 4 | `<repo>/jobscope.toml` | **tracked** — the site's policy, reviewed through PRs |
+| 5 | `~/.config/jobscope/config.toml` | a user with no checkout |
+
+Tiers 3 and 4 exist only when jobscope runs from a clone (an editable install), so
+`uv tool install jobscope` behaves exactly as it always did. `jobscope config` prints
+which file actually answered.
+
+**The repo tiers are how a site is managed by several admins.** `jobscope.toml` is
+committed, so a threshold change is a pull request rather than a file everyone has to be
+told to re-copy, and the clone is located from jobscope's own position on disk — a cron
+line or an sbatch script picks it up with no environment set and no flag. Keep it
+secret-free; see [Pointing jobscope at Prometheus](#pointing-jobscope-at-prometheus) for
+how, when your endpoint carries a token.
+
+To try something without touching shared policy, copy it to `config.toml` beside it and
+edit that: it is git-ignored and it wins.
+
+For a wheel installed into a shared venv there is no repo to find, so point
+`$JOBSCOPE_CONFIG` at the site file from an Lmod module file:
+
+```lua
+setenv("JOBSCOPE_CONFIG", "/n/sw/jobscope/etc/jobscope.toml")
+```
+
 ## What `probe` reports
 
 ```bash
@@ -88,7 +124,7 @@ do). A metric jobscope names but your cluster lacks would otherwise render blank
 visible and renameable, anything unnamed **live**, so a redirect is the only step:
 
 ```bash
-jobscope probe --toml >> ~/.config/jobscope/config.toml
+jobscope probe --toml >> jobscope.toml   # or wherever `jobscope config` says
 ```
 
 The table key *is* the config name, so renaming a metric is editing that key. Stdout is
@@ -181,15 +217,37 @@ export JOBSCOPE_PROM_URL="https://USER:TOKEN@prometheus.example.net/api/prom"
 **Kempner AI Cluster users:** the jobstats `config.py` sits beside the `jobstats` binary
 on your `PATH` and jobscope **auto-discovers it**, so you need no config file and never
 handle the URL or token. This works at any jobstats site; to point at a different
-install, set `site_jobstats_config_path`.
+install, set `site_prom_config_path`.
 
-On any other cluster, put settings in the config file
-(`~/.config/jobscope/config.toml`, or wherever `$JOBSCOPE_CONFIG` points):
+On any other cluster, put settings in the config file — `<repo>/jobscope.toml` if you
+run from a clone, otherwise `~/.config/jobscope/config.toml` or wherever
+`$JOBSCOPE_CONFIG` points:
 
 ```bash
-jobscope config --example > ~/.config/jobscope/config.toml   # then edit it
-jobscope config                                              # show the path in use
+jobscope config --example > jobscope.toml   # then edit it
+jobscope config                             # show the path in use
 ```
+
+**When the endpoint carries a credential**, split it so the config stays committable:
+put the URL *without* the `USER:TOKEN@` part in the file, and the credential in a
+git-ignored file beside it.
+
+```toml
+[prometheus]
+url = "https://prometheus.example.net/api/prom"   # no secret -- safe to commit
+credentials_file = "secrets/prom_creds"           # git-ignored; USER:TOKEN, one line
+```
+
+```bash
+mkdir -p secrets
+printf 'myuser:glc_xxx' > secrets/prom_creds
+chmod 600 secrets/prom_creds        # jobscope refuses a group- or world-readable file
+```
+
+A relative `credentials_file` resolves against the config file's own directory, not the
+working directory, so it stays correct under cron. `$JOBSCOPE_PROM_URL` still wins over
+both if it is set, and says so rather than ignoring the file silently. `/secrets/` is
+already in `.gitignore`.
 
 The config file is also where reporting *policy* lives, so adapting jobscope to a site's
 conventions is a TOML edit rather than a patch:
@@ -208,9 +266,13 @@ conventions is a TOML edit rather than a patch:
 exactly like no config file at all, so copying it is never a silent regrade.
 
 The Prometheus URL commonly embeds a credential, so jobscope treats it as a secret: no
-command prints it, and a `config.toml` in a repo checkout is git-ignored. The single
-exception is `jobscope probe`, which masks it (`https://***@host/path`) so its output
-stays safe to paste into a ticket.
+command prints it, `config.toml` is git-ignored at any depth in a checkout, and so is
+`secrets/`. The single exception is `jobscope probe`, which masks it
+(`https://***@host/path`) so its output stays safe to paste into a ticket. A URL
+assembled from `credentials_file` is masked the same way.
+
+Only `jobscope.toml` is meant to be committed, which is why the credential has somewhere
+else to live.
 
 **Widening to a partition.** `-a` widens a selection to every user. It is the one flag
 that changes cost rather than presentation — a partition-wide sweep is hundreds of jobs,

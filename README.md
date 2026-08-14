@@ -60,7 +60,14 @@ jobscope probe --init
 ```
 
 `probe` checks what Slurm and Prometheus expose. `probe --init` writes a config from
-those findings and refuses to overwrite an existing one. Site setup details are in
+those findings and refuses to overwrite an existing one. `jobscope config` then shows
+what it resolves to, and which file answered.
+
+Running from a clone, jobscope reads `jobscope.toml` in the repository root — tracked, so
+a site managed by several admins changes its policy through pull requests rather than by
+re-copying a file, and cron picks it up with no environment set. `config.toml` beside it
+is git-ignored and overrides it, for anything you are only trying out. Site setup details,
+including how to keep a Prometheus credential out of the tracked file, are in
 [docs/admin.md](docs/admin.md).
 
 ## Quick Start

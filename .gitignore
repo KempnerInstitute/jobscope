@@ -21,10 +21,19 @@ dist/
 htmlcov/
 .tox/
 
-# Local jobscope config (may hold Prometheus credentials): never commit it.
-# Only config.example.toml is tracked.
-config.toml
+# The local jobscope config, at any depth. jobscope reads this in preference to the
+# tracked jobscope.toml beside it, so it is where a generated file (probe --init) and
+# any one-off experiment land -- neither belongs in shared, reviewed policy.
+#
+# The glob, not the bare name: config.toml_1 sat untracked in the repository root for
+# months because `config.toml` does not match it. Only config.example.toml (the shipped
+# template) and jobscope.toml (the site's policy, secret-free by construction) are tracked.
+config.toml*
 *.local.toml
+
+# Prometheus credentials, read by [prometheus] credentials_file. The tracked config names
+# the endpoint; the secret lives here and never leaves the machine.
+/secrets/
 
 # Local design notes kept out of the repo but on disk while a branch is in flight.
 docs/superpowers/

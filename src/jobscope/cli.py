@@ -1402,7 +1402,7 @@ def handle_config(args) -> None:
     if args.example:
         sys.stdout.write(config.example_config_text())
         return
-    path = args.config_path or os.environ.get(config.CONFIG_ENV) or config.default_config_path()
+    path = config.resolve_config_path(args.config_path)
     if args.path:
         print(path)
         return
