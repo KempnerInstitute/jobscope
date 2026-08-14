@@ -128,6 +128,16 @@ SUMMARY_COLUMNS: List[Column] = [
     Column("DRAM%", "{:<7}", "dcgm"),
     Column("POWER_W", "{:<8}", "dcgm"),
     Column("RUNTIME", "{:<12}", "id"),
+    # Where the job ran, last because everything before it is what the job *did* and
+    # these two are what it ran on. A selection that narrows neither -- the default --
+    # otherwise cannot tell its own rows apart: three jobs on three card models read
+    # identically, and the header can only say which partitions the report *covered*.
+    #
+    # PARTITION is "id", so it survives --cpu and --gpu like JOBID and USER. GPU_TYPE
+    # is "gpu": --cpu is the host view, a card model has no place in it, and a running
+    # --cpu report queries no exporter, so the column would be dashes all the way down.
+    Column("PARTITION", "{:<16}", "id"),
+    Column("GPU_TYPE", "{:<9}", "gpu"),
 ]
 
 # Columns that already have a fixed slot above, so the profiling block must never add a
@@ -149,9 +159,10 @@ FIXED_POSITION_HEADERS: Tuple[str, ...] = ("GPU%", "GMEM_GB", "GMEM_TOTAL_GB", "
 #
 # All in the "id" group, which is what puts them in every view: cols_for passes id
 # columns through unconditionally, so --cpu and --gpu need no further thought.
+# No `partition` here: it is a fixed column at the end of SUMMARY_COLUMNS now, and a
+# keyword for it would offer a second copy of a column the table already has.
 EXTRA_ID_COLUMNS: Dict[str, Tuple[Column, str]] = {
     "account": (Column("ACCOUNT", "{:<20}", "id"), "account"),
-    "partition": (Column("PARTITION", "{:<16}", "id"), "partition"),
     "name": (Column("NAME", "{:<16}", "id"), "name"),
     "cluster": (Column("CLUSTER", "{:<10}", "id"), "cluster"),
 }
@@ -196,6 +207,52 @@ def extra_id_cells(job, chosen) -> Dict[str, str]:
         column, attribute = EXTRA_ID_COLUMNS[key]
         cells[column.header] = str(getattr(job, attribute, "") or "-")
     return cells
+
+
+# Cards whose name the rule below cannot reach, as ``(*substrings, short)``: every
+# substring must be present. "RTX PRO 6000 Blackwell Server Edition" has no
+# letters-then-digits token at all -- "rtx" carries no digits and "6000" no letters --
+# so the generic rule finds nothing and the whole string would fall through to the
+# truncating fallback.
+_GPU_MODEL_ALIASES: Tuple[Tuple[str, ...], ...] = (
+    ("rtx", "6000", "RTX6K"),
+)
+
+# A card name as either source spells it: "nvidia_h100_80gb_hbm3" from sacct's
+# AllocTRES, "NVIDIA H100 80GB HBM3" from the exporter. Separators and case are the
+# only difference, so both normalise to the same tokens.
+_GPU_TOKEN = re.compile(r"[a-z]+\d+[a-z]*")
+
+
+def short_gpu_model(model: Optional[str]) -> str:
+    """A card model shortened to what fits a column: ``H100``, ``A100``, ``RTX6K``.
+
+    A *rule* rather than a table of this cluster's four cards, because jobscope runs
+    where none of them are: the first letters-then-digits token is the model number
+    for essentially every NVIDIA datacentre part, so ``V100``, ``L40S`` and ``A40``
+    come out right on clusters nobody here has tested against. The vendor word needs
+    no special case -- "nvidia" and "tesla" carry no digits, so the pattern steps
+    over them the same way it steps over "hbm" and "sxm".
+
+    Unrecognised names truncate rather than blank: this column sits beside ``#GPU``,
+    so an empty cell reads as "no GPU" when it means "a card we could not name".
+
+    Both spellings land on the same answer deliberately -- the column is filled from
+    sacct for a finished job and from the exporter for a running one, and a card that
+    renamed itself between the two views would look like a different card.
+    """
+    text = str(model or "").strip().lower()
+    if not text:
+        return ""
+    for *needles, short in _GPU_MODEL_ALIASES:
+        if all(n in text for n in needles):
+            return short
+    found = _GPU_TOKEN.search(text)
+    if found:
+        return found.group(0).upper()
+    # Nothing matched the shape: name it as far as the column goes rather than not
+    # at all. Separators become "_" so the cell is one word however it was spelled.
+    return re.sub(r"[^a-z0-9]+", "_", text).strip("_").upper()[:11]
 
 
 def _block_column(header: str, index: Optional[int] = None) -> Column:
@@ -791,26 +848,53 @@ def narrowing_pairs(nodename: Optional[str], gpu_ids) -> List[Tuple[str, str]]:
     return pairs
 
 
+def known_pairs(labelled: List[Tuple[str, Tuple[str, ...]]]) -> List[Tuple[str, str]]:
+    """``(label, values)`` pairs for the values that are actually known.
+
+    Joined the way the owners are, and dropped entirely when nothing is known: these
+    are read off records rather than restated from a selection, so an empty tuple is
+    "the scheduler told us nothing", which is not a thing to print a line about.
+
+    Shared by the two explicit-JOBID branches -- :func:`context_pairs` for the sacct
+    views and :func:`jobscope.select._running_context` for the squeue one -- because
+    those two drifting apart is exactly how the running view ended up with no account
+    handling at all.
+    """
+    return [(label, ", ".join(values)) for label, values in labelled if values]
+
+
 def context_pairs(context: ReportContext,
                   specs: Optional[List] = None,
                   host_specs: Optional[List] = None,
                   average: bool = False) -> List[Tuple[str, str]]:
     """Context lines for the header block.
 
-    With explicit JOBIDs the -u/-A/-p filters are bypassed, so show the jobs'
-    actual owner(s) rather than the (misleading) default user, and drop the filter
-    lines. :func:`jobscope.rows.build_context` is what decides which case this is.
+    With explicit JOBIDs the -u/-A/-p filters are bypassed, so name the jobs' actual
+    owner, account and partition rather than the (misleading) default user and a
+    filter that was not applied. :func:`jobscope.rows.build_context` is what decides
+    which case this is.
+
+    Identity reads left to right and top to bottom -- who ran it, under what, then
+    where -- the order the ``--show`` columns use, so the header and the table agree.
+
+    The account and partition are unconditional in the filter branch: they always
+    carry a value there, "(all accounts)" and "(all partitions)" included, and the
+    whole point is that a selection spanning everything says so. In the JOBID branch
+    they are omitted when empty, because empty means no record came back and a header
+    that named a partition it never read would be the one thing this block promises
+    not to do.
     """
     if context.explicit_jobids:
         user_val = ", ".join(context.owners) or "(explicit job IDs)"
-        pairs = [("User", user_val), ("Select", context.desc)]
+        pairs = [("User", user_val)]
+        pairs += known_pairs([("Account", context.accounts),
+                              ("Partition", context.partitions)])
+        pairs.append(("Select", context.desc))
         return (pairs + source_pair(specs, host_specs=host_specs)
                 + sampled_pair(specs, context.unfinished, average, host_specs))
-    pairs = [("User", context.user)]
-    if context.account:
-        pairs.append(("Account", context.account))
-    if context.partition:
-        pairs.append(("Partition", context.partition))
+    pairs = [("User", context.user),
+             ("Account", context.account),
+             ("Partition", context.partition)]
     pairs.append(("Select", context.desc))
     if context.window:
         pairs.append(("Window", context.window))
@@ -1661,6 +1745,8 @@ class SummaryRenderer:
                 "NODE": job.nodes,
                 "#GPU": str(job.gpus) if job.gpus else "-",
                 "RUNTIME": job.runtime,
+                "PARTITION": job.partition or "-",
+                "GPU_TYPE": short_gpu_model(job.gpu_model) or "-",
             }
             # Only the headers --show selected; a cell with no column is never read,
             # and a column with no cell renders blank, so the two come from one place.

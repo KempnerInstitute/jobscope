@@ -69,6 +69,22 @@ def gpus_from_tres(alloc_tres) -> int:
     return int(match.group(1)) if match else 0
 
 
+def gpu_model_from_tres(alloc_tres) -> str:
+    """The card model Slurm recorded for a job, or ``""`` when it did not record one.
+
+    Slurm writes both forms side by side -- ``gres/gpu=1`` for the count and
+    ``gres/gpu:nvidia_h100_80gb_hbm3=1`` for what that one card was -- so this is a
+    second reader over the string :func:`gpus_from_tres` already counts from. It is
+    free: sacct fetches AllocTRES for the count regardless.
+
+    Empty when the job's cards disagree, for the same reason
+    :func:`jobscope.dcgm.job_model` says nothing then: the column is one cell, and
+    neither of two models is the honest answer for a job that used both.
+    """
+    models = set(re.findall(r"gres/gpu:([^=,]+)=", str(alloc_tres)))
+    return models.pop() if len(models) == 1 else ""
+
+
 def bytes_to_gb(num_bytes: float) -> str:
     """Bytes to a GiB value labeled GB (as jobstats does), trailing zeros trimmed."""
     return "{:.1f}".format(num_bytes / GIB).rstrip("0").rstrip(".") + "GB"

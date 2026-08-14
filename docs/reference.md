@@ -37,9 +37,30 @@ The header states the window actually scanned, since `last 1 day` does not say w
 day and a `-D` window moves with the clock:
 
 ```
+  User:      alice
+  Account:   (all accounts)
+  Partition: (all partitions)
   Select:    last 1 day, completed
   Window:    2026-07-30 11:25 .. 2026-07-31 11:25
 ```
+
+The user, account and partition lines are **unconditional**, and say so when the axis
+was not narrowed. A report spanning every account otherwise looks exactly like one
+narrowed to yours, which is the same reason the `Window` line exists. Pass `-A`/`-p`
+and the line names the filter instead.
+
+An explicit `JOBID` selection bypasses those filters, so its header *reports* rather
+than restates — the account and partition come off the records, and several jobs
+spanning two accounts name both:
+
+```
+  User:      alice
+  Account:   kempner_wharper_lab
+  Partition: kempner_h100
+  Select:    1 job ID(s)
+```
+
+If the scheduler returned no record, those two lines are absent rather than guessed.
 
 `-N` walks backwards a day at a time until it has enough jobs, so it stays fast on a
 busy partition; the `Window` line reports how far back it went. For an explicit
@@ -56,6 +77,11 @@ over 300,000 jobs.
 `-p` partition · `-u` user · `-A` account · `-t` how the job ended
 (`finished` only) · `--min-elapsed` runtime floor (`running` only, default 10m — a job
 still loading data reads as idle; `0s` disables it).
+
+`-p`, `-u` and `-A` narrow both modes, and every one of them is pushed to Slurm rather
+than applied afterwards. An explicit `JOBID` applies none of them — the IDs are the
+selection, `jobscope` says on stderr which flags it is therefore ignoring, and the
+header names the jobs' own account and partition instead of a filter that never ran.
 
 **`finished` means finished.** Completed jobs only by default, never running ones — a
 running job has no final numbers, and mixing it in distorts every figure. `-t` selects
@@ -128,36 +154,67 @@ Every per-job view prints the same columns, so a job reads identically whether i
 finished or is still running:
 
 ```
-JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  RUNTIME
+JOBID  USER  STATE  NODE  CPU%  MEM%  #GPU  GPU%  GMEM%  SM_ACT%  OCC%  TENSOR%  DRAM%  POWER_W  RUNTIME  PARTITION  GPU_TYPE
 ```
 
 `NODE` is the node count, `#GPU` the allocated GPU count. `CPU%`/`MEM%` sit beside
 `SM_ACT%` deliberately: a GPU job with low `GPU%` and high `CPU%` is held up on the
 host.
 
+`PARTITION` and `GPU_TYPE` come last because everything before them is what the job
+*did* and those two are what it ran **on**. A selection that narrows neither — the
+default — otherwise cannot tell its own rows apart:
+
+```console
+$ jobscope -j 38418744 -j 38418770 -j 38418771
+JOBID     USER       STATE     ... RUNTIME     PARTITION        GPU_TYPE
+38418744  bdesinghu  COMPLETED ... 00:00:02    kempner          A100
+38418770  bdesinghu  COMPLETED ... 00:00:04    kempner_h200     H200
+38418771  bdesinghu  COMPLETED ... 00:00:01    kempner_rtx      RTX6K
+```
+
+`GPU_TYPE` is shortened to the model number — `A100`, `H100`, `H200`, `RTX6K`, and
+`V100`/`L40S`/`A40` on clusters that have them. It is read from Slurm's `AllocTRES`
+for a finished job, which sacct already fetches for the GPU count, so it costs no
+query and survives `--no-dcgm`. A *running* job has no such record — squeue's format
+carries no allocated-TRES field — so it falls back to the model the exporter reports.
+A card neither source can name prints `-`, and one whose name matches no known shape
+is truncated rather than blanked.
+
 `--cpu` narrows to the host columns — for *finished* jobs that needs no Prometheus at
-all. `--gpu` narrows to the GPU columns. `--all-metrics` widens the profiling block.
+all — and drops `GPU_TYPE` with the rest of the GPU block, since a card model has no
+place in a host view. `PARTITION` is identity, not a GPU fact, so it survives every
+view. `--gpu` narrows to the GPU columns. `--all-metrics` widens the profiling block
+in the middle; the last two columns stay last.
 
 ### Identity columns
 
-Every row names the job and its owner. `--show` adds more, comma-separated:
+Every row names the job and its owner. `--show` adds more, comma-separated.
+
+These are the *per-row* answer, and are opt-in for the width reason below. The header
+block's `Account`/`Partition` lines are the *per-selection* answer and are always
+printed — they say what the report covers, which is a different question from what any
+one job was charged to, and it is the one worth answering unasked.
 
 | keyword | column |
 |---|---|
 | `account` | `ACCOUNT` — the Slurm account the job was charged to |
-| `partition` | `PARTITION` — the partition it ran in |
 | `name` | `NAME` — the job name |
 | `cluster` | `CLUSTER` |
-| `all` | `account`, `partition`, `cluster` — **not** `name` |
+| `all` | `account`, `cluster` — **not** `name` |
+
+**There is no `partition` keyword**: `PARTITION` is a fixed column at the end of the
+table, so asking for it would offer a second copy of a column already there. `--show
+partition` is an error naming the set above rather than a silently ignored flag.
 
 `all` is the useful wide view rather than the widest possible one. A job name is free
-text, often templated and longer than the account and partition together, and carries
+text, often templated and longer than the account and the cluster together, and carries
 nothing you are scanning a table for; ask for it with `--show name` when you want it.
 
 ```console
-$ jobscope finished -u alice --show account,partition
-JOBID        USER         ACCOUNT              PARTITION        STATE     NODE  CPU% ...
-38191538     ehuttlin     kempner_wharper_lab  kempner_h100_priority COMPLETED 1     33   ...
+$ jobscope finished -u alice --show account
+JOBID        USER         ACCOUNT              STATE     NODE  CPU% ...
+38191538     ehuttlin     kempner_wharper_lab  COMPLETED 1     33   ...
 ```
 
 They sit after `USER`, so identity reads left to right — who ran it, under what, then
@@ -165,11 +222,14 @@ where — and the order is fixed regardless of the order you type the keywords, 
 runs of the same report can be diffed against each other.
 
 **They are opt-in because they are wide.** Measured over 31,029 jobs here, an account
-runs to 23 characters and a partition to 22. The table streams — a column's width is
-fixed before the first row is read — so a long value overflows its column and pushes
-the rest of the row right rather than being truncated. Nothing is ever lost or run
-together; the row just stops lining up. `--csv` has no width problem and carries the
-full values.
+runs to 23 characters. The table streams — a column's width is fixed before the first
+row is read — so a long value overflows its column and pushes the rest of the row right
+rather than being truncated. Nothing is ever lost or run together; the row just stops
+lining up. `--csv` has no width problem and carries the full values.
+
+The same is true of the fixed `PARTITION` column, which runs to 22 characters. It is
+always shown despite that, because its width buys the one thing no other column can
+say: which of a mixed selection's partitions this row is.
 
 `--show` composes with everything: `--all-metrics` only widens the profiling block, so
 the identity columns in front of it are unaffected. On `--per-gpu` and `--per-node` the
@@ -547,6 +607,7 @@ from `squeue` and averaging each job over its own runtime.
 ```bash
 jobscope                          # your running jobs
 jobscope -p kempner               # your running jobs in one partition
+jobscope -A kempner_lab           # your running jobs charged to one account
 jobscope --instant                # the newest scrape instead of the runtime average
 jobscope --min-elapsed 0s         # no runtime floor at all
 ```

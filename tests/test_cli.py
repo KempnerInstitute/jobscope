@@ -214,6 +214,16 @@ def test_partition_survives_in_both_modes():
     assert _request(mode=FINISHED, partition="kempner").partition == "kempner"
 
 
+def test_account_survives_in_both_modes():
+    """docs/reference.md lists -A with no mode caveat, so it has to hold in both.
+
+    The Request always carried it; it was the running *selection* that dropped it,
+    which is why this pairs with test_running_selection_carries_every_filter.
+    """
+    assert _request(mode=RUNNING, account="kempner_lab").account == "kempner_lab"
+    assert _request(mode=FINISHED, account="kempner_lab").account == "kempner_lab"
+
+
 # --- granularity and columns compose ---------------------------------------
 
 def test_per_gpu_is_the_only_spelling():
@@ -323,15 +333,35 @@ def _record_with_identity(record, **kw):
 
 def test_show_adds_the_identity_columns_to_the_table(monkeypatch, capsys, gpu_record):
     _patch_sacct(monkeypatch, {"100": _record_with_identity(
-        gpu_record, account="kempner_wharper_lab", partition="kempner_h100")})
-    main(["finished", "--no-dcgm", "--show", "account,partition", "-D", "1", "-u", "bob"])
+        gpu_record, account="kempner_wharper_lab", cluster="odyssey")})
+    main(["finished", "--no-dcgm", "--show", "account,cluster", "-D", "1", "-u", "bob"])
     out = capsys.readouterr().out
-    assert "ACCOUNT" in out and "PARTITION" in out
-    assert "kempner_wharper_lab" in out and "kempner_h100" in out
+    assert "ACCOUNT" in out and "CLUSTER" in out
+    assert "kempner_wharper_lab" in out and "odyssey" in out
+
+
+def test_the_partition_column_needs_no_flag(monkeypatch, capsys, gpu_record):
+    """It used to be `--show partition`; it is a fixed last column now.
+
+    Which is the point: a sweep that narrows no partition could not tell its own rows
+    apart, and the flag was the thing you had to already know to type.
+    """
+    _patch_sacct(monkeypatch, {"100": _record_with_identity(
+        gpu_record, partition="kempner_h100")})
+    main(["finished", "--no-dcgm", "-D", "1", "-u", "bob"])
+    out = capsys.readouterr().out
+    assert "PARTITION" in out and "kempner_h100" in out
+    assert out.count("PARTITION") == 1
 
 
 def test_without_show_the_table_is_unchanged(monkeypatch, capsys, gpu_record):
-    """These columns are wide enough that appearing uninvited would be the bug."""
+    """These columns are wide enough that appearing uninvited would be the bug.
+
+    The record's account is absent from the output rather than merely absent from the
+    table: this is a *window* selection, so the header restates the filter -- "(all
+    accounts)" -- and never reads a record to do it. The -j case below is the one where
+    the header does name the value, and it names it in the header only.
+    """
     _patch_sacct(monkeypatch, {"100": _record_with_identity(
         gpu_record, account="kempner_wharper_lab", partition="kempner_h100")})
     main(["finished", "--no-dcgm", "-D", "1", "-u", "bob"])
@@ -339,15 +369,42 @@ def test_without_show_the_table_is_unchanged(monkeypatch, capsys, gpu_record):
     assert "ACCOUNT" not in out and "kempner_wharper_lab" not in out
 
 
+def test_the_header_states_the_scope_end_to_end(monkeypatch, capsys, gpu_record):
+    """A window selection narrows nothing, and the header says so rather than going
+    blank -- which is what made a whole-cluster report indistinguishable from yours."""
+    _patch_sacct(monkeypatch, {"100": gpu_record})
+    main(["finished", "--no-dcgm", "-D", "1", "-u", "bob"])
+    out = capsys.readouterr().out
+    assert "Account:   (all accounts)" in out
+    assert "Partition: (all partitions)" in out
+
+
+def test_an_explicit_jobid_header_names_the_jobs_own_scope(monkeypatch, capsys, gpu_record):
+    """-A/-p are ignored here -- cli says so on stderr -- so the header must not claim
+    a filter scope it was just told it is not applying."""
+    _patch_sacct(monkeypatch, {"100": _record_with_identity(
+        gpu_record, account="kempner_wharper_lab", partition="kempner_h100")})
+    main(["-j", "100", "--no-dcgm"])
+    out = capsys.readouterr().out
+    assert "Account:   kempner_wharper_lab" in out
+    assert "Partition: kempner_h100" in out
+    assert "(all accounts)" not in out and "(all partitions)" not in out
+    # Still the header only: the table keeps its opt-in width contract.
+    assert "ACCOUNT" not in out
+
+
 def test_show_reaches_the_csv_at_full_width(monkeypatch, capsys, gpu_record):
     """CSV has no column-width problem, so nothing is abbreviated there."""
     _patch_sacct(monkeypatch, {"100": _record_with_identity(
         gpu_record, account="kempner_wharper_lab", partition="kempner_h100_priority")})
-    main(["finished", "--no-dcgm", "--show", "account,partition", "--csv",
+    main(["finished", "--no-dcgm", "--show", "account", "--csv",
           "-D", "1", "-u", "bob"])
     out = capsys.readouterr().out
-    assert "JOBID,USER,ACCOUNT,PARTITION,STATE" in out
-    assert "kempner_wharper_lab,kempner_h100_priority" in out
+    assert "JOBID,USER,ACCOUNT,STATE" in out
+    assert "kempner_wharper_lab" in out
+    # The fixed columns come along at full width too, at the end of the row -- the
+    # partition is 21 characters and nothing abbreviates it here.
+    assert ",kempner_h100_priority,-" in out
 
 
 def test_show_names_the_job_block_rather_than_repeating_down_it(monkeypatch, capsys,
@@ -370,8 +427,11 @@ def test_show_rejects_an_unknown_column_by_name(monkeypatch, capsys, gpu_record)
     err = capsys.readouterr().err
     assert "--show has no acount" in err
     # The error has to name what *is* spellable, or the reader is left guessing.
-    for word in ("account", "partition", "name", "cluster"):
+    for word in ("account", "name", "cluster"):
         assert word in err
+    # And `partition` is no longer among them: it is a fixed column, so asking for it
+    # is an error naming the set rather than a second copy of a column already there.
+    assert "partition" not in err
 
 
 def test_no_dcgm_never_contacts_prometheus(monkeypatch, capsys, gpu_record):

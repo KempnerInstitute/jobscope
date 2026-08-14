@@ -36,6 +36,7 @@ from .report import (
     context_pairs,
     cpu_timeseries,
     dcgm_timeseries,
+    known_pairs,
     narrowing_pairs,
     no_such_node,
     running_combined_timeseries,
@@ -174,8 +175,12 @@ def resolve(request: Request, cfg: config.Config, timeout: Optional[float],
 # --- squeue -----------------------------------------------------------------
 
 def _running_selection(request: Request) -> RunningSelection:
+    # Every filter the Request carries, or squeue is asked a wider question than the
+    # header claims: -A used to be dropped here, so `jobscope -A other_lab` reported
+    # every account of yours and said nothing about it.
     return RunningSelection(jobids=list(request.jobids), partition=request.partition,
-                         user=request.user, min_elapsed=request.min_elapsed)
+                         account=request.account, user=request.user,
+                         min_elapsed=request.min_elapsed)
 
 
 def _running_context(selection: RunningSelection, jobs: dict, gpus: dict,
@@ -183,9 +188,17 @@ def _running_context(selection: RunningSelection, jobs: dict, gpus: dict,
                      average: bool = False) -> List[Tuple[str, str]]:
     """Header context for a squeue selection.
 
-    With explicit JOBIDs the -u/-p filters are bypassed, so name the jobs' actual
-    owners rather than a filter that was not applied -- as :func:`context_pairs`
-    does for the historical modes.
+    The squeue counterpart of :func:`context_pairs`, and deliberately the same shape:
+    with explicit JOBIDs the -u/-A/-p filters are bypassed, so name the jobs' actual
+    owner, account and partition; otherwise restate the filters, unfiltered ones
+    included. squeue already reports ``%a`` and ``%P`` for every job, so the JOBID
+    branch costs nothing extra.
+
+    Not folded into ``context_pairs`` itself, though the two want to be one function:
+    this branch also carries a GPUs line between Select and Source, and asks
+    ``source_pair`` for ``have_jobstats=False``, neither of which a ReportContext can
+    say today. The shared half is :func:`known_pairs`. Whatever changes here changes
+    there.
 
     The provenance line matters more here than in the historical modes, not less: a
     running job has no stored summary, so its GPU% is measured rather than read back, and
@@ -194,11 +207,17 @@ def _running_context(selection: RunningSelection, jobs: dict, gpus: dict,
     if selection.jobids:
         owners = sorted({job["user"] for job in jobs.values() if job.get("user")})
         user = ", ".join(owners) if owners else "(explicit job IDs)"
+        pairs = [("User", user)]
+        pairs += known_pairs([
+            ("Account", tuple(sorted({job["account"] for job in jobs.values()
+                                      if job.get("account")}))),
+            ("Partition", tuple(sorted({job["partition"] for job in jobs.values()
+                                        if job.get("partition")}))),
+        ])
     else:
-        user = selection.user or "(all users)"
-    pairs = [("User", user)]
-    if selection.partition:
-        pairs.append(("Partition", selection.partition))
+        pairs = [("User", selection.user or "(all users)"),
+                 ("Account", selection.account or "(all accounts)"),
+                 ("Partition", selection.partition or "(all partitions)")]
     pairs.append(("Select", selection.describe()))
     pairs.append(("GPUs", "%d across %d job(s)" % (len(gpus), len(jobs))))
     # Every job here came from squeue, so all of them are unfinished by definition.

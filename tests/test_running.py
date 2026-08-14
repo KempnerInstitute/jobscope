@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from jobscope import dcgm
+from jobscope import dcgm, running
 from jobscope import timeseries as ts
 from jobscope.cpu import host_stats_many
 from jobscope.dcgm import spec_named, window_query
@@ -28,6 +28,7 @@ from jobscope.running import (
     default_running_specs,
     discover_gpus,
     extended_running_specs,
+    fetch_jobs,
     filter_by_elapsed,
     format_duration,
     gpu_labels,
@@ -367,9 +368,66 @@ def test_describe_filters_says_all_users_when_unfiltered():
     assert sel.describe_filters().startswith("all users, partition kempner")
 
 
+def _squeue_cmd(monkeypatch, selection, stdout=""):
+    """The command ``fetch_jobs`` builds for ``selection``."""
+    seen = []
+
+    def capture(cmd, *_a, **_kw):
+        seen.append(cmd)
+        return stdout
+
+    monkeypatch.setattr(running, "run_capture", capture)
+    fetch_jobs(selection, None)
+    return seen[-1]
+
+
+def test_every_filter_reaches_squeue(monkeypatch):
+    """-A used to be parsed, packed into the Request, and then silently dropped.
+
+    So `jobscope -A other_lab` reported every account of yours and said nothing
+    about it -- and once the header restates the account, an unpushed filter would
+    make the header a lie rather than merely incomplete.
+    """
+    cmd = _squeue_cmd(monkeypatch, RunningSelection(
+        user="alice", account="kempner_dev", partition="kempner_h100"))
+    assert cmd[cmd.index("-A") + 1] == "kempner_dev"
+    assert cmd[cmd.index("-p") + 1] == "kempner_h100"
+    assert cmd[cmd.index("-u") + 1] == "alice"
+
+
+def test_an_unset_filter_reaches_squeue_as_nothing(monkeypatch):
+    cmd = _squeue_cmd(monkeypatch, RunningSelection(user="alice"))
+    assert "-A" not in cmd and "-p" not in cmd
+
+
+def test_explicit_job_ids_bypass_the_account_filter(monkeypatch):
+    """As they bypass every other one -- the IDs are the selection."""
+    cmd = _squeue_cmd(monkeypatch,
+                      RunningSelection(jobids=["1"], account="kempner_dev"),
+                      stdout=squeue_line(raw="1", disp="1"))
+    assert "-A" not in cmd and "-j" in cmd
+
+
+def test_describe_filters_names_the_account_too():
+    """It is a pushed filter like the others, so an empty result must name it.
+
+    "no running jobs (user alice, running, longer than 10m)" sent someone looking at
+    the runtime floor for an emptiness that -A caused.
+    """
+    sel = RunningSelection(account="kempner_dev", partition="kempner",
+                           user="alice", min_elapsed=600)
+    assert sel.describe_filters() == (
+        "user alice, account kempner_dev, partition kempner, running, longer than 10m")
+
+
 def test_widening_hints_cover_only_the_active_filters():
     assert RunningSelection(user="alice", partition="p", min_elapsed=600).widening_hints() == [
         "set --min-elapsed 0s to include jobs that just started",
+        "drop -p to search every partition"]
+    assert RunningSelection(user="alice", account="a", partition="p",
+                            min_elapsed=600).widening_hints() == [
+        "set --min-elapsed 0s to include jobs that just started",
+        "drop -A to search every account",
         "drop -p to search every partition"]
     assert RunningSelection(user=None, partition=None, min_elapsed=0).widening_hints() == []
 
@@ -389,7 +447,7 @@ def test_the_user_filter_is_never_widened_by_a_hint():
 
 def test_explicit_job_ids_keep_the_plain_description():
     """Job IDs bypass the filters, so naming them would be misleading."""
-    sel = RunningSelection(jobids=["1"], user="alice", partition="p")
+    sel = RunningSelection(jobids=["1"], user="alice", account="a", partition="p")
     assert sel.describe_filters() == "1 job ID(s)"
 
 

@@ -20,7 +20,7 @@ from jobscope.slurm import (
     select_jobs,
 )
 
-from .conftest import GPU_STATS, make_jobstats
+from .conftest import CPU_STATS, GPU_STATS, make_jobstats
 
 
 def test_default_user_from_env(monkeypatch):
@@ -325,6 +325,27 @@ def test_fetch_parses_record(monkeypatch):
     # fields added before it must not have eaten into it.
     assert record.account == "kempner_wharper_lab"
     assert record.partition == "kempner_h100"
+
+
+def test_fetch_reads_the_card_model_out_of_the_tres_it_already_counts(monkeypatch):
+    """AllocTRES is fetched for the GPU count; the model rides along in the same field.
+
+    So GPU_TYPE costs no extra sacct field and no query at all -- which is what lets
+    it survive `--cpu`, the view that talks to no exporter.
+    """
+    line = _record_line(
+        "100", make_jobstats(GPU_STATS),
+        tres="billing=2651,cpu=2,gres/gpu:nvidia_h100_80gb_hbm3=1,gres/gpu=1,mem=8G")
+    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line)
+    record = fetch(["100"], None)["100"]
+    assert record.gpu_model == "nvidia_h100_80gb_hbm3"
+    assert record.gpus == 1          # still the untyped entry, not the typed one
+
+
+def test_a_cpu_job_has_no_card_model(monkeypatch):
+    line = _record_line("100", make_jobstats(CPU_STATS), tres="cpu=8,mem=64G,node=1")
+    monkeypatch.setattr(slurm, "run_capture", lambda *a, **k: line)
+    assert fetch(["100"], None)["100"].gpu_model == ""
 
 
 def test_the_field_list_and_the_parser_agree_on_how_many_fields():

@@ -98,15 +98,16 @@ class RunningSelection:
 
     jobids: List[str] = field(default_factory=list)
     partition: Optional[str] = None
+    account: Optional[str] = None
     user: Optional[str] = None      # None = every user
     min_elapsed: int = 600
 
     def describe(self) -> str:
         """Human-readable summary for the context block.
 
-        Omits the user and partition, which the context block prints on their own
-        lines. :meth:`describe_filters` is the form to use where those lines are
-        not shown.
+        Omits the user, account and partition, which the context block prints on
+        their own lines. :meth:`describe_filters` is the form to use where those
+        lines are not shown.
         """
         if self.jobids:
             return "%d job ID(s)" % len(self.jobids)
@@ -116,7 +117,8 @@ class RunningSelection:
         return ", ".join(parts)
 
     def describe_filters(self) -> str:
-        """:meth:`describe` plus the user and partition, for the empty-result message.
+        """:meth:`describe` plus the user, account and partition, for the empty-result
+        message.
 
         An empty result is exactly when every filter has to be named: "no running
         jobs (running, longer than 10m)" reads as an idle partition, when usually
@@ -125,6 +127,8 @@ class RunningSelection:
         if self.jobids:
             return self.describe()
         parts = ["user %s" % self.user if self.user else "all users"]
+        if self.account:
+            parts.append("account %s" % self.account)
         if self.partition:
             parts.append("partition %s" % self.partition)
         return ", ".join(parts + [self.describe()])
@@ -145,6 +149,8 @@ class RunningSelection:
         hints = []
         if self.min_elapsed > 0:
             hints.append("set --min-elapsed 0s to include jobs that just started")
+        if self.account:
+            hints.append("drop -A to search every account")
         if self.partition:
             hints.append("drop -p to search every partition")
         return hints
@@ -268,8 +274,8 @@ def job_sort_key(job: RunningJob) -> Tuple[int, int]:
 def fetch_jobs(selection: RunningSelection, timeout: Optional[float]) -> Dict[int, RunningJob]:
     """Running jobs matching ``selection``, keyed by raw job ID.
 
-    Explicit job IDs bypass the partition/user filters and the runtime floor, as
-    they do in the historical views, and a miss is an error rather than an empty
+    Explicit job IDs bypass the partition/account/user filters and the runtime floor,
+    as they do in the historical views, and a miss is an error rather than an empty
     table -- with a pointer at the historical view, since the usual cause is that
     the job has already finished.
     """
@@ -289,6 +295,8 @@ def fetch_jobs(selection: RunningSelection, timeout: Optional[float]) -> Dict[in
     cmd += ["-t", "RUNNING"]
     if selection.partition:
         cmd += ["-p", selection.partition]
+    if selection.account:
+        cmd += ["-A", selection.account]
     if selection.user:
         cmd += ["-u", selection.user]
     jobs = parse_squeue(run_capture(cmd, timeout, "squeue query") or "")

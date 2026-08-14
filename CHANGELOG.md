@@ -2,6 +2,94 @@
 
 ## Unreleased
 
+### `PARTITION` and `GPU_TYPE` are now the last two columns
+
+Every row already said what a job *did*. Neither said what it ran **on**, so a
+selection that narrowed no partition could not tell its own rows apart — three jobs on
+three different cards read identically:
+
+```console
+$ jobscope -j 38418744 -j 38418770 -j 38418771
+JOBID     USER       STATE     ... RUNTIME     PARTITION        GPU_TYPE
+38418744  bdesinghu  COMPLETED ... 00:00:02    kempner          A100
+38418770  bdesinghu  COMPLETED ... 00:00:04    kempner_h200     H200
+38418771  bdesinghu  COMPLETED ... 00:00:01    kempner_rtx      RTX6K
+```
+
+`GPU_TYPE` is the model number: `A100`, `H100`, `H200`, `RTX6K` — and `V100`, `L40S`,
+`A40` on clusters that have them, because it is a rule (the first letters-then-digits
+token) rather than a table of this cluster's cards. An unrecognised name truncates
+rather than blanking, since an empty cell beside `#GPU` reads as "no GPU".
+
+**It costs no query.** For a finished job it comes out of the `AllocTRES` sacct already
+fetches for the GPU count, so it survives `--no-dcgm` and needs no Prometheus. A
+running job has no such record — squeue's format carries no allocated-TRES field — so
+it falls back to the model the exporter reports. Neither available prints `-`.
+
+`--cpu` drops `GPU_TYPE` with the rest of the GPU block: a card model has no place in a
+host view, and a running `--cpu` report queries no exporter, so the column would be
+dashes all the way down. `PARTITION` is identity, not a GPU fact, and survives every
+view. `--all-metrics` still widens the profiling block in the middle; the last two
+columns stay last.
+
+**Breaking: `--show partition` is gone.** `PARTITION` is a fixed column now, so the
+keyword would offer a second copy of a column already on the table. It is an error
+naming the valid set (`account`, `name`, `cluster`) rather than a flag that parses and
+does nothing, and `--show all` now means `account, cluster`. `--per-gpu`/`--per-node`
+block headers no longer carry the partition label; the header block states it instead.
+
+### The header states the account and partition scope, always
+
+`Account:` and `Partition:` used to print only when you passed `-A`/`-p`, and not at
+all for an explicit job ID. So a report covering every account looked exactly like one
+narrowed to yours, and `jobscope -j 38191538` never said where the job ran:
+
+```console
+$ jobscope finished -D 1
+  User:      alice
+  Account:   (all accounts)          # was: no line at all
+  Partition: (all partitions)        # was: no line at all
+  Select:    last 1 day, completed
+  Window:    2026-08-12 11:25 .. 2026-08-13 11:25
+```
+
+This is what the `User` line has always done — `(all users)` under `-a` — and what the
+`Window` line exists for: a saved report has to carry its own scope.
+
+An explicit `JOBID` bypasses those filters, so its header **reports rather than
+restates**: the account and partition come off the records, and several jobs spanning
+two accounts name both.
+
+```console
+$ jobscope -j 38191538
+  Account:   kempner_wharper_lab     # the job's, not a filter's
+  Partition: kempner_h100
+```
+
+Nothing was read, nothing is claimed — if the scheduler returned no record, those two
+lines are absent rather than guessed. `--csv` gains the two rows in its leading context
+block; `jobscope plot` skips to `JOBID` and is unaffected.
+
+The header lines are the per-selection answer — what the report *covers*. The
+per-row answer is the `PARTITION` column, below.
+
+### `-A/--account` now filters running jobs
+
+It was accepted in every mode and silently dropped in one. `RunningSelection` had no
+`account` field, so the flag never reached `squeue`, and `jobscope -A other_lab`
+reported **every** account you could see, with no warning:
+
+```console
+$ jobscope -A kempner_lab           # was: every account, silently
+```
+
+The empty-result message names it too, so a selection that matched nothing says which
+filter to drop: `no running jobs match (user alice, account kempner_lab, running,
+longer than 10m)` and `Widen it: ...; or drop -A to search every account`.
+
+Behaviour change for scripts: a running selection passing `-A` was getting every
+account and now gets one.
+
 ### `--eff` and `--verify` now judge the last 3 hours by default
 
 Given no window of their own, both used to reduce over the job's **whole runtime**.

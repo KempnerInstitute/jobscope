@@ -26,7 +26,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 from . import config
 from .errors import JobscopeError
-from .jobstats import decode_admin_comment, gpus_from_tres
+from .jobstats import decode_admin_comment, gpu_model_from_tres, gpus_from_tres
 
 TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
@@ -221,6 +221,12 @@ class JobRecord:
     # two bulk paths two different record shapes.
     account: str = ""
     partition: str = ""
+    # The card the job ran on, as Slurm spells it ("nvidia_h100_80gb_hbm3"). Read out
+    # of the AllocTRES this record already parses for ``gpus``, so it costs no field
+    # and no query -- which is what keeps GPU_TYPE on screen under --cpu, the view
+    # that talks to no exporter at all. Empty for a CPU job, and empty when the job's
+    # cards disagree; see :func:`jobscope.jobstats.gpu_model_from_tres`.
+    gpu_model: str = ""
 
     @property
     def unfinished(self) -> bool:
@@ -749,6 +755,7 @@ def _parse_fetch_lines(out: str, records: Dict[str, JobRecord]) -> None:
             user=user or "?",
             account=account,
             partition=partition,
+            gpu_model=gpu_model_from_tres(alloc_tres),
         )
 
 

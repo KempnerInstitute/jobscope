@@ -97,6 +97,20 @@ def test_sacct_selection_passes_all_users_through():
     assert selection.all_users and selection.user is None
 
 
+def test_running_selection_carries_every_filter():
+    """The squeue counterpart of the sacct case above, and the reason it exists.
+
+    The account was the one filter this function did not copy across, so it was
+    parsed, validated and then thrown away -- `jobscope -A other_lab` reported every
+    account the caller could see.
+    """
+    selection = select_mod._running_selection(
+        Request(mode=RUNNING, user="alice", account="kempner_lab",
+                partition="kempner", min_elapsed=600))
+    assert selection.user == "alice" and selection.account == "kempner_lab"
+    assert selection.partition == "kempner" and selection.min_elapsed == 600
+
+
 def test_historical_yields_one_chunk_per_batch(monkeypatch, gpu_record, stream_window):
     rec2 = dataclasses.replace(gpu_record, jobid="101")
     records = {"100": gpu_record, "101": rec2}
@@ -389,6 +403,52 @@ def test_the_empty_running_message_names_the_filters_and_how_to_widen(monkeypatc
     # The filter that actually excluded them is the user filter, and the message still
     # names it -- but the flag that lifts it is -a, which belongs to docs/admin.md.
     assert "-a" not in err and "--all-users" not in err
+
+
+def test_the_empty_running_message_names_the_account_filter(monkeypatch, capsys):
+    monkeypatch.setattr(select_mod, "fetch_jobs", lambda sel, t: {})
+    resolve(Request(mode=RUNNING, user="alice", account="kempner_lab"),
+            _cfg(), None, 1, None)
+    err = capsys.readouterr().err
+    assert "account kempner_lab" in err
+    assert "drop -A to search every account" in err
+
+
+def _identity(pairs):
+    return {k: v for k, v in pairs if k in ("User", "Account", "Partition")}
+
+
+def test_the_running_header_states_the_account_and_partition_scope():
+    """The squeue half of the same promise the sacct header makes.
+
+    This branch had no Account handling at all, which is the same gap that let -A go
+    unpushed: the two context builders are written side by side and drifted apart.
+    """
+    from jobscope.running import RunningSelection
+    unfiltered = select_mod._running_context(RunningSelection(user="alice"), {}, {})
+    assert _identity(unfiltered) == {"User": "alice",
+                                     "Account": "(all accounts)",
+                                     "Partition": "(all partitions)"}
+    narrowed = select_mod._running_context(
+        RunningSelection(user="alice", account="kempner_lab", partition="kempner"), {}, {})
+    assert _identity(narrowed) == {"User": "alice",
+                                   "Account": "kempner_lab",
+                                   "Partition": "kempner"}
+
+
+def test_the_running_header_reads_job_ids_off_squeue():
+    """Explicit IDs bypass the filters, so the header reports rather than restates --
+    and squeue already sends %a and %P, so it costs nothing to ask."""
+    from jobscope.running import RunningSelection
+    jobs = {1: {"user": "alice", "account": "kempner_lab", "partition": "kempner"},
+            2: {"user": "bob", "account": "other_lab", "partition": "kempner"}}
+    pairs = select_mod._running_context(RunningSelection(jobids=["1", "2"]), jobs, {})
+    assert _identity(pairs) == {"User": "alice, bob",
+                                "Account": "kempner_lab, other_lab",
+                                "Partition": "kempner"}
+    # Nothing known is nothing claimed, as on the sacct side.
+    bare = select_mod._running_context(RunningSelection(jobids=["1"]), {}, {})
+    assert _identity(bare) == {"User": "(explicit job IDs)"}
 
 
 def test_both_branches_yield_the_same_chunk_shape(monkeypatch, gpu_record):

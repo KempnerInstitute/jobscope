@@ -155,7 +155,17 @@ class ReportContext:
 
     ``owners`` is populated only for an explicit-JOBID selection: there the -u/-A/-p
     filters were bypassed, so the header names the jobs' actual owners rather than a
-    filter that was not applied.
+    filter that was not applied. ``accounts`` and ``partitions`` are the same thing for
+    the other two identity axes, and are separate fields from ``account``/``partition``
+    for that reason: those two are *the filter that was applied*, these are *what the
+    records say*. Folded into one field, a header reading "Account: kempner_dev" could
+    not be told apart from an ``-A kempner_dev`` nobody typed.
+
+    ``user``/``account``/``partition`` state the unfiltered case rather than going
+    empty -- "(all users)", "(all accounts)", "(all partitions)" -- because a dropped
+    line reads as a narrower selection than was actually made. The record-derived
+    tuples have no such counterpart: empty means the scheduler returned no record, and
+    a header must not name a partition it never read.
     """
 
     desc: str = ""
@@ -164,6 +174,8 @@ class ReportContext:
     partition: str = ""
     window: str = ""
     owners: Tuple[str, ...] = ()
+    accounts: Tuple[str, ...] = ()
+    partitions: Tuple[str, ...] = ()
     explicit_jobids: bool = False
     # Whether any job has not ended, so its window is still filling. Two answers depend
     # on it and must not diverge: the Sampled line's span and whether the summary may
@@ -246,6 +258,12 @@ class JobRow:
     account: str = ""
     partition: str = ""
     cluster: str = ""
+    # The card this job ran on, unshortened, from whichever source could say: Slurm's
+    # AllocTRES for a finished job, the exporter's own model name for a running one
+    # (squeue's -o format has no tres-alloc code). ``report.short_gpu_model`` is what
+    # turns it into the GPU_TYPE cell, so the two spellings converge at the display
+    # rather than here -- ``model`` below still needs the exporter's exact string.
+    gpu_model: str = ""
     gpus: int = 0
     duration: Optional[int] = None
     # Whether the scheduler returned a record for this jobid at all. False means every

@@ -7,6 +7,7 @@ import re
 
 import pytest
 
+from jobscope import dcgm as dcgm_mod
 from jobscope import models, plot, report
 from jobscope.dcgm import catalog as gpu_catalog
 from jobscope.errors import JobscopeError
@@ -19,6 +20,7 @@ from jobscope.report import (
     dcgm_report,
     detail,
     fmt_context,
+    short_gpu_model,
     summarize,
 )
 from jobscope.rows import build_context, build_rows
@@ -83,6 +85,36 @@ def test_cols_for_views():
     assert all("NODE" in cols and "JOBID" in cols for cols in (everything, cpu, gpu))
 
 
+def test_partition_and_gpu_type_are_the_last_two_columns():
+    """Where a job ran, on the default table rather than behind a flag.
+
+    A sweep spanning three partitions on three card models could not tell its own rows
+    apart: the header names every partition it covered, but no row said which.
+    """
+    headers = [c.header for c in cols_for(SUMMARY_COLUMNS, "all", dcgm=True)]
+    assert headers[-2:] == ["PARTITION", "GPU_TYPE"]
+    assert headers[-3] == "RUNTIME"
+
+
+def test_the_cpu_view_drops_gpu_type_but_keeps_partition():
+    """--cpu is the host view, so a card model has no place in it -- and a running
+    --cpu report queries no exporter at all, so the column would be all dashes.
+
+    PARTITION is identity, not a GPU fact, so it stays in every view.
+    """
+    cpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "cpu")]
+    assert "PARTITION" in cpu and "GPU_TYPE" not in cpu
+    gpu = [c.header for c in cols_for(SUMMARY_COLUMNS, "gpu", dcgm=True)]
+    assert "PARTITION" in gpu and "GPU_TYPE" in gpu
+
+
+def test_the_profiling_block_does_not_push_past_the_last_two(gpu_record):
+    """--all-metrics widens the block in the middle; the tail must stay the tail."""
+    wide = [c.header for c in report.summary_columns(list(gpu_catalog().all_specs))]
+    assert wide[-2:] == ["PARTITION", "GPU_TYPE"]
+    assert "TENSOR%" in wide
+
+
 # --- the --show identity columns --------------------------------------------
 
 def _headers(show=(), specs=None):
@@ -96,25 +128,37 @@ def test_show_adds_nothing_by_default():
 
 def test_show_splices_after_user():
     """Identity reads left to right: who ran it, under what, then where."""
-    headers = _headers(("account", "partition"))
-    assert headers[:4] == ["JOBID", "USER", "ACCOUNT", "PARTITION"]
+    headers = _headers(("account", "cluster"))
+    assert headers[:4] == ["JOBID", "USER", "ACCOUNT", "CLUSTER"]
     assert headers[4] == "STATE"
 
 
 def test_show_order_is_fixed_not_typing_order():
     """Two people running the same report with the flags written differently must get
     the same table, or it cannot be diffed against itself."""
-    assert _headers(("partition", "account")) == _headers(("account", "partition"))
+    assert _headers(("cluster", "account")) == _headers(("account", "cluster"))
+
+
+def test_partition_is_no_longer_a_show_keyword():
+    """It is a fixed last column now, so the keyword would offer a second copy of it.
+
+    Rejected rather than accepted-and-ignored: a flag that parses and does nothing is
+    worse than one that says the column is already there.
+    """
+    assert "partition" not in report.SHOW_KEYWORDS
+    assert "partition" not in report.SHOW_ALL_KEYWORDS
+    # Still exactly one PARTITION column, wherever it is asked for.
+    assert _headers(("all",)).count("PARTITION") == 1
 
 
 def test_show_all_leaves_out_the_job_name():
     """`all` is the useful wide view, not the widest possible one.
 
-    A job name is free text -- often templated and longer than account and partition
-    together -- and carries nothing a reader scanning a table is looking for. It stays
-    reachable by name for whoever wants it.
+    A job name is free text -- often templated and longer than the account and the
+    cluster together -- and carries nothing a reader scanning a table is looking for.
+    It stays reachable by name for whoever wants it.
     """
-    assert _headers(("all",)) == _headers(("account", "partition", "cluster"))
+    assert _headers(("all",)) == _headers(("account", "cluster"))
     assert "NAME" not in _headers(("all",))
     assert "NAME" in _headers(("name",))
     # Asked for alongside `all`, it still appears -- `all` widens, it does not exclude.
@@ -125,9 +169,9 @@ def test_show_survives_all_metrics(gpu_record):
     """--all-metrics varies the profiling block only, so the identity columns in front
     of it must be untouched -- that is why they are spliced into the same list."""
     from jobscope.dcgm import catalog
-    wide = _headers(("account", "partition"), list(catalog().all_specs))
-    assert wide[:4] == ["JOBID", "USER", "ACCOUNT", "PARTITION"]
-    assert "TENSOR%" in wide and len(wide) > len(_headers(("account", "partition")))
+    wide = _headers(("account", "cluster"), list(catalog().all_specs))
+    assert wide[:4] == ["JOBID", "USER", "ACCOUNT", "CLUSTER"]
+    assert "TENSOR%" in wide and len(wide) > len(_headers(("account", "cluster")))
 
 
 def test_show_columns_survive_a_narrowed_view():
@@ -140,15 +184,82 @@ def test_show_columns_survive_a_narrowed_view():
 
 def test_extra_cells_read_the_row_and_dash_when_empty():
     from jobscope.models import JobRow
-    job = JobRow(jobid="1", account="kempner_lab", partition="", cluster="odyssey")
-    cells = report.extra_id_cells(job, ("account", "partition", "cluster"))
-    assert cells == {"ACCOUNT": "kempner_lab", "PARTITION": "-", "CLUSTER": "odyssey"}
+    job = JobRow(jobid="1", account="kempner_lab", name="", cluster="odyssey")
+    cells = report.extra_id_cells(job, ("account", "name", "cluster"))
+    assert cells == {"ACCOUNT": "kempner_lab", "NAME": "-", "CLUSTER": "odyssey"}
+
+
+# --- the GPU_TYPE cell --------------------------------------------------------
+
+def test_the_row_prefers_the_model_slurm_recorded():
+    """Slurm's answer is free and needs no exporter, so it wins where it exists."""
+    record = _record("1", account="a", partition="p")
+    row = build_rows(["1"], {"1": dataclasses.replace(
+        record, gpu_model="nvidia_h100_80gb_hbm3")}, {})[0]
+    assert row.gpu_model == "nvidia_h100_80gb_hbm3"
+
+
+def test_the_row_falls_back_to_the_exporters_model_for_a_running_job():
+    """squeue's -o format has no tres-alloc code, so a running job's record carries no
+    model -- but the per-card DCGM readings jobscope already collected name the card.
+
+    Without this the whole running view would show a dash in a column the finished
+    view fills, for jobs on identical hardware.
+    """
+    per_gpu = {("n1", 0): {dcgm_mod.MODEL_KEY: "NVIDIA H200"}}
+    row = build_rows(["1"], {"1": _record("1")}, {"1": ({}, per_gpu)})[0]
+    assert row.gpu_model == "NVIDIA H200"
+    assert short_gpu_model(row.gpu_model) == "H200"
+
+
+def test_a_job_with_neither_source_has_no_model():
+    assert build_rows(["1"], {"1": _record("1")}, {})[0].gpu_model == ""
+
+def test_short_gpu_model_shortens_the_slurm_spelling():
+    """What sacct's AllocTRES carries, for every card model on this cluster."""
+    assert short_gpu_model("nvidia_a100-sxm4-40gb") == "A100"
+    assert short_gpu_model("nvidia_h100_80gb_hbm3") == "H100"
+    assert short_gpu_model("nvidia_h200") == "H200"
+    assert short_gpu_model("nvidia_rtx_pro_6000_blackwell_server_edition") == "RTX6K"
+
+
+def test_short_gpu_model_shortens_the_dcgm_spelling_to_the_same_thing():
+    """Two sources fill this one column -- sacct for finished jobs, the exporter's own
+    model name for running ones -- and a card must not change name with the source."""
+    assert short_gpu_model("NVIDIA A100-SXM4-40GB") == "A100"
+    assert short_gpu_model("NVIDIA H100 80GB HBM3") == "H100"
+    assert short_gpu_model("NVIDIA H200") == "H200"
+    assert short_gpu_model("NVIDIA RTX PRO 6000 Blackwell Server Edition") == "RTX6K"
+
+
+def test_short_gpu_model_handles_cards_this_cluster_does_not_have():
+    """The rule is "the first letters-then-digits token", not a table of four names.
+
+    jobscope runs on clusters with none of the cards above, and a hard-coded list
+    would print nothing at all there.
+    """
+    assert short_gpu_model("Tesla V100-SXM2-32GB") == "V100"
+    assert short_gpu_model("NVIDIA L40S") == "L40S"
+    assert short_gpu_model("NVIDIA A40") == "A40"
+
+
+def test_short_gpu_model_never_invents_a_name_for_nothing():
+    assert short_gpu_model("") == ""
+    assert short_gpu_model(None) == ""
+
+
+def test_short_gpu_model_falls_back_rather_than_going_blank():
+    """An unrecognised card still names itself. Blank would read as "no GPU"."""
+    assert short_gpu_model("some_future_card") == "SOME_FUTURE"
 
 
 def test_context_pairs_explicit_ids(gpu_record):
     pairs = context_pairs(build_context(Selection(user="alice", jobids=["100"]),
                                         "1 job ID(s)", {"100": gpu_record}))
     # No GPU specs collected, so no provenance line -- see _source_pair.
+    # No Account/Partition either, and for the same reason the no-record case has
+    # none: gpu_record carries neither, and a blank field is not a scope to claim.
+    # The record *was* found, so this is the third case, distinct from the two below.
     assert pairs == [("User", "alice"), ("Select", "1 job ID(s)")]
 
 
@@ -219,6 +330,79 @@ def test_context_pairs_selection():
     assert [p[0] for p in pairs] == ["User", "Account", "Partition", "Select"]
 
 
+def _identity(pairs):
+    """The identity half of a header block, as ``{label: value}``."""
+    return {k: v for k, v in pairs if k in ("User", "Account", "Partition")}
+
+
+def _record(jid, user="alice", account="", partition=""):
+    """A record carrying identity and nothing else -- no stats, no metrics.
+
+    The header block reads none of the rest, and building a jobstats blob to test a
+    context line is the coupling jobscope.rows exists to have ended.
+    """
+    return JobRecord(jobid=jid, state="COMPLETED", name="j", runtime="01:00:00",
+                     nodes="1", gpus=0, stats=None, start=1000, end=1100, duration=100,
+                     jobid_raw=jid, cluster="odyssey", user=user,
+                     account=account, partition=partition)
+
+
+def test_an_unfiltered_selection_says_it_spans_everything():
+    """The reason the Window line exists, applied to the other two axes.
+
+    A report over every account looks exactly like one narrowed to yours unless it
+    says which it is, and the line was previously dropped rather than filled in.
+    """
+    pairs = context_pairs(build_context(Selection(user="bob"), "last 1 day", {}))
+    assert _identity(pairs) == {"User": "bob",
+                                "Account": "(all accounts)",
+                                "Partition": "(all partitions)"}
+
+
+def test_a_narrowed_axis_names_the_filter_and_the_others_still_speak():
+    """-p narrows one axis; the account line must not vanish because of it."""
+    pairs = context_pairs(build_context(
+        Selection(user="bob", partition="kempner_h100"), "last 1 day", {}))
+    assert _identity(pairs) == {"User": "bob",
+                                "Account": "(all accounts)",
+                                "Partition": "kempner_h100"}
+
+
+def test_explicit_job_ids_read_the_account_and_partition_off_the_records():
+    """The -A/-p filters are bypassed there, so the header reports, not restates."""
+    record = _record("1", account="kempner_dev", partition="kempner_h100")
+    pairs = context_pairs(build_context(
+        Selection(user="alice", jobids=["1"]), "1 job ID(s)", {"1": record}))
+    assert _identity(pairs) == {"User": "alice",
+                                "Account": "kempner_dev",
+                                "Partition": "kempner_h100"}
+
+
+def test_job_ids_spanning_two_accounts_name_both():
+    """Joined like the owners, and deduplicated: two jobs on one partition say it once."""
+    records = {"1": _record("1", user="alice", account="kempner_dev",
+                            partition="kempner_h100"),
+               "2": _record("2", user="bob", account="other_lab",
+                            partition="kempner_h100")}
+    pairs = context_pairs(build_context(
+        Selection(user="alice", jobids=["1", "2"]), "2 job ID(s)", records))
+    assert _identity(pairs) == {"User": "alice, bob",
+                                "Account": "kempner_dev, other_lab",
+                                "Partition": "kempner_h100"}
+
+
+def test_a_job_id_with_no_record_claims_no_account_or_partition():
+    """The counterpart of the rule above: nothing was read, so nothing is named.
+
+    The User line still prints, because it is unconditional and needs *something*.
+    Account and Partition carry no such obligation, and a header that named a
+    partition sacct never returned would be exactly the claim this block forbids.
+    """
+    pairs = context_pairs(build_context(
+        Selection(user="alice", jobids=["999"]), "1 job ID(s)", {}))
+    assert _identity(pairs) == {"User": "(explicit job IDs)"}
+
+
 def test_summarize_gpu_text(gpu_record):
     overall = {"SM_ACT%": 60.0, "OCC%": 20.0, "TENSOR%": 5.0, "DRAM%": 10.0, "POWER_W": 400.0}
     options = RenderOptions(view="all", show_dcgm=True, csv=False, header=True)
@@ -276,7 +460,8 @@ def test_dcgm_report_is_one_row_per_job(gpu_record):
                        options)
     columns, rows = plot.parse_csv(io.StringIO(csv_text))
     assert columns == ["JOBID", "USER", "STATE", "NODE", "CPU%", "MEM%", "#GPU", "GPU%", "GMEM%",
-                       "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME"]
+                       "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME",
+                       "PARTITION", "GPU_TYPE"]
     assert len(rows) == 1                       # one row per job, not per GPU
     assert rows[0]["SM_ACT%"] == "60.0"
     # Those columns still come from the jobstats summary: cpu 75, mem 50, gpu 70, gmem 50.
@@ -294,7 +479,8 @@ def test_dcgm_ext_only_widens_the_profiling_block(gpu_record):
 
     default, extended = headers(gpu_catalog().default_specs), headers(gpu_catalog().all_specs)
     assert default[:9] == extended[:9]              # identity + jobstats unchanged
-    assert extended[-1] == default[-1] == "RUNTIME"
+    # The block widens in the middle; the tail is fixed on both sides of it.
+    assert extended[-3:] == default[-3:] == ["RUNTIME", "PARTITION", "GPU_TYPE"]
     assert len(extended) > len(default)
     # jobstats-backed metrics never appear twice, even in the extended catalog.
     assert extended.count("GPU%") == 1 and extended.count("GMEM%") == 1
@@ -4555,7 +4741,8 @@ def test_the_summary_csv_header_row_is_fixed():
     renderer.finish()
     columns, _rows = plot.parse_csv(io.StringIO(out.getvalue()))
     assert columns == ["JOBID", "USER", "STATE", "NODE", "CPU%", "MEM%", "#GPU", "GPU%",
-                       "GMEM%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME"]
+                       "GMEM%", "SM_ACT%", "TENSOR%", "DRAM%", "POWER_W", "RUNTIME",
+                       "PARTITION", "GPU_TYPE"]
 
 
 @pytest.mark.parametrize("level, unit", [("gpu", "GPU"), ("node", "#GPU")])

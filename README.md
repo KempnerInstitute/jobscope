@@ -87,7 +87,9 @@ jobscope -j 36770231
 Typical output has three parts:
 
 - The job table shows one row per job. Percent columns are average utilization over
-  the selected allocation.
+  the selected allocation, and the last two — `PARTITION` and `GPU_TYPE` — say where
+  the job ran and on what card (`A100`, `H100`, `H200`, `RTX6K`), so a selection
+  spanning several partitions can tell its own rows apart.
 - `Summary by metric` pools the selection. `USED` is resource-time that did work and
   its share of the allocation, such as GPU-hours used out of GPU-hours requested.
 - `Problem jobs` appears for multi-job selections and lists the jobs that crossed
@@ -117,8 +119,9 @@ Date and state notes:
 - `-t` defaults to completed jobs. Use `failed`, `timeout`, `cancelled`, or `all` to
   include other endings.
 
-Every report header restates the actual window scanned, so saved output is
-self-contained.
+Every report header restates the user, account, partition and window it covers — an
+axis you did not narrow reads as `(all accounts)` rather than going blank — so saved
+output is self-contained.
 
 ## Narrow to Nodes or GPUs
 

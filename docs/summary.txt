@@ -1,17 +1,18 @@
   User:      alice
+  Account:   (all accounts)
   Partition: kempner_h100
   Select:    last 1 day, completed
   Window:    2026-08-02 20:42 .. 2026-08-03 20:42
   Source:    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <- jobstats;  SM_ACT% TENSOR% DRAM% POWER_W <- dcgm
   Sampled:   GPU metrics averaged over each job's whole runtime
-JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME
-----------------------------------------------------------------------------------------------------------------------------
-36822372     alice        COMPLETED 1     10     1      1     0      21      0.1      0.0      0.0     80       00:08:30
-36828732     alice        COMPLETED 1     10     1      1     1      21      0.1      0.0      0.0     85       00:09:36
-36910077     alice        COMPLETED 1     27     2      3     4      8       1.0      0.0      0.1     121      00:06:39
-36956151     alice        COMPLETED 1     28     3      2     18     45      8.9      1.9      7.8     157      00:39:08
-36956183     alice        COMPLETED 1     42     3      1     30     52      16.3     1.7      11.5    182      00:29:31
-36956205     alice        COMPLETED 1     52     3      1     38     50      20.6     2.8      13.9    212      00:21:50
+JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME      PARTITION        GPU_TYPE
+------------------------------------------------------------------------------------------------------------------------------------------------------
+36822372     alice        COMPLETED 1     10     1      1     0      21      0.1      0.0      0.0     80       00:08:30     kempner_h100     H100
+36828732     alice        COMPLETED 1     10     1      1     1      21      0.1      0.0      0.0     85       00:09:36     kempner_h100     H100
+36910077     alice        COMPLETED 1     27     2      3     4      8       1.0      0.0      0.1     121      00:06:39     kempner_h100     H100
+36956151     alice        COMPLETED 1     28     3      2     18     45      8.9      1.9      7.8     157      00:39:08     kempner_h100     H100
+36956183     alice        COMPLETED 1     42     3      1     30     52      16.3     1.7      11.5    182      00:29:31     kempner_h100     H100
+36956205     alice        COMPLETED 1     52     3      1     38     50      20.6     2.8      13.9    212      00:21:50     kempner_h100     H100
 ... 30 more rows ...
 
 1. Summary by metric

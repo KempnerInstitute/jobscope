@@ -90,6 +90,10 @@ def build_row(jobid: str, record: Optional[JobRecord],
         account=record.account if record else "",
         partition=record.partition if record else "",
         cluster=record.cluster if record else "",
+        # Slurm first, the exporter second. Slurm's answer is free and survives --cpu,
+        # where nothing is queried at all; the exporter's is the only one a *running*
+        # job has, because squeue's -o format has no tres-alloc code to read.
+        gpu_model=(record.gpu_model if record else "") or job_model(per_gpu),
         gpus=gpus,
         duration=record.duration if record else None,
         found=record is not None,
@@ -142,6 +146,11 @@ def build_context(selection: Selection, desc: str,
         return ReportContext(
             desc=desc,
             owners=tuple(sorted({r.user for r in records.values() if r.user})),
+            # The other two identity axes, on the same terms as the owners: the -A/-p
+            # filters were bypassed here, so these are read off the records rather
+            # than restated from a selection. Free -- sacct collects them always.
+            accounts=tuple(sorted({r.account for r in records.values() if r.account})),
+            partitions=tuple(sorted({r.partition for r in records.values() if r.partition})),
             explicit_jobids=True,
             unfinished=any_unfinished(records),
         )
@@ -154,7 +163,12 @@ def build_context(selection: Selection, desc: str,
         desc=desc,
         # -a/--all-users leaves `user` unset, so say so rather than printing None.
         user=selection.user or "(all users)",
-        account=selection.account or "",
-        partition=selection.partition or "",
+        # Same rule for the other two, and for the same reason the Window line exists:
+        # a report that spans every account looks identical to one narrowed to yours
+        # unless it says which it is. The records cannot answer it here -- a window
+        # selection streams, so the header prints before any record is read -- so this
+        # describes the *filter*, which is the honest claim either way.
+        account=selection.account or "(all accounts)",
+        partition=selection.partition or "(all partitions)",
         window=format_window(*selection.window()) if dated else "",
     )

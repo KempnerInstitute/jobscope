@@ -73,6 +73,14 @@ echo "[2/4] aggregated bars  ($AGG_SELECT)"
 # is what keeps escape codes out of a block that has to paste as plain text. `mask` keeps
 # real usernames out of the docs, padded so the columns still line up.
 mask() { sed -e "s/$1/alice /g"; }
+# The header names the job's account and partition now, and on an explicit -j those are
+# read off the record -- so this capture publishes the *owner's* lab account unless it is
+# masked too. Same reasoning as $ONE_USER above, and the same padding trick: the values
+# are placeholders docs/reference.md already uses, so the column widths do not move.
+mask_scope() {
+  sed -e 's/^\(  Account:   \).*$/\1kempner_wharper_lab/' \
+      -e 's/^\(  Partition: \).*$/\1kempner_h100/'
+}
 # Trailing padding is invisible in a terminal but shows up as diff noise in a text file.
 text() { sed -e 's/[[:space:]]*$//' > "$1"; echo "  wrote $1"; }
 
@@ -85,6 +93,7 @@ ONE_USER="${ONE_USER:-$(sacct -X -j "$ONE_JOB" -o User -n 2>/dev/null | tr -d ' 
 echo "[3/4] one job  (job $ONE_JOB, owner masked)"
 NO_COLOR=1 "$JOBSCOPE" -j "$ONE_JOB" \
   | mask "$ONE_USER" \
+  | mask_scope \
   | text docs/onejob.txt
 
 echo "[4/4] partition summary  ($SUM_SELECT)"

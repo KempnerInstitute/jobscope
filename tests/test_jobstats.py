@@ -5,6 +5,7 @@ from jobscope.jobstats import (
     GIB,
     bytes_to_gb,
     decode_admin_comment,
+    gpu_model_from_tres,
     gpus_from_tres,
     jobstats_detail,
     jobstats_metrics,
@@ -32,6 +33,40 @@ def test_decode_bad_payload_is_empty():
 def test_gpus_from_tres():
     assert gpus_from_tres("billing=2,cpu=2,gres/gpu=4,mem=16G") == 4
     assert gpus_from_tres("cpu=2,mem=16G") == 0
+
+
+# --- the card a job ran on ----------------------------------------------------
+
+def test_gpu_model_from_tres_reads_the_typed_gres():
+    """Slurm writes the untyped gres/gpu=N *and* a typed gres/gpu:MODEL=N beside it.
+
+    The count comes from the untyped one (gpus_from_tres); the model only exists on
+    the typed one, which is why this is a second reader over the same string.
+    """
+    assert gpu_model_from_tres(
+        "billing=2651,cpu=2,gres/gpu:nvidia_h100_80gb_hbm3=1,gres/gpu=1,mem=8G"
+    ) == "nvidia_h100_80gb_hbm3"
+
+
+def test_gpu_model_from_tres_is_empty_for_a_cpu_job():
+    assert gpu_model_from_tres("cpu=8,mem=64G,node=1") == ""
+    assert gpu_model_from_tres("") == ""
+    assert gpu_model_from_tres(None) == ""
+
+
+def test_gpu_model_from_tres_says_nothing_when_the_cards_disagree():
+    """The column is one cell, and a job spanning two models has no single answer.
+
+    Same rule dcgm.job_model applies to the per-card readings: no honest single value,
+    so it says nothing rather than picking one of them.
+    """
+    assert gpu_model_from_tres(
+        "cpu=4,gres/gpu:nvidia_h100_80gb_hbm3=1,gres/gpu:nvidia_h200=1,gres/gpu=2") == ""
+
+
+def test_gpu_model_from_tres_ignores_the_untyped_entry():
+    """gres/gpu=4 is a count, not a model named "gpu"."""
+    assert gpu_model_from_tres("cpu=2,gres/gpu=4,mem=16G") == ""
     assert gpus_from_tres("") == 0
 
 
