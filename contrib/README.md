@@ -3,6 +3,18 @@
 Site-specific and experimental tools that ship in the repository but are **not**
 part of the installable `jobscope` package.
 
+## Moved out: idle_sweep
+
+The idle-job sweep that used to live here is now its own repository,
+[`jobsweep`](https://github.com/KempnerInstitute/jobsweep), which depends on jobscope
+rather than shipping inside it. It cancels jobs and writes to their owners, which is an
+operator tool with a different audience and a different blast radius from a reporting
+library; keeping it here meant a copy of it existed wherever jobscope did.
+
+It still imports jobscope rather than shelling out to it -- `report.classify_units` exists
+for that caller, so it gets values instead of parsing a display format back, and one
+process means one rate limiter across the sweep and every verify.
+
 ## jobstats_extended.py
 
 A local, non-invasive superset of the stock `jobstats` command. Unlike jobscope

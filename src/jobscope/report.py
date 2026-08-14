@@ -2614,38 +2614,42 @@ def unit_values(level: str, multi_job: bool, key: tuple, found: dict) -> Tuple[s
     return job + ("%s:%s" % (key[1], key[2]),)
 
 
-def timeseries_eff(rows: List[dict], columns: List[str], options: "RenderOptions",
-                        out=None, level: str = "job", show_all: bool = False) -> None:
-    """Group the units into efficiency categories, worst first.
+class UnitVerdict(NamedTuple):
+    """One unit's classification, and the readings it was reached from."""
 
-    The verdict for each is :func:`classify`; what this adds is the reading order.
-    A partition sweep exists to be acted on
-    from the top, and on a healthy one most jobs are fine -- so ``good`` collapses
-    to a count unless ``show_all``, which is the difference between a page and a
-    hundred of them.
+    label: str                  # a job_eff category, or NO_DATA
+    key: tuple                  # the group key: (jobid,) at job level, plus node/gpu
+    found: dict                 # pool_samples' group -- user, models, raw values
+    means: Dict[str, float]     # every metric averaged, voting or not
+    best_gpu: float             # the ranking figure; CPU% never ranks
 
-    CPU% votes but never ranks: a unit's position among its peers comes from its
-    best GPU reading, because a busy host is not what someone scanning this list is
-    looking for.
+
+class Classified(NamedTuple):
+    """What ``--eff`` works out before it decides how to show it."""
+
+    voting: List[str]           # the metrics that decided each label
+    reported: List[str]         # every metric the series carried
+    thresholds: Thresholds
+    verdicts: List[UnitVerdict]
+
+
+def classify_units(rows: List[dict], columns: List[str], options: "RenderOptions",
+                   level: str = "job") -> Classified:
+    """Sort a series' units into efficiency categories, without rendering anything.
+
+    Split out of :func:`timeseries_eff` so a caller can have the *verdicts* rather than
+    a table of them. The one that needed it is the waste sweep in ``contrib/``, which
+    would otherwise have had to write this function's output to a buffer as CSV and
+    parse its own display format back -- making a pipeline that acts on these depend on
+    a column layout rather than on a value.
+
+    ``timeseries_eff`` is now the renderer for exactly this, so the two cannot disagree
+    about what a label means: there is one classification and two ways to show it.
     """
-    out = out or sys.stdout
-    voting = classify_metrics(columns, _bands(options))
+    thresholds = _bands(options)
+    voting = classify_metrics(columns, thresholds)
     if not voting:
         raise JobscopeError("no %-metrics in this series to classify")
-    unit = {"gpu": "GPUs", "node": "nodes"}.get(level, "jobs")
-    thresholds = _bands(options)
-
-    # One ballot whatever the series carries. CPU% votes like any other metric --
-    # its ceiling is what stops a busy host calling a GPU-idle unit healthy -- so a
-    # plain `--cpu --ts` series and a combined one take the same path. That replaces
-    # `is_combined`, which was `"CPU%" in voting and len(voting) > 1` and would have
-    # mislabelled a cpu-only series the moment the cgroup detail columns landed.
-    categories = CATEGORIES
-    # A unit whose voting columns carried no samples lands here rather than in a
-    # band. Last, because it is an absence rather than a severity: putting it at
-    # the top would push the findings someone opened the report for off the page.
-    categories = categories + ((NO_DATA, NO_DATA),)
-
     reported = [c for c in columns if c not in TS_ID_COLUMNS]
     groups = pool_samples(rows, reported, level)
     verdicts = []
@@ -2672,14 +2676,46 @@ def timeseries_eff(rows: List[dict], columns: List[str], options: "RenderOptions
             verdict = NO_DATA
         gpu_only = [v for m, v in judged.items() if m != "CPU%"]
         best_gpu = max(gpu_only) if gpu_only else 0.0
-        verdicts.append((verdict, key, found, means, best_gpu))
+        verdicts.append(UnitVerdict(verdict, key, found, means, best_gpu))
+    return Classified(voting, reported, thresholds, verdicts)
+
+
+def timeseries_eff(rows: List[dict], columns: List[str], options: "RenderOptions",
+                        out=None, level: str = "job", show_all: bool = False) -> None:
+    """Group the units into efficiency categories, worst first.
+
+    The verdict for each is :func:`classify`; what this adds is the reading order.
+    A partition sweep exists to be acted on
+    from the top, and on a healthy one most jobs are fine -- so ``good`` collapses
+    to a count unless ``show_all``, which is the difference between a page and a
+    hundred of them.
+
+    CPU% votes but never ranks: a unit's position among its peers comes from its
+    best GPU reading, because a busy host is not what someone scanning this list is
+    looking for.
+    """
+    out = out or sys.stdout
+    found = classify_units(rows, columns, options, level)
+    voting, reported, thresholds, verdicts = found
+    unit = {"gpu": "GPUs", "node": "nodes"}.get(level, "jobs")
+
+    # One ballot whatever the series carries. CPU% votes like any other metric --
+    # its ceiling is what stops a busy host calling a GPU-idle unit healthy -- so a
+    # plain `--cpu --ts` series and a combined one take the same path. That replaces
+    # `is_combined`, which was `"CPU%" in voting and len(voting) > 1` and would have
+    # mislabelled a cpu-only series the moment the cgroup detail columns landed.
+    categories = CATEGORIES
+    # A unit whose voting columns carried no samples lands here rather than in a
+    # band. Last, because it is an absence rather than a severity: putting it at
+    # the top would push the findings someone opened the report for off the page.
+    categories = categories + ((NO_DATA, NO_DATA),)
 
     # Ranking: the GPU metric for a combined series (per the design -- CPU never
     # ranks), the group key otherwise, exactly as before this feature existed.
     # Rank by the best GPU reading where there is one, else by the group key, as
     # before -- CPU% never ranks, only votes.
-    rank_key = ((lambda v: v[4]) if any(m != "CPU%" for m in voting)
-                else (lambda v: v[1]))
+    rank_key = ((lambda v: v.best_gpu) if any(m != "CPU%" for m in voting)
+                else (lambda v: v.key))
 
     if options.csv:
         # jobid, user, every metric the series carried, then the label. Wider than

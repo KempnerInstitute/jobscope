@@ -34,3 +34,14 @@ docs/superpowers/
 # and the notes describe a layout the repo no longer has.
 contrib/jobscope_live.py
 contrib/jobscope_live_notes.md
+
+# Output that names real users, accounts, jobs and hosts, and must never reach the remote.
+# The sweep that wrote most of it now lives in the jobsweep repository, but its artifacts,
+# store and logs are still on disk here under out/ -- and jobscope's own runner defaults to
+# an out_dir of "out" relative to the working directory, so a run started from the
+# repository still lands here.
+out/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
