@@ -546,6 +546,51 @@
   .startrow .card p code { font-size: 11px; }
   .stack.spread { justify-content: space-between; }
 
+  /* ---------- Slide 7: the overlay view ---------- */
+  .s-ov { padding: 56px 56px 24px; }
+  .ov-body { flex: 1; display: grid; grid-template-columns: 1.02fr 1fr; gap: 26px; min-height: 0; margin-top: 14px; }
+  .figbox {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    padding: 12px 15px 11px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  }
+  .figbox .pt {
+    font-family: var(--mono);
+    font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-4); margin-bottom: 8px;
+  }
+  .figbox svg { display: block; width: 100%; height: auto; }
+  .figbox .gl line { stroke: var(--line); stroke-width: 1; }
+  .figbox .axl text { font-family: var(--mono); font-size: 9px; fill: var(--ink-4); }
+  .figbox polyline { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .figbox .t-gpu { stroke: var(--tier-app); }
+  .figbox .t-sm { stroke: var(--bad); }
+  .legend-inline { display: flex; gap: 14px; margin-top: 7px; flex-wrap: wrap; align-items: center; }
+  .legend-inline span {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-family: var(--mono); font-size: 10.5px; color: var(--ink-2);
+  }
+  .legend-inline i { width: 15px; height: 3px; border-radius: 2px; display: block; flex: none; }
+  .legend-inline .dimtxt { color: var(--ink-4); }
+
+  .mini { display: grid; grid-template-columns: 0.86fr 1.14fr; gap: 16px; }
+  .mini .mt {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--primary); margin-bottom: 7px;
+  }
+  .pgrid { display: grid; gap: 4px; }
+  .pcol-lab { font-family: var(--mono); font-size: 9px; color: var(--ink-4); text-align: center; }
+  .pcell {
+    border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface-2);
+    height: 22px; display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-size: 9px; color: var(--ink-3);
+  }
+  .pcell.hl { border-color: var(--primary); background: var(--primary-soft); color: var(--primary-2); }
+  .mcap { font-size: 11px; line-height: 1.36; color: var(--ink-3); margin-top: 8px; }
+  .mcap b { color: var(--ink-2); font-weight: 650; }
+
   /* ---------- Slide 6: time series ---------- */
   .s-ts { padding: 56px 56px 24px; }
   .ts-body { flex: 1; display: grid; grid-template-columns: 1fr 1.16fr; gap: 26px; min-height: 0; margin-top: 14px; }
@@ -1059,7 +1104,7 @@ POWER_W  11.9h (<span class="g">100% &gt;100W</span>)  1     <span class="g">1</
             </div>
           </div>
 
-          <div class="note"><b>The overlay answers the question behind most diagnosis: did the metrics move together?</b> <code>GPU% 90</code> beside <code>SM_ACT% 8</code> on one pair of axes is a card that was occupied but barely loaded. Watts are left out, because they cannot share a scale with percentages.</div>
+          <div class="note">Charts default to <code>GPU%</code>, <code>GMEM%</code>, <code>SM_ACT%</code>, <code>OCC%</code>, <code>TENSOR%</code> and <code>DRAM%</code>; <code>--metric</code> picks columns and <code>--all</code> charts every numeric one. <b>The two resources lead</b> — how busy the card is and how full — because the rest describe how the SMs were used, which only means something once the GPU is known to be busy. <code>GMEM%</code> catches a failure none of the others do: <code>GPU% 96</code> with <code>GMEM% 3</code> is under-batched.</div>
 
           <div class="note warn">On a multi-node job add <code>--nodename</code> to <code>--plot-ts</code>, or GPU ids from different nodes merge — GPU 0 exists on every node. <code>--gpuid 0,1</code> narrows to particular cards.</div>
         </div>
@@ -1075,6 +1120,87 @@ POWER_W  11.9h (<span class="g">100% &gt;100W</span>)  1     <span class="g">1</
     </section>
 
     <!-- SLIDE 7 -->
+    <section class="slide s-ov" aria-label="The overlay view">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">--plot-ts-overlay</div>
+          <h2>Did the metrics move together?</h2>
+          <p class="sub"><code>--plot-ts</code> gives each metric its own panel and axis, which answers <i>how did this one move</i>. The overlay puts them on one axis, which answers the question behind most diagnosis.</p>
+        </div>
+      </div>
+
+      <div class="ov-body">
+        <div class="stack">
+          <div class="figbox">
+            <div class="pt">Schematic &mdash; one GPU, one axis, both traces to scale</div>
+            <svg viewBox="0 0 520 176" role="img" aria-label="Two metrics on one shared axis: GPU% near 90, SM_ACT% near 8">
+              <g class="gl"><line x1="46.0" y1="14.0" x2="506.0" y2="14.0"></line><line x1="46.0" y1="48.0" x2="506.0" y2="48.0"></line><line x1="46.0" y1="82.0" x2="506.0" y2="82.0"></line><line x1="46.0" y1="116.0" x2="506.0" y2="116.0"></line><line x1="46.0" y1="150.0" x2="506.0" y2="150.0"></line></g>
+              <g class="axl"><text x="38.0" y="17.5" text-anchor="end">100</text><text x="38.0" y="51.5" text-anchor="end">75</text><text x="38.0" y="85.5" text-anchor="end">50</text><text x="38.0" y="119.5" text-anchor="end">25</text><text x="38.0" y="153.5" text-anchor="end">0</text></g>
+              <polyline class="t-gpu" points="46.0,26.0 53.3,24.5 60.6,23.9 67.9,24.1 75.2,24.6 82.5,25.1 89.8,25.1 97.1,24.7 104.4,24.1 111.7,23.7 119.0,23.9 126.3,25.0 133.6,26.9 140.9,29.2 148.2,31.4 155.5,32.9 162.8,33.4 170.1,32.8 177.4,31.6 184.7,30.2 192.0,29.1 199.3,28.5 206.6,28.4 213.9,28.4 221.2,28.3 228.5,27.6 235.8,26.2 243.1,24.5 250.4,22.7 257.7,21.6 265.0,21.5 272.3,22.4 279.7,24.2 287.0,26.3 294.3,28.2 301.6,29.5 308.9,30.1 316.2,30.0 323.5,29.7 330.8,29.7 338.1,30.1 345.4,30.9 352.7,31.8 360.0,32.4 367.3,32.2 374.6,31.1 381.9,29.1 389.2,26.8 396.5,24.6 403.8,23.1 411.1,22.5 418.4,22.9 425.7,23.8 433.0,24.8 440.3,25.6 447.6,25.8 454.9,25.6 462.2,25.5 469.5,25.7 476.8,26.6 484.1,28.3 491.4,30.3 498.7,32.2 506.0,33.5"></polyline>
+              <polyline class="t-sm" points="46.0,136.8 53.3,135.5 60.6,134.6 67.9,134.2 75.2,134.5 82.5,135.3 89.8,136.4 97.1,137.4 104.4,138.1 111.7,138.4 119.0,138.4 126.3,138.3 133.6,138.2 140.9,138.5 148.2,139.3 155.5,140.4 162.8,141.8 170.1,143.0 177.4,143.9 184.7,144.1 192.0,143.7 199.3,142.8 206.6,141.7 213.9,140.5 221.2,139.7 228.5,139.3 235.8,139.3 243.1,139.4 250.4,139.4 257.7,139.2 265.0,138.5 272.3,137.4 279.7,136.2 287.0,135.0 294.3,134.3 301.6,134.1 308.9,134.6 316.2,135.6 323.5,136.9 330.8,138.1 338.1,139.0 345.4,139.5 352.7,139.6 360.0,139.5 367.3,139.4 374.6,139.6 381.9,140.2 389.2,141.1 396.5,142.3 403.8,143.3 411.1,144.0 418.4,144.1 425.7,143.5 433.0,142.4 440.3,141.0 447.6,139.7 454.9,138.7 462.2,138.2 469.5,138.1 476.8,138.2 484.1,138.3 491.4,138.2 498.7,137.7 506.0,136.9"></polyline>
+              <g class="axl">
+                <text x="46.0" y="168">start</text>
+                <text x="276" y="168" text-anchor="middle">minutes since start</text>
+                <text x="506.0" y="168" text-anchor="end">runtime</text>
+              </g>
+            </svg>
+            <div class="legend-inline">
+              <span><i style="background:#2563eb"></i>GPU% &nbsp;mean 90</span>
+              <span><i style="background:#dc2626"></i>SM_ACT% &nbsp;mean 8</span>
+              <span class="dimtxt">shared axis, 0&ndash;100</span>
+            </div>
+          </div>
+
+          <div class="note"><b>That pair of lines is the finding.</b> A duty cycle pegged near 90 beside SM residency near 8 is a card that was <i>occupied but barely loaded</i> — busy by the measure the verdict grades on, and computing almost nothing. On separate axes both traces look full, because each is drawn against its own range.</div>
+
+          <div class="note warn"><b>Two consequences of the shared axis, both stated in the output.</b> <b>Watts are omitted</b> — a 400 W line pins the scale and flattens every percentage onto the floor, so <code>--plot-ts</code> is where watts get their own panel. And <b>each panel carries its own legend</b>: with <code>--no-color</code> the markers are identical, so the legend names traces without distinguishing them. Use <code>--plot-ts</code> when there is no colour.</div>
+        </div>
+
+        <div class="stack">
+          <div class="panel">
+            <div class="pt">Two layouts of the same series</div>
+            <div class="mini">
+              <div class="mcol">
+                <div class="mt">--plot-ts &nbsp;·&nbsp; panel per metric</div>
+                <div class="pgrid" style="grid-template-columns:1fr 1fr">
+                  <div class="pcol-lab">gpu0</div><div class="pcol-lab">gpu1</div>
+                  <div class="pcell">GPU%</div><div class="pcell">GPU%</div>
+                  <div class="pcell">SM_ACT%</div><div class="pcell">SM_ACT%</div>
+                  <div class="pcell">TENSOR%</div><div class="pcell">TENSOR%</div>
+                  <div class="pcell">DRAM%</div><div class="pcell">DRAM%</div>
+                  <div class="pcell">POWER_W</div><div class="pcell">POWER_W</div>
+                </div>
+                <div class="mcap">Own y-axis per panel, one column per GPU — two of the four drawn here. One job on one node: several nodes without <code>--nodename</code> and it names them and asks for one.</div>
+              </div>
+              <div class="mcol">
+                <div class="mt">--plot-ts-overlay &nbsp;·&nbsp; panel per GPU</div>
+                <div class="pgrid" style="grid-template-columns:repeat(4, 1fr)">
+                  <div class="pcol-lab">gpu0</div><div class="pcol-lab">gpu1</div><div class="pcol-lab">gpu2</div><div class="pcol-lab">gpu3</div>
+                  <div class="pcell hl">n1</div><div class="pcell hl">n1</div><div class="pcell hl">n1</div><div class="pcell hl">n1</div>
+                  <div class="pcell hl">n2</div><div class="pcell hl">n2</div><div class="pcell hl">n2</div><div class="pcell hl">n2</div>
+                </div>
+                <div class="mcap">Every metric on one shared axis, a row per node — so it needs no <code>--nodename</code>: a row per node <b>is</b> the layout.</div>
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="term-cap">Two nodes &times; four GPUs = two rows of four</div>
+            <div class="term tiny"><span class="p">$</span> <span class="w">jobscope -j 36770231 --plot-ts-overlay</span>
+<span class="dim"># or the same picture from a CSV, which is what plot does by default:</span>
+<span class="p">$</span> <span class="w">jobscope -j 36770231 --ts | jobscope plot</span>            <span class="dim">--by gpu, the default</span>
+<span class="p">$</span> <span class="w">jobscope -j 36770231 --ts | jobscope plot --by metric</span>  <span class="dim">the panel-per-metric one</span>
+<span class="p">$</span> <span class="w">jobscope -j 36770231 --ts | jobscope plot --compact</span>   <span class="dim">one sparkline row per series</span></div>
+          </div>
+
+          <div class="note"><code>--gpuid</code> takes a comma list and each card named becomes a column; <code>--columns</code> asks for the grid without naming them. Series key on <code>(node, GPU)</code>, which is why the per-metric view refuses to guess: two jobs sharing a card would join into one line.</div>
+        </div>
+      </div>
+
+      <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- SLIDE 8 -->
     <section class="slide s-tri" aria-label="Triage and verdicts">
       <div class="head-row">
         <div>
@@ -1150,7 +1276,7 @@ POWER_W  11.9h (<span class="g">100% &gt;100W</span>)  1     <span class="g">1</
       <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
     </section>
 
-    <!-- SLIDE 8 -->
+    <!-- SLIDE 9 -->
     <section class="slide s-cmd" aria-label="Command surface">
       <div class="head-row">
         <div>
@@ -1223,7 +1349,7 @@ POWER_W  11.9h (<span class="g">100% &gt;100W</span>)  1     <span class="g">1</
       <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
     </section>
 
-    <!-- SLIDE 9 -->
+    <!-- SLIDE 10 -->
     <section class="slide s-site" aria-label="Site setup and config">
       <div class="head-row">
         <div>
@@ -1291,7 +1417,7 @@ POWER_W  11.9h (<span class="g">100% &gt;100W</span>)  1     <span class="g">1</
       <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
     </section>
 
-    <!-- SLIDE 10 -->
+    <!-- SLIDE 11 -->
     <section class="slide s-state" aria-label="Where it stands">
       <div class="head-row">
         <div>
