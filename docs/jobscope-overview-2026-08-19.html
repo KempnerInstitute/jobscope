@@ -1,0 +1,1446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jobscope — Repository Overview</title>
+<style>
+  :root {
+    --ground: #f6f7fb;
+    --surface: #ffffff;
+    --surface-2: #f8fafc;
+    --ink: #0f172a;
+    --ink-2: #334155;
+    --ink-3: #64748b;
+    --ink-4: #94a3b8;
+    --line: #e6e9f2;
+    --line-strong: #cbd5e1;
+    --primary: #4338ca;
+    --primary-2: #3730a3;
+    --primary-soft: #eef2ff;
+    --tier-app: #2563eb;
+    --tier-app-soft: #eff6ff;
+    --tier-data: #0d9488;
+    --tier-data-soft: #f0fdfa;
+    --tier-compute: #d97706;
+    --tier-compute-soft: #fffbeb;
+    --tier-cloud: #7c3aed;
+    --tier-cloud-soft: #f5f3ff;
+    --bad: #dc2626;
+    --bad-soft: #fef2f2;
+    --warn: #d97706;
+    --warn-soft: #fffbeb;
+    --good: #16a34a;
+    --good-soft: #f0fdf4;
+    --term: #14171d;
+    --term-2: #1d222b;
+    --term-ink: #d7dce5;
+    --letterbox: #0b1020;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", "DejaVu Sans Mono", monospace;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--letterbox);
+    font-family: var(--sans);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+
+  .stage {
+    position: relative;
+    width: 1280px;
+    height: 720px;
+    flex: none;
+    transform-origin: center center;
+    background: var(--ground);
+    overflow: hidden;
+  }
+
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    background:
+      radial-gradient(1200px 520px at 88% -12%, rgba(67, 56, 202, 0.06), transparent 60%),
+      radial-gradient(900px 480px at -8% 108%, rgba(13, 148, 136, 0.05), transparent 60%),
+      var(--ground);
+  }
+
+  .slide.is-active {
+    display: flex;
+    animation: slideIn 0.26s ease both;
+  }
+
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--primary);
+  }
+
+  /* Deck chrome */
+  .mark {
+    position: absolute;
+    top: 30px;
+    left: 56px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    z-index: 5;
+  }
+  .mark[hidden] { display: none; }
+  .mark .glyph {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: linear-gradient(150deg, var(--primary), var(--tier-data));
+  }
+  .mark .a { color: var(--primary); }
+
+  .nav {
+    position: absolute;
+    right: 56px;
+    bottom: 26px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    z-index: 5;
+  }
+  .nav button {
+    appearance: none;
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    color: var(--ink-2);
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    padding: 7px 13px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+  }
+  .nav button:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+  .nav button:disabled { opacity: 0.4; cursor: default; }
+  .nav button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+  .nav .counter {
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: 0.12em;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+    min-width: 66px;
+    text-align: center;
+  }
+
+  /* ---------- Shared slide furniture ---------- */
+  .head-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 30px;
+    flex: none;
+  }
+  .head-row h2 { margin: 7px 0 0; font-size: 34px; font-weight: 800; letter-spacing: -0.02em; color: var(--ink); }
+  .head-row .sub { margin: 7px 0 0; font-size: 13.5px; line-height: 1.4; color: var(--ink-3); max-width: 700px; }
+
+  .legend { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; max-width: 560px; padding-top: 6px; }
+  .legend .item {
+    display: flex; align-items: center; gap: 7px;
+    font-family: var(--mono);
+    font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--ink-2);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 5px 11px 5px 9px;
+  }
+  .legend .sw { width: 10px; height: 10px; border-radius: 3px; }
+
+  .rule {
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(to right, var(--primary) 0, var(--primary) 128px, var(--line) 128px, var(--line) 100%);
+  }
+
+  .foot {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.01em;
+    color: var(--ink-3);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .foot .k { color: var(--primary); font-weight: 600; }
+  .foot .sep { color: var(--line-strong); }
+
+  .slide-foot {
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    color: var(--ink-4);
+    margin-top: 10px;
+    flex: none;
+  }
+  .slide-foot .pipe { color: var(--line-strong); margin: 0 8px; }
+
+  .caption {
+    text-align: center;
+    font-size: 12.5px;
+    line-height: 1.4;
+    color: var(--ink-3);
+    margin-top: 6px;
+    flex: none;
+  }
+  .caption b { color: var(--ink-2); font-weight: 650; }
+
+  /* cards */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    padding: 12px 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  }
+  .card .label {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--ink);
+    letter-spacing: -0.01em;
+  }
+  .card .label .m { width: 9px; height: 9px; border-radius: 3px; flex: none; }
+  .card p { margin: 0; font-size: 12.5px; line-height: 1.36; color: var(--ink-3); }
+  .card p b { color: var(--ink-2); font-weight: 650; }
+  code, .k {
+    font-family: var(--mono);
+  }
+  .card p code, .li code, .note code, td code, .caption code {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--primary-2);
+    background: var(--primary-soft);
+    padding: 0 4px;
+    border-radius: 4px;
+  }
+
+  /* bullet list */
+  .bullets { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; }
+  .bullets .li {
+    list-style: none;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 11px;
+    font-size: 13.5px;
+    line-height: 1.4;
+    color: var(--ink-2);
+  }
+  .bullets .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--primary);
+    margin-top: 6px;
+  }
+  .bullets b { color: var(--ink); font-weight: 650; }
+
+  /* small table */
+  table.tbl { width: 100%; border-collapse: collapse; }
+  table.tbl th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+    font-weight: 600;
+    padding: 0 10px 7px 0;
+    border-bottom: 1px solid var(--line-strong);
+    white-space: nowrap;
+  }
+  table.tbl td {
+    font-size: 12.5px;
+    line-height: 1.35;
+    color: var(--ink-2);
+    padding: 8px 10px 8px 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  table.tbl tr:last-child td { border-bottom: none; }
+  table.tbl td b { color: var(--ink); font-weight: 700; }
+  table.tbl td.mono { font-family: var(--mono); font-size: 11.5px; color: var(--primary-2); white-space: nowrap; }
+  table.tbl td.dim { color: var(--ink-3); }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 13px;
+    padding: 13px 16px 8px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  }
+  .panel .pt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+    margin-bottom: 10px;
+  }
+
+  /* terminal block */
+  .term {
+    background: var(--term);
+    border: 1px solid #2b313d;
+    border-radius: 11px;
+    padding: 12px 14px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    line-height: 1.5;
+    color: var(--term-ink);
+    white-space: pre;
+    overflow: hidden;
+    box-shadow: 0 3px 10px rgba(15, 23, 42, 0.12);
+  }
+  .term .p { color: #7dd3fc; }
+  .term .dim { color: #7e8899; }
+  .term .hd { color: #a5b4fc; }
+  .term .g { color: #4ade80; }
+  .term .y { color: #fbbf24; }
+  .term .r { color: #f87171; }
+  .term .w { color: #f1f5f9; font-weight: 600; }
+  .term .u { text-decoration: underline; text-decoration-color: #475569; }
+  .term-cap {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+    margin-bottom: 7px;
+  }
+
+  /* callout chips numbered */
+  .callout { display: grid; grid-template-columns: auto 1fr; gap: 11px; align-items: start; }
+  .callout .n {
+    width: 20px; height: 20px; border-radius: 6px; flex: none;
+    background: var(--primary-soft); border: 1px solid #dfe3fb;
+    color: var(--primary-2); font-family: var(--mono); font-size: 11px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+    margin-top: 1px;
+  }
+  .callout .ct { font-size: 13.5px; font-weight: 700; color: var(--ink); letter-spacing: -0.01em; }
+  .callout p { margin: 3px 0 0; font-size: 12px; line-height: 1.4; color: var(--ink-3); }
+  .callout p b { color: var(--ink-2); font-weight: 650; }
+
+  /* badges */
+  .badges { display: flex; gap: 7px; flex-wrap: wrap; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.02em;
+    padding: 4px 9px; border-radius: 999px;
+    border: 1px solid var(--line-strong); color: var(--ink-2); background: var(--surface-2);
+  }
+  .badge.pri { color: var(--primary-2); background: var(--primary-soft); border-color: #dfe3fb; }
+  .badge .bd { width: 6px; height: 6px; border-radius: 50%; flex: none; }
+
+  /* screenshot frame */
+  .shot {
+    border-radius: 11px;
+    overflow: hidden;
+    border: 1px solid #2b313d;
+    background: #292929;
+    box-shadow: 0 3px 12px rgba(15, 23, 42, 0.14);
+    line-height: 0;
+  }
+  .shot img { display: block; width: 100%; height: auto; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .slide.is-active { animation: none; }
+  }
+
+  /* ---------- Slide 1: title ---------- */
+  .s-title { padding: 40px 56px 30px; gap: 16px; }
+  .s-title .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 40px; }
+  .wordmark { font-size: 62px; font-weight: 800; letter-spacing: -0.03em; line-height: 1; color: var(--ink); }
+  .wordmark .a { color: var(--primary); }
+  .lede {
+    margin-top: 14px;
+    font-size: 19px;
+    font-weight: 500;
+    line-height: 1.4;
+    color: var(--ink-2);
+    max-width: 600px;
+    text-wrap: balance;
+  }
+  .presenter {
+    text-align: right;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 7px;
+    padding-top: 8px;
+  }
+  .presenter .team { font-size: 19px; font-weight: 700; color: var(--ink); }
+  .presenter .chip {
+    font-family: var(--mono);
+    font-size: 12px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--primary); background: var(--primary-soft);
+    border: 1px solid #dfe3fb;
+    padding: 5px 11px; border-radius: 999px;
+  }
+  .presenter .date { font-family: var(--mono); font-size: 14px; color: var(--ink-3); letter-spacing: 0.02em; }
+
+  .building { display: grid; grid-template-columns: auto 1fr; align-items: baseline; gap: 18px; }
+  .building p { margin: 0; font-size: 15.5px; line-height: 1.46; color: var(--ink-2); }
+  .building .eyebrow { padding-top: 2px; white-space: nowrap; }
+
+  .cols { flex: 1; display: grid; grid-template-columns: 0.86fr 1.14fr; gap: 38px; min-height: 0; }
+  .col-h { margin-bottom: 14px; }
+  .features { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 1fr; gap: 11px; }
+
+  /* ---------- Slide 2: architecture ---------- */
+  .s-arch { padding: 56px 56px 26px; }
+  .diagram-wrap { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; }
+  .diagram { position: relative; width: 1160px; height: 452px; }
+  .wires { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  .wires text {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    fill: var(--ink-3);
+    paint-order: stroke;
+    stroke: var(--ground);
+    stroke-width: 3.5px;
+    stroke-linejoin: round;
+  }
+  .node {
+    position: absolute;
+    border-radius: 12px;
+    background: var(--surface);
+    border: 1.5px solid var(--line-strong);
+    box-shadow: 0 2px 6px rgba(15, 23, 42, 0.05);
+    padding: 0 13px;
+    display: flex; flex-direction: column; justify-content: center;
+    z-index: 2;
+  }
+  .node .nt {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 14.5px; font-weight: 700; color: var(--ink); letter-spacing: -0.01em;
+  }
+  .node .nt .d { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .node .ns { font-size: 11.5px; line-height: 1.34; color: var(--ink-3); margin-top: 4px; }
+  .node .ns em { font-style: normal; color: var(--ink-2); font-weight: 600; }
+  .node .mods {
+    display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px;
+  }
+  .node .mods span {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.01em;
+    padding: 2px 7px; border-radius: 6px;
+    background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink-2);
+  }
+  .node.core { border-color: var(--primary); border-width: 2px; background: var(--primary-soft); }
+  .node.core .nt { color: var(--primary-2); font-size: 15.5px; }
+  .node.src { border-color: var(--ink-4); border-style: dashed; background: var(--surface-2); }
+  .node.coll { border-color: var(--tier-data); background: var(--tier-data-soft); }
+  .node.coll .mods span { background: #ffffff; border-color: #99e6df; }
+  .node.render { border-color: var(--tier-app); background: var(--tier-app-soft); }
+  .node.render .mods span { background: #ffffff; border-color: #bfd7fe; }
+  .node.policy { border-color: var(--tier-compute); background: var(--tier-compute-soft); }
+  .node.policy .mods span { background: #ffffff; border-color: #fcd9a1; }
+  .node.orch { border-color: var(--tier-cloud); background: var(--tier-cloud-soft); }
+  .node.orch .mods span { background: #ffffff; border-color: #ddd0fd; }
+  .node.out { border-style: dashed; border-color: var(--line-strong); background: var(--surface); }
+  .node.out .nt { font-size: 13px; color: var(--ink-2); }
+
+  /* ---------- Slide 3: sources ---------- */
+  .s-src { padding: 56px 56px 26px; }
+  .src-body { flex: 1; display: grid; grid-template-columns: 1.04fr 1fr; gap: 26px; min-height: 0; margin-top: 16px; }
+  .stack { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+  .note {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--primary);
+    border-radius: 9px;
+    padding: 9px 13px;
+    font-size: 12px; line-height: 1.42; color: var(--ink-3);
+  }
+  .note b { color: var(--ink-2); font-weight: 650; }
+  .note.warn { border-left-color: var(--warn); }
+  .note.good { border-left-color: var(--good); }
+
+  /* ---------- Slide 4: reading a report ---------- */
+  .s-read { padding: 56px 56px 24px; }
+  .read-body { flex: 1; display: grid; grid-template-columns: 1.42fr 1fr; gap: 26px; min-height: 0; margin-top: 14px; }
+  .read-side { display: flex; flex-direction: column; gap: 13px; }
+
+  /* ---------- Slide 5: bands ---------- */
+  .s-band { padding: 56px 56px 24px; }
+  .band-body { flex: 1; display: grid; grid-template-columns: 1.02fr 1fr; gap: 26px; min-height: 0; margin-top: 14px; }
+  .ladder { display: flex; flex-direction: column; gap: 7px; }
+  .rung {
+    display: grid; grid-template-columns: 132px 84px 1fr;
+    align-items: center; gap: 12px;
+    border: 1px solid var(--line);
+    border-left-width: 4px;
+    border-radius: 9px;
+    background: var(--surface);
+    padding: 8px 12px;
+  }
+  .rung .nm { font-size: 13px; font-weight: 700; letter-spacing: -0.01em; }
+  .rung .rg { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); }
+  .rung .bar { height: 8px; border-radius: 999px; background: var(--line); position: relative; overflow: hidden; }
+  .rung .bar i { position: absolute; inset: 0 auto 0 0; border-radius: 999px; display: block; }
+  .rung.r-bad { border-left-color: var(--bad); background: var(--bad-soft); }
+  .rung.r-bad .nm { color: #b91c1c; }
+  .rung.r-warn { border-left-color: var(--warn); background: var(--warn-soft); }
+  .rung.r-warn .nm { color: #b45309; }
+  .rung.r-good { border-left-color: var(--good); background: var(--good-soft); }
+  .rung.r-good .nm { color: #15803d; }
+
+  /* additions used by slides 4, 5, 6, 9 */
+  .read-stack { flex: 1; display: flex; flex-direction: column; min-height: 0; margin-top: 12px; }
+  .read-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 13px; flex: none; }
+  .term.small { font-size: 9px; line-height: 1.5; padding: 11px 13px; }
+  .term.tiny { font-size: 8.6px; line-height: 1.48; padding: 11px 13px; }
+  .shot-cap {
+    font-size: 11.5px; line-height: 1.35; color: var(--ink-3); margin-top: 7px; text-align: center;
+  }
+  .toml { color: var(--term-ink); }
+  .toml .sec { color: #a5b4fc; }
+  .toml .key { color: #7dd3fc; }
+  .toml .num { color: #fbbf24; }
+  .toml .cm { color: #7e8899; }
+
+  .wide-term { margin-top: 14px; flex: none; }
+  .startrow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 8px; flex: none; }
+  .startrow .card { padding: 9px 13px; gap: 2px; }
+  .startrow .card .label { font-size: 14px; }
+  .startrow .card p { font-size: 12px; line-height: 1.3; }
+  .startrow .card p code { font-size: 11px; }
+  .stack.spread { justify-content: space-between; }
+
+  /* ---------- Slide 6: time series ---------- */
+  .s-ts { padding: 56px 56px 24px; }
+  .ts-body { flex: 1; display: grid; grid-template-columns: 1fr 1.16fr; gap: 26px; min-height: 0; margin-top: 14px; }
+  .qrow {
+    display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: start;
+    border-bottom: 1px solid var(--line); padding: 9px 0;
+  }
+  .qrow:last-child { border-bottom: none; }
+  .qrow .cmd {
+    font-family: var(--mono); font-size: 11px; white-space: nowrap;
+    color: var(--primary-2); background: var(--primary-soft);
+    border: 1px solid #dfe3fb; border-radius: 7px; padding: 4px 8px;
+  }
+  .qrow .qt { font-size: 12.5px; line-height: 1.4; color: var(--ink-2); }
+  .qrow .qt b { color: var(--ink); font-weight: 650; }
+
+  /* ---------- Slide 7: triage ---------- */
+  .s-tri { padding: 56px 56px 24px; }
+  .tri-body { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 22px; min-height: 0; margin-top: 14px; }
+  .tri-rules { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 11px; margin-top: 12px; flex: none; }
+
+  /* ---------- Slide 8: command surface ---------- */
+  .s-cmd { padding: 56px 56px 24px; }
+  .cmdline {
+    font-family: var(--mono);
+    font-size: 15px;
+    letter-spacing: 0.01em;
+    color: var(--ink-2);
+    background: var(--surface);
+    border: 1.5px solid var(--line-strong);
+    border-radius: 11px;
+    padding: 12px 16px;
+    margin-top: 14px;
+    flex: none;
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+  }
+  .cmdline .bin { color: var(--primary-2); font-weight: 700; }
+  .cmdline .ax { padding: 2px 8px; border-radius: 7px; border: 1px dashed var(--line-strong); color: var(--ink-3); font-size: 13px; }
+  .cmd-body { flex: 1; display: grid; grid-template-columns: 1.1fr 1fr; gap: 26px; min-height: 0; margin-top: 14px; }
+  .axis { display: grid; grid-template-columns: 108px 1fr; gap: 12px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .axis:last-child { border-bottom: none; }
+  .axis .an {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.09em; text-transform: uppercase;
+    color: var(--ink-4); padding-top: 4px;
+  }
+  .axis .aopts { display: flex; flex-wrap: wrap; gap: 5px; }
+  .axis .aopts span {
+    font-family: var(--mono); font-size: 10.5px;
+    padding: 3px 7px; border-radius: 6px;
+    background: var(--surface); border: 1px solid var(--line-strong); color: var(--ink-2);
+  }
+  .axis .aopts span.def { color: var(--primary-2); background: var(--primary-soft); border-color: #dfe3fb; font-weight: 600; }
+
+  /* ---------- Slide 9: site setup ---------- */
+  .s-site { padding: 56px 56px 24px; }
+  .site-body { flex: 1; display: grid; grid-template-columns: 1fr 1.06fr; gap: 26px; min-height: 0; margin-top: 14px; }
+  .tier { display: grid; grid-template-columns: 20px 1fr; gap: 11px; align-items: start; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .tier:last-child { border-bottom: none; }
+  .tier .num {
+    font-family: var(--mono); font-size: 10.5px; font-weight: 700;
+    color: var(--ink-4); padding-top: 3px;
+  }
+  .tier .path { font-family: var(--mono); font-size: 11.5px; color: var(--primary-2); }
+  .tier .who { font-size: 11.5px; line-height: 1.35; color: var(--ink-3); margin-top: 2px; }
+  .tier.tracked .path { font-weight: 700; }
+  .tier.tracked .who b { color: var(--tier-data); font-weight: 700; }
+
+  /* ---------- Slide 10: where it stands ---------- */
+  .s-state { padding: 56px 56px 24px; }
+  .stats { display: grid; grid-template-columns: repeat(6, 1fr); gap: 11px; margin-top: 12px; flex: none; }
+  .stat {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+    padding: 9px 13px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  }
+  .stat .v { font-size: 24px; font-weight: 800; letter-spacing: -0.02em; color: var(--primary-2); line-height: 1.05; }
+  .stat .l { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-4); margin-top: 5px; }
+  .state-body { flex: 1; display: grid; grid-template-columns: 1.08fr 1fr; gap: 26px; min-height: 0; margin-top: 12px; }
+  .limits { display: flex; flex-direction: column; gap: 9px; }
+  .limit { display: grid; grid-template-columns: auto 1fr; gap: 10px; font-size: 12px; line-height: 1.4; color: var(--ink-3); }
+  .limit .tagm {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.05em; text-transform: uppercase;
+    color: var(--warn); background: var(--warn-soft); border: 1px solid #fcd9a1;
+    border-radius: 6px; padding: 2px 6px; white-space: nowrap; height: 18px;
+  }
+  .limit b { color: var(--ink-2); font-weight: 650; }
+  .doclist { display: flex; flex-direction: column; gap: 8px; }
+  .doc { display: grid; grid-template-columns: 150px 1fr; gap: 12px; font-size: 12px; line-height: 1.35; color: var(--ink-3); align-items: baseline; }
+  .doc .dp { font-family: var(--mono); font-size: 11px; color: var(--primary-2); }
+</style>
+</head>
+<body>
+  <div class="stage" id="stage">
+
+    <!-- SLIDE 1 -->
+    <section class="slide s-title is-active" aria-label="Title">
+      <div class="head">
+        <div>
+          <div class="wordmark">job<span class="a">scope</span></div>
+          <div class="lede">Did the job use what it asked for? Read the answer out of records the cluster already keeps.</div>
+        </div>
+        <div class="presenter">
+          <div class="team">Kempner Research Engineering Team</div>
+          <div class="chip">Repository Overview</div>
+          <div class="date">August 19, 2026</div>
+        </div>
+      </div>
+
+      <div class="rule"></div>
+
+      <div class="building">
+        <div class="eyebrow">What it is</div>
+        <p>A command-line report on Slurm job efficiency. jobscope decodes the CPU, memory, GPU and GPU-memory utilization Slurm already stored in each job's <code>sacct</code> record, adds the DCGM and NVML profiling series from Prometheus, bands every number, and names the jobs that wasted their allocation — one bulk query for a whole selection, and terminal charts for when an average is not the answer.</p>
+      </div>
+
+      <div class="cols">
+        <div>
+          <div class="eyebrow col-h">Design rules</div>
+          <ul class="bullets">
+            <li class="li"><span class="dot"></span><span><b>Report what was recorded, never recompute it.</b> A finished job's utilization is the number Slurm stored, so every view agrees.</span></li>
+            <li class="li"><span class="dot"></span><span><b>Measured time, not wall clock.</b> An exporter that went quiet leaves a gap, not an idle job.</span></li>
+            <li class="li"><span class="dot"></span><span><b>Every column names its source.</b> The header block says which record or exporter answered.</span></li>
+            <li class="li"><span class="dot"></span><span><b>Withhold rather than guess.</b> Too few scrapes and the verdict is declined; no source and the cell prints <code>-</code>.</span></li>
+            <li class="li"><span class="dot"></span><span><b>No silent caps.</b> A selection past a few thousand jobs warns, names the narrowings you are not using, then proceeds.</span></li>
+            <li class="li"><span class="dot"></span><span><b>Site policy is code.</b> The tuned config is tracked in the repository and changes through pull requests.</span></li>
+          </ul>
+        </div>
+
+        <div>
+          <div class="eyebrow col-h">What you get</div>
+          <div class="features">
+            <div class="card">
+              <div class="label"><span class="m" style="background:var(--primary)"></span>One bulk query</div>
+              <p>CPU/MEM/GPU/GMEM match <code>jobstats</code> job for job, from a single <code>sacct</code> call rather than one per job.</p>
+            </div>
+            <div class="card">
+              <div class="label"><span class="m" style="background:var(--tier-app)"></span>Summary by metric</div>
+              <p><code>USED</code> is resource-time that did work over what was allocated, beside GOOD/OK/BAD counts per metric.</p>
+            </div>
+            <div class="card">
+              <div class="label"><span class="m" style="background:var(--tier-data)"></span>Problem jobs</div>
+              <p>The jobs in a selection that crossed the configured waste thresholds, named and ordered worst first.</p>
+            </div>
+            <div class="card">
+              <div class="label"><span class="m" style="background:var(--tier-compute)"></span>Time series</div>
+              <p>One CSV row per GPU per scrape; <code>--plot-ts</code> charts a panel per metric, <code>--plot-ts-overlay</code> a panel per GPU.</p>
+            </div>
+            <div class="card">
+              <div class="label"><span class="m" style="background:var(--tier-cloud)"></span>Triage and verdicts</div>
+              <p><code>--eff</code> sorts a whole partition into categories; <code>--verify</code> answers whether one job is idle, and since when.</p>
+            </div>
+            <div class="card">
+              <div class="label"><span class="m" style="background:var(--primary)"></span>Site bring-up</div>
+              <p><code>probe</code> reports what Slurm and Prometheus expose here; <code>probe --init</code> writes a config from those findings.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="foot">
+        <span><span class="k">Python 3.9+</span>&nbsp;&nbsp;requests &middot; plotext &middot; rich</span>
+        <span class="sep">|</span>
+        <span><span class="k">v0.1.1 &middot; MIT</span>&nbsp;&nbsp;KempnerInstitute/jobscope</span>
+        <span class="sep">|</span>
+        <span><span class="k">Install</span>&nbsp;&nbsp;uv tool install jobscope</span>
+      </div>
+    </section>
+
+
+    <!-- SLIDE 2 -->
+    <section class="slide s-arch" aria-label="Architecture">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">Architecture at a glance</div>
+          <h2>Two sources in, one column set out</h2>
+        </div>
+        <div class="legend">
+          <span class="item"><span class="sw" style="background:var(--ink-4)"></span>Cluster</span>
+          <span class="item"><span class="sw" style="background:var(--tier-data)"></span>Collect</span>
+          <span class="item"><span class="sw" style="background:var(--tier-app)"></span>Render</span>
+          <span class="item"><span class="sw" style="background:var(--tier-compute)"></span>Policy</span>
+          <span class="item"><span class="sw" style="background:var(--tier-cloud)"></span>Orchestrate</span>
+        </div>
+      </div>
+
+      <div class="diagram-wrap">
+        <div class="diagram">
+          <svg class="wires" viewBox="0 0 1160 452" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <marker id="ah" markerWidth="10" markerHeight="10" refX="7.5" refY="3" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+                <path d="M0,0 L7.5,3 L0,6 Z" fill="#94a3b8"></path>
+              </marker>
+            </defs>
+            <g fill="none" stroke="#94a3b8" stroke-width="2">
+              <line x1="212" y1="152" x2="284" y2="178" marker-end="url(#ah)"></line>
+              <line x1="212" y1="290" x2="284" y2="268" marker-end="url(#ah)"></line>
+              <line x1="560" y1="226" x2="626" y2="226" marker-end="url(#ah)"></line>
+              <line x1="880" y1="226" x2="946" y2="226" marker-end="url(#ah)"></line>
+              <line x1="420" y1="76" x2="420" y2="144" marker-end="url(#ah)"></line>
+              <line x1="1053" y1="76" x2="1053" y2="144" marker-end="url(#ah)"></line>
+              <line x1="420" y1="374" x2="420" y2="308" marker-end="url(#ah)"></line>
+              <line x1="1053" y1="374" x2="1053" y2="308" marker-end="url(#ah)"></line>
+            </g>
+            <g text-anchor="start">
+              <text x="222" y="140">SACCT / SQUEUE</text>
+              <text x="222" y="312">PROMQL RANGE</text>
+              <text x="222" y="326">AND INSTANT</text>
+              <text x="430" y="110">SELECTS JOBS</text>
+              <text x="430" y="346">PICKS THE SOURCE,</text>
+              <text x="430" y="360">SETS THE BANDS</text>
+            </g>
+            <g text-anchor="end">
+              <text x="1043" y="110">PLACES THE COLUMNS</text>
+              <text x="1043" y="346">TIERS AND</text>
+              <text x="1043" y="360">COLOURS</text>
+            </g>
+            <g text-anchor="middle">
+              <text x="593" y="216">JobRow</text>
+              <text x="913" y="216">OUTPUT</text>
+            </g>
+          </svg>
+
+          <div class="node orch" style="left:236px; top:2px; width:922px; height:72px;">
+            <div class="nt"><span class="d" style="background:var(--tier-cloud)"></span>Orchestration &mdash; wires the layers together</div>
+            <div class="mods"><span>cli</span><span>select</span><span>probe</span></div>
+          </div>
+
+          <div class="node src" style="left:2px; top:112px; width:208px; height:80px;">
+            <div class="nt">Slurm</div>
+            <div class="ns">The stored <em>sacct</em> record and <em>squeue</em> — one bulk call, no network</div>
+          </div>
+
+          <div class="node src" style="left:2px; top:246px; width:208px; height:88px;">
+            <div class="nt">Prometheus</div>
+            <div class="ns"><em>dcgm-exporter</em> and the <em>nvidia</em> exporter, over the HTTP query API</div>
+          </div>
+
+          <div class="node coll" style="left:286px; top:144px; width:274px; height:164px;">
+            <div class="nt"><span class="d" style="background:var(--tier-data)"></span>Collect</div>
+            <div class="ns">Turn a source into numbers</div>
+            <div class="mods"><span>slurm</span><span>jobstats</span><span>cpu</span><span>dcgm</span><span>nvml</span><span>running</span><span>timeseries</span><span>job_ave_stats</span><span>extra_metric</span><span>rows</span></div>
+          </div>
+
+          <div class="node core" style="left:626px; top:166px; width:254px; height:120px;">
+            <div class="nt">models &middot; prometheus</div>
+            <div class="ns"><em>JobRow</em> and the per-scrape series: the one shape every renderer places, and the only HTTP client in the package</div>
+          </div>
+
+          <div class="node render" style="left:946px; top:144px; width:212px; height:164px;">
+            <div class="nt"><span class="d" style="background:var(--tier-app)"></span>Render</div>
+            <div class="ns">Turn numbers into output</div>
+            <div class="mods"><span>report</span><span>plot</span></div>
+            <div class="ns" style="margin-top:9px">Job table &middot; summary &middot; problem jobs &middot; CSV &middot; terminal charts</div>
+          </div>
+
+          <div class="node policy" style="left:286px; top:374px; width:872px; height:76px;">
+            <div class="nt"><span class="d" style="background:var(--tier-compute)"></span>Policy &mdash; reads settings, returns decisions</div>
+            <div class="mods"><span>config</span><span>metrics</span><span>job_eff</span><span>source</span><span>jobscope.toml (tracked)</span><span>config.toml (local)</span><span>~/.config/jobscope</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="caption"><b>The import graph is a test.</b> <code>tests/test_layering.py</code> asserts the three rules that have actually been broken: a collector must not reach up into rendering, rendering must not reach down into the HTTP client, and rendering must not reach down into the scheduler's model or the storage format.</div>
+      <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- SLIDE 3 -->
+    <section class="slide s-src" aria-label="Where the numbers come from">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">Provenance</div>
+          <h2>Where every number comes from</h2>
+        </div>
+        <div class="legend">
+          <span class="item"><span class="sw" style="background:var(--primary)"></span>jobstats summary</span>
+          <span class="item"><span class="sw" style="background:var(--tier-data)"></span>Prometheus</span>
+        </div>
+      </div>
+
+      <div class="src-body">
+        <div class="stack">
+          <div class="panel">
+            <div class="pt">Two sources, and what each one covers</div>
+            <table class="tbl">
+              <tr><th>source</th><th>reached by</th><th>covers</th></tr>
+              <tr>
+                <td><b>The jobstats summary</b></td>
+                <td class="dim">One bulk <code>sacct</code> call, no network — the record Slurm writes when a job ends</td>
+                <td class="mono">CPU% MEM%<br>GPU% GMEM%</td>
+              </tr>
+              <tr>
+                <td><b>Prometheus</b></td>
+                <td class="dim">HTTP query API, over dcgm-exporter and the nvidia exporter</td>
+                <td class="mono">everything else,<br>and all live data</td>
+              </tr>
+            </table>
+          </div>
+
+          <div class="card">
+            <div class="label"><span class="m" style="background:var(--primary)"></span>What Slurm actually stored</div>
+            <p>The <code>AdminComment</code> field holds <code>JS1:</code> followed by base64-encoded gzipped JSON: per node <code>cpus</code>, <code>total_time</code>, <code>used_memory</code>, <code>total_memory</code>, and the per-GPU maps <code>gpu_utilization</code>, <code>gpu_used_memory</code> and <code>gpu_total_memory</code> — keyed by <code>minor_number</code> as a string. Decoding it is why one query answers for a whole selection.</p>
+          </div>
+
+          <div>
+            <div class="term-cap">The report says so, per column</div>
+            <div class="term small">  <span class="dim"># a finished job, read back</span>
+  <span class="hd">Source:</span>   CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <span class="dim">&lt;-</span> <span class="g">jobstats</span>;  SM_ACT% TENSOR% DRAM% POWER_W <span class="dim">&lt;-</span> <span class="y">dcgm</span>
+
+  <span class="dim"># the same job while it runs, measured</span>
+  <span class="hd">Source:</span>   CPU% MEM% <span class="dim">&lt;-</span> <span class="y">cgroup</span>;  GPU% GMEM_GB SM_ACT% TENSOR% DRAM% POWER_W <span class="dim">&lt;-</span> <span class="y">dcgm</span></div>
+          </div>
+
+          <div class="note warn"><b>A running job has no stored record</b> — Slurm writes it at job end — so its numbers are always measured, and the line says so. That is also the expensive case: the runtime average costs about one query per job per metric, where <code>--instant</code> is one query per metric for the whole selection.</div>
+        </div>
+
+        <div class="stack">
+          <div class="panel">
+            <div class="pt">Preference order — one source of truth per number, chosen by job state</div>
+            <table class="tbl">
+              <tr><th>job state</th><th>CPU% MEM% GPU% GMEM%</th><th>other DCGM columns</th></tr>
+              <tr><td>finished, summary present</td><td><b>the jobstats summary</b>, always</td><td class="dim">Prometheus</td></tr>
+              <tr><td>finished, summary absent or <code>JS1:Short</code></td><td class="dim">blank</td><td class="dim">Prometheus</td></tr>
+              <tr><td>running</td><td><b>Prometheus</b>, shaped as a summary</td><td class="dim">Prometheus</td></tr>
+            </table>
+          </div>
+
+          <div class="note"><b>A finished job's utilization is never recomputed.</b> The summary is what Slurm recorded, so every view reports the same number and re-deriving it would reintroduce the boundary disagreement that makes a recomputed window drift on short jobs.</div>
+
+          <div class="note warn"><b>Naming a source promotes it</b> for the columns it can serve — <code>--gpu-source dcgm</code> keeps GPU memory, which DCGM has no total for here; <code>--gpu-source nvml</code> does narrow the table, since that exporter publishes no SM, tensor or DRAM activity at all. Defaults live in <code>[gpu] source</code> and <code>[host] source</code>. A column whose source has nothing prints <code>-</code>.</div>
+
+          <div class="note good"><b>The two sources were checked against each other.</b> <code>--no-jobstats</code> reads the same four columns from Prometheus for finished jobs too. Across 51 jobs spanning CPU-only, single-GPU, multi-GPU and multi-node shapes they agree to within one point — the memory columns exactly.</div>
+        </div>
+      </div>
+
+      <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- SLIDE 4 -->
+    <section class="slide s-read" aria-label="Reading a report">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">The default view</div>
+          <h2>Reading a report</h2>
+        </div>
+        <div class="legend">
+          <span class="item"><span class="sw" style="background:var(--good)"></span>good</span>
+          <span class="item"><span class="sw" style="background:var(--warn)"></span>ok</span>
+          <span class="item"><span class="sw" style="background:var(--bad)"></span>bad</span>
+        </div>
+      </div>
+
+      <div class="read-stack">
+        <div class="term small"><span class="p">$</span> <span class="w">jobscope -j 36770231</span>
+  <span class="hd">User:</span>      alice
+  <span class="hd">Account:</span>   kempner_wharper_lab
+  <span class="hd">Partition:</span> kempner_h100
+  <span class="hd">Select:</span>    1 job ID(s)
+  <span class="hd">Source:</span>    CPU% MEM% GPU% GMEM_GB GMEM_TOTAL_GB <span class="dim">&lt;-</span> jobstats;  SM_ACT% TENSOR% DRAM% POWER_W <span class="dim">&lt;-</span> dcgm
+<span class="dim">JOBID        USER         STATE     NODE  CPU%   MEM%   #GPU  GPU%   GMEM%   SM_ACT%  TENSOR%  DRAM%   POWER_W  RUNTIME      PARTITION        GPU_TYPE</span>
+<span class="dim">------------------------------------------------------------------------------------------------------------------------------------------------------</span>
+36770231     alice        COMPLETED 2     <span class="r">6</span>      <span class="g">28</span>     8     <span class="g">28</span>     <span class="g">70</span>      <span class="r">6.0</span>      <span class="r">3.3</span>      <span class="r">2.6</span>     <span class="g">149</span>      01:29:10     kempner_h100     H100
+
+<span class="w">1. Summary by metric</span>
+<span class="dim">METRIC   USED                JOBS  GOOD  OK  BAD</span>
+CPU%     11.4h (<span class="r">6%</span>)          1     0     0   <span class="r">1</span>
+MEM%     665.8GBh (<span class="g">28%</span>)      1     <span class="g">1</span>     0   0
+GPU%     3.3h (<span class="g">28%</span>)          1     <span class="g">1</span>     0   0
+GMEM%    8.3h (<span class="g">70%</span>)          1     <span class="g">1</span>     0   0
+SM_ACT%  0.7h (<span class="r">6%</span>)           1     0     0   <span class="r">1</span>
+TENSOR%  0.4h (<span class="r">3%</span>)           1     0     0   <span class="r">1</span>
+DRAM%    0.3h (<span class="r">3%</span>)           1     0     0   <span class="r">1</span>
+POWER_W  11.9h (<span class="g">100% &gt;100W</span>)  1     <span class="g">1</span>     0   0
+
+<span class="w">2. Average efficiency</span>  <span class="dim">(filled = used, grey = idle)</span>
+     CPU%    <span class="r">6%</span>  <span class="r">██</span><span class="dim">░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░</span>          <span class="w">Graded by best of</span> GPU%, SM_ACT%, TENSOR%, DRAM%, CPU%
+     MEM%   <span class="g">28%</span>  <span class="g">██████████</span><span class="dim">░░░░░░░░░░░░░░░░░░░░░░░░</span>          <span class="dim">(CPU% can vote no higher than inefficient;</span>
+     GPU%   <span class="g">28%</span>  <span class="g">██████████</span><span class="dim">░░░░░░░░░░░░░░░░░░░░░░░░</span>           <span class="dim">POWER_W only lowers it, below its floor)</span>
+    GMEM%   <span class="g">70%</span>  <span class="g">████████████████████████</span><span class="dim">░░░░░░░░░░</span>
+  SM_ACT%    <span class="r">6%</span>  <span class="r">██</span><span class="dim">░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░</span>          <span class="w">Efficiency: average (20-40%)</span>
+  TENSOR%    <span class="r">3%</span>  <span class="r">█</span><span class="dim">░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░</span>
+    DRAM%    <span class="r">3%</span>  <span class="r">█</span><span class="dim">░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░</span></div>
+
+        <div class="read-cards">
+          <div class="callout">
+            <div class="n">1</div>
+            <div>
+              <div class="ct">A self-contained header</div>
+              <p>User, account, partition and window are <b>unconditional</b> — an axis you did not narrow reads <code>(all accounts)</code> rather than going blank, so saved output still says what it covered.</p>
+            </div>
+          </div>
+          <div class="callout">
+            <div class="n">2</div>
+            <div>
+              <div class="ct">One row per job</div>
+              <p>Percent columns are averages over the whole allocation. <code>PARTITION</code> and <code>GPU_TYPE</code> say where the job ran and on what card, so a selection spanning partitions can tell its rows apart.</p>
+            </div>
+          </div>
+          <div class="callout">
+            <div class="n">3</div>
+            <div>
+              <div class="ct">Waste, located and measured</div>
+              <p><code>USED</code> is resource-time that did work over what was allocated. The bands locate waste; <code>USED</code> measures it — no red jobs but a low <code>USED</code> means every job wastes a little.</p>
+            </div>
+          </div>
+          <div class="callout">
+            <div class="n">4</div>
+            <div>
+              <div class="ct">Busy, computing nothing</div>
+              <p>Here: 8 H100s held at 28% duty cycle with <b>6% SM residency and 3% tensor</b>. The card was occupied; the pipes were idle. That is the gap a single number hides.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- SLIDE 5 -->
+    <section class="slide s-band" aria-label="Bands and thresholds">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">Thresholds</div>
+          <h2>Five bands, two tables, per metric</h2>
+        </div>
+        <div class="legend">
+          <span class="item"><span class="sw" style="background:var(--bad)"></span>red</span>
+          <span class="item"><span class="sw" style="background:var(--warn)"></span>yellow</span>
+          <span class="item"><span class="sw" style="background:var(--good)"></span>green</span>
+        </div>
+      </div>
+
+      <div class="band-body">
+        <div class="stack">
+          <div class="ladder">
+            <div class="rung r-bad"><span class="nm">wasteful</span><span class="rg">&lt; 2%</span><span class="bar"><i style="width:2%; background:var(--bad)"></i></span></div>
+            <div class="rung r-bad"><span class="nm">inefficient</span><span class="rg">2 – 10%</span><span class="bar"><i style="width:10%; background:var(--bad)"></i></span></div>
+            <div class="rung r-warn"><span class="nm">needs improvement</span><span class="rg">10 – 20%</span><span class="bar"><i style="width:20%; background:var(--warn)"></i></span></div>
+            <div class="rung r-good"><span class="nm">average</span><span class="rg">20 – 40%</span><span class="bar"><i style="width:40%; background:var(--good)"></i></span></div>
+            <div class="rung r-good"><span class="nm">good</span><span class="rg">&gt; 40%</span><span class="bar"><i style="width:100%; background:var(--good)"></i></span></div>
+          </div>
+
+          <div class="note"><b>The edges are not uniform.</b> "Below 2%" <i>excludes</i> 2, while every band above includes its top: 10.0 is inefficient, 10.1 needs improvement. Edges must not decrease within a metric once resolved against the defaults — jobscope rejects a config where they do, and <code>jobscope config</code> prints both tables as they resolve. <b>And green is not efficient</b>: <code>average</code> is 20–40% of an allocation doing work. The bands are a triage scale for finding waste, not a grade sheet.</div>
+
+        </div>
+
+        <div class="stack">
+          <div>
+            <div class="term-cap">Two tables, and nothing is inherited between them</div>
+            <div class="term small toml"><span class="sec">[thresholds.summary.wasteful]</span>
+<span class="key">default</span> = <span class="num">2</span>
+<span class="key">cpu</span>     = <span class="num">5</span>      <span class="cm"># a GPU job idling its cores is normal; 2% would flag them all</span>
+
+<span class="sec">[thresholds.timeslice.wasteful]</span>
+<span class="key">default</span> = <span class="num">2</span>
+<span class="key">cpu</span>     = <span class="num">8</span>      <span class="cm"># a short window dips further than a whole-job average</span>
+
+<span class="sec">[thresholds]</span>
+<span class="key">power_w</span> = <span class="num">100</span>    <span class="cm"># POWER_W, in WATTS -- below this a GPU counts as idle</span></div>
+          </div>
+
+          <div class="note"><code>[thresholds.summary]</code> grades the plain report — one average over the whole runtime. <code>[thresholds.timeslice]</code> grades <code>--ts</code>, <code>--plot-ts</code> and <code>--eff</code>, where samples are pooled inside a window. <b>A two-hour slice catching a checkpoint pause is not a two-hour idle job</b>, so neither table inherits from the other.</div>
+
+          <div class="note"><b>Edges are per metric</b>, because the metrics do not mean the same thing: a GPU job legitimately holds cores it never uses, so <code>CPU%</code> at 4% is ordinary where <code>GPU%</code> at 4% is idle, and <code>SM_ACT%</code> sits structurally below <code>GPU%</code> on the same work. <code>POWER_W</code> has no bands at all — only a floor in watts, per GPU model, since idle draw is a property of the hardware.</div>
+        </div>
+      </div>
+
+      <div class="wide-term">
+        <div class="term-cap">3. Problem jobs — the same bands on a day of one partition (SM group elided for room)</div>
+        <div class="term tiny"><span class="p">$</span> <span class="w">jobscope finished -p kempner_h100 -D 1</span>        <span class="dim"># 36 jobs, 24 of them on GPUs</span>
+<span class="w">3. Problem jobs</span>
+<span class="r">Wasteful GPU (11/24): GPU &lt; 2%</span>
+  alice | 36828732:<span class="r">1%</span>:0.2h(00:09:36), 36836738:<span class="r">0%</span>:0.1h(00:02:55), 36822372:<span class="r">0%</span>:0.1h(00:08:30)
+<span class="r">Wasteful POWER (14/34): POWER &lt; 100W</span>
+  alice | 36828732:<span class="r">85W</span>:0.2h(00:09:36), 36836738:<span class="r">83W</span>:0.1h(00:02:55), 36822372:<span class="r">80W</span>:0.1h(00:08:30)
+<span class="dim">Jobs: cpu-jobs=36  gpu-jobs=24  gpus=38</span></div>
+        <div class="shot-cap" style="text-align:left"><b>Each heading names its own rule and how many jobs crossed it</b>: 11 of the 24 GPU jobs never cleared 2% duty cycle. Watts are judged in watts.</div>
+      </div>
+
+      <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- SLIDE 6 -->
+    <section class="slide s-ts" aria-label="Time series">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">When an average is not the answer</div>
+          <h2>Keeping the shape of the run</h2>
+          <p class="sub">An average cannot say whether a job used half a GPU throughout or all of a GPU for half the run. The time-series views keep one value per scrape.</p>
+        </div>
+      </div>
+
+      <div class="ts-body">
+        <div class="stack">
+          <div class="panel">
+            <div class="pt">Four views of the same series</div>
+            <div class="qrow">
+              <span class="cmd">--ts [WINDOW]</span>
+              <span class="qt">One CSV row <b>per GPU per scrape</b>. Pipe it into <code>jobscope plot</code>, or keep it for anything else.</span>
+            </div>
+            <div class="qrow">
+              <span class="cmd">--ts --stats</span>
+              <span class="qt">Summarize the window: <b>min / mean / max / last</b> per GPU and metric. <code>--stats node</code> and <code>--stats job</code> pool it upward.</span>
+            </div>
+            <div class="qrow">
+              <span class="cmd">--plot-ts</span>
+              <span class="qt">One <b>panel per metric</b>, one column per GPU. The view to use without colour, since each series is drawn on its own axis.</span>
+            </div>
+            <div class="qrow">
+              <span class="cmd">--plot-ts-overlay</span>
+              <span class="qt">One <b>panel per GPU</b>, every metric on a shared axis, one row per node — so it needs no <code>--nodename</code>.</span>
+            </div>
+          </div>
+
+          <div class="note"><b>The overlay answers the question behind most diagnosis: did the metrics move together?</b> <code>GPU% 90</code> beside <code>SM_ACT% 8</code> on one pair of axes is a card that was occupied but barely loaded. Watts are left out, because they cannot share a scale with percentages.</div>
+
+          <div class="note warn">On a multi-node job add <code>--nodename</code> to <code>--plot-ts</code>, or GPU ids from different nodes merge — GPU 0 exists on every node. <code>--gpuid 0,1</code> narrows to particular cards.</div>
+        </div>
+
+        <div class="stack">
+          <div class="term-cap">jobscope -j 36788818_3 --ts --csv | jobscope plot</div>
+          <div class="shot"><img src="data:image/svg+xml;base64,PHN2ZyBjbGFzcz0icmljaC10ZXJtaW5hbCIgdmlld0JveD0iMCAwIDEwMDcgNjM1LjU5OTk5OTk5OTk5OTkiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgICA8IS0tIEdlbmVyYXRlZCB3aXRoIFJpY2ggaHR0cHM6Ly93d3cudGV4dHVhbGl6ZS5pbyAtLT4KICAgIDxzdHlsZT4KCiAgICBAZm9udC1mYWNlIHsKICAgICAgICBmb250LWZhbWlseTogIkZpcmEgQ29kZSI7CiAgICAgICAgc3JjOiBsb2NhbCgiRmlyYUNvZGUtUmVndWxhciIpLAogICAgICAgICAgICAgICAgdXJsKCJodHRwczovL2NkbmpzLmNsb3VkZmxhcmUuY29tL2FqYXgvbGlicy9maXJhY29kZS82LjIuMC93b2ZmMi9GaXJhQ29kZS1SZWd1bGFyLndvZmYyIikgZm9ybWF0KCJ3b2ZmMiIpLAogICAgICAgICAgICAgICAgdXJsKCJodHRwczovL2NkbmpzLmNsb3VkZmxhcmUuY29tL2FqYXgvbGlicy9maXJhY29kZS82LjIuMC93b2ZmL0ZpcmFDb2RlLVJlZ3VsYXIud29mZiIpIGZvcm1hdCgid29mZiIpOwogICAgICAgIGZvbnQtc3R5bGU6IG5vcm1hbDsKICAgICAgICBmb250LXdlaWdodDogNDAwOwogICAgfQogICAgQGZvbnQtZmFjZSB7CiAgICAgICAgZm9udC1mYW1pbHk6ICJGaXJhIENvZGUiOwogICAgICAgIHNyYzogbG9jYWwoIkZpcmFDb2RlLUJvbGQiKSwKICAgICAgICAgICAgICAgIHVybCgiaHR0cHM6Ly9jZG5qcy5jbG91ZGZsYXJlLmNvbS9hamF4L2xpYnMvZmlyYWNvZGUvNi4yLjAvd29mZjIvRmlyYUNvZGUtQm9sZC53b2ZmMiIpIGZvcm1hdCgid29mZjIiKSwKICAgICAgICAgICAgICAgIHVybCgiaHR0cHM6Ly9jZG5qcy5jbG91ZGZsYXJlLmNvbS9hamF4L2xpYnMvZmlyYWNvZGUvNi4yLjAvd29mZi9GaXJhQ29kZS1Cb2xkLndvZmYiKSBmb3JtYXQoIndvZmYiKTsKICAgICAgICBmb250LXN0eWxlOiBib2xkOwogICAgICAgIGZvbnQtd2VpZ2h0OiA3MDA7CiAgICB9CgogICAgLnRlcm1pbmFsLTE3NDgyNTU3ODktbWF0cml4IHsKICAgICAgICBmb250LWZhbWlseTogRmlyYSBDb2RlLCBtb25vc3BhY2U7CiAgICAgICAgZm9udC1zaXplOiAyMHB4OwogICAgICAgIGxpbmUtaGVpZ2h0OiAyNC40cHg7CiAgICAgICAgZm9udC12YXJpYW50LWVhc3QtYXNpYW46IGZ1bGwtd2lkdGg7CiAgICB9CgogICAgLnRlcm1pbmFsLTE3NDgyNTU3ODktdGl0bGUgewogICAgICAgIGZvbnQtc2l6ZTogMThweDsKICAgICAgICBmb250LXdlaWdodDogYm9sZDsKICAgICAgICBmb250LWZhbWlseTogYXJpYWw7CiAgICB9CgogICAgLnRlcm1pbmFsLTE3NDgyNTU3ODktcjEgeyBmaWxsOiAjYzVjOGM2IH0KLnRlcm1pbmFsLTE3NDgyNTU3ODktcjIgeyBmaWxsOiAjZmYwMDAwIH0KLnRlcm1pbmFsLTE3NDgyNTU3ODktcjMgeyBmaWxsOiAjMDBmZjAwIH0KLnRlcm1pbmFsLTE3NDgyNTU3ODktcjQgeyBmaWxsOiAjMDA4N2ZmIH0KLnRlcm1pbmFsLTE3NDgyNTU3ODktcjUgeyBmaWxsOiAjZmY4NzAwIH0KLnRlcm1pbmFsLTE3NDgyNTU3ODktcjYgeyBmaWxsOiAjODY4ODg3IH0KLnRlcm1pbmFsLTE3NDgyNTU3ODktcjcgeyBmaWxsOiAjOTg3MjlmIH0KICAgIDwvc3R5bGU+CgogICAgPGRlZnM+CiAgICA8Y2xpcFBhdGggaWQ9InRlcm1pbmFsLTE3NDgyNTU3ODktY2xpcC10ZXJtaW5hbCI+CiAgICAgIDxyZWN0IHg9IjAiIHk9IjAiIHdpZHRoPSI5ODcuMTk5OTk5OTk5OTk5OSIgaGVpZ2h0PSI1ODQuNTk5OTk5OTk5OTk5OSIgLz4KICAgIDwvY2xpcFBhdGg+CiAgICA8Y2xpcFBhdGggaWQ9InRlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0wIj4KICAgIDxyZWN0IHg9IjAiIHk9IjEuNSIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEiPgogICAgPHJlY3QgeD0iMCIgeT0iMjUuOSIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTIiPgogICAgPHJlY3QgeD0iMCIgeT0iNTAuMyIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMiPgogICAgPHJlY3QgeD0iMCIgeT0iNzQuNyIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTQiPgogICAgPHJlY3QgeD0iMCIgeT0iOTkuMSIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTUiPgogICAgPHJlY3QgeD0iMCIgeT0iMTIzLjUiIHdpZHRoPSI5ODguMiIgaGVpZ2h0PSIyNC42NSIvPgogICAgICAgICAgICA8L2NsaXBQYXRoPgo8Y2xpcFBhdGggaWQ9InRlcm1pbmFsLTE3NDgyNTU3ODktbGluZS02Ij4KICAgIDxyZWN0IHg9IjAiIHk9IjE0Ny45IiB3aWR0aD0iOTg4LjIiIGhlaWdodD0iMjQuNjUiLz4KICAgICAgICAgICAgPC9jbGlwUGF0aD4KPGNsaXBQYXRoIGlkPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNyI+CiAgICA8cmVjdCB4PSIwIiB5PSIxNzIuMyIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTgiPgogICAgPHJlY3QgeD0iMCIgeT0iMTk2LjciIHdpZHRoPSI5ODguMiIgaGVpZ2h0PSIyNC42NSIvPgogICAgICAgICAgICA8L2NsaXBQYXRoPgo8Y2xpcFBhdGggaWQ9InRlcm1pbmFsLTE3NDgyNTU3ODktbGluZS05Ij4KICAgIDxyZWN0IHg9IjAiIHk9IjIyMS4xIiB3aWR0aD0iOTg4LjIiIGhlaWdodD0iMjQuNjUiLz4KICAgICAgICAgICAgPC9jbGlwUGF0aD4KPGNsaXBQYXRoIGlkPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTAiPgogICAgPHJlY3QgeD0iMCIgeT0iMjQ1LjUiIHdpZHRoPSI5ODguMiIgaGVpZ2h0PSIyNC42NSIvPgogICAgICAgICAgICA8L2NsaXBQYXRoPgo8Y2xpcFBhdGggaWQ9InRlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xMSI+CiAgICA8cmVjdCB4PSIwIiB5PSIyNjkuOSIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEyIj4KICAgIDxyZWN0IHg9IjAiIHk9IjI5NC4zIiB3aWR0aD0iOTg4LjIiIGhlaWdodD0iMjQuNjUiLz4KICAgICAgICAgICAgPC9jbGlwUGF0aD4KPGNsaXBQYXRoIGlkPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTMiPgogICAgPHJlY3QgeD0iMCIgeT0iMzE4LjciIHdpZHRoPSI5ODguMiIgaGVpZ2h0PSIyNC42NSIvPgogICAgICAgICAgICA8L2NsaXBQYXRoPgo8Y2xpcFBhdGggaWQ9InRlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xNCI+CiAgICA8cmVjdCB4PSIwIiB5PSIzNDMuMSIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTE1Ij4KICAgIDxyZWN0IHg9IjAiIHk9IjM2Ny41IiB3aWR0aD0iOTg4LjIiIGhlaWdodD0iMjQuNjUiLz4KICAgICAgICAgICAgPC9jbGlwUGF0aD4KPGNsaXBQYXRoIGlkPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTYiPgogICAgPHJlY3QgeD0iMCIgeT0iMzkxLjkiIHdpZHRoPSI5ODguMiIgaGVpZ2h0PSIyNC42NSIvPgogICAgICAgICAgICA8L2NsaXBQYXRoPgo8Y2xpcFBhdGggaWQ9InRlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xNyI+CiAgICA8cmVjdCB4PSIwIiB5PSI0MTYuMyIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTE4Ij4KICAgIDxyZWN0IHg9IjAiIHk9IjQ0MC43IiB3aWR0aD0iOTg4LjIiIGhlaWdodD0iMjQuNjUiLz4KICAgICAgICAgICAgPC9jbGlwUGF0aD4KPGNsaXBQYXRoIGlkPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTkiPgogICAgPHJlY3QgeD0iMCIgeT0iNDY1LjEiIHdpZHRoPSI5ODguMiIgaGVpZ2h0PSIyNC42NSIvPgogICAgICAgICAgICA8L2NsaXBQYXRoPgo8Y2xpcFBhdGggaWQ9InRlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0yMCI+CiAgICA8cmVjdCB4PSIwIiB5PSI0ODkuNSIgd2lkdGg9Ijk4OC4yIiBoZWlnaHQ9IjI0LjY1Ii8+CiAgICAgICAgICAgIDwvY2xpcFBhdGg+CjxjbGlwUGF0aCBpZD0idGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTIxIj4KICAgIDxyZWN0IHg9IjAiIHk9IjUxMy45IiB3aWR0aD0iOTg4LjIiIGhlaWdodD0iMjQuNjUiLz4KICAgICAgICAgICAgPC9jbGlwUGF0aD4KPGNsaXBQYXRoIGlkPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMjIiPgogICAgPHJlY3QgeD0iMCIgeT0iNTM4LjMiIHdpZHRoPSI5ODguMiIgaGVpZ2h0PSIyNC42NSIvPgogICAgICAgICAgICA8L2NsaXBQYXRoPgogICAgPC9kZWZzPgoKICAgIDxyZWN0IGZpbGw9IiMyOTI5MjkiIHN0cm9rZT0icmdiYSgyNTUsMjU1LDI1NSwwLjM1KSIgc3Ryb2tlLXdpZHRoPSIxIiB4PSIxIiB5PSIxIiB3aWR0aD0iMTAwNSIgaGVpZ2h0PSI2MzMuNiIgcng9IjgiLz48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS10aXRsZSIgZmlsbD0iI2M1YzhjNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgeD0iNTAyIiB5PSIyNyI+am9ic2NvcGUmIzE2MDstaiYjMTYwOzM2Nzg4ODE4XzMmIzE2MDstLXRzJiMxNjA7LS1jc3YmIzE2MDt8JiMxNjA7am9ic2NvcGUmIzE2MDtwbG90PC90ZXh0PgogICAgICAgICAgICA8ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgyNiwyMikiPgogICAgICAgICAgICA8Y2lyY2xlIGN4PSIwIiBjeT0iMCIgcj0iNyIgZmlsbD0iI2ZmNWY1NyIvPgogICAgICAgICAgICA8Y2lyY2xlIGN4PSIyMiIgY3k9IjAiIHI9IjciIGZpbGw9IiNmZWJjMmUiLz4KICAgICAgICAgICAgPGNpcmNsZSBjeD0iNDQiIGN5PSIwIiByPSI3IiBmaWxsPSIjMjhjODQwIi8+CiAgICAgICAgICAgIDwvZz4KICAgICAgICAKICAgIDxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDksIDQxKSIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktY2xpcC10ZXJtaW5hbCkiPgogICAgCiAgICA8ZyBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1tYXRyaXgiPgogICAgPHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9IjAiIHk9IjIwIiB0ZXh0TGVuZ3RoPSI5NzYiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMCkiPiYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwO2hvbHlncHU4YTExMjAyJiMxNjA7Z3B1MiYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTg4LjIiIHk9IjIwIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTApIj4KPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSIwIiB5PSI0NC40IiB0ZXh0TGVuZ3RoPSI5NzYiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMSkiPiYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwO+KUjOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUgOKUkDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTg4LjIiIHk9IjQ0LjQiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMSkiPgo8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9IjAiIHk9IjY4LjgiIHRleHRMZW5ndGg9IjczLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMikiPjkzLjDilKQmIzE2MDs8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjIiIHg9IjczLjIiIHk9IjY4LjgiIHRleHRMZW5ndGg9IjI0LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMikiPuKileKilTwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTcuNiIgeT0iNjguOCIgdGV4dExlbmd0aD0iMTA5LjgiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMikiPiYjMTYwO0dQVSUmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDs8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjIiIHg9IjIwNy40IiB5PSI2OC44IiB0ZXh0TGVuZ3RoPSIzMDUiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMikiPuKgpOKjpOKipOKgpOKgpOKhpOKgpOKjpOKhhOKjp+KgpOKhpOKgpOKgpOKgpOKjpOKgpOKgpOKipOKhpOKgpOKgpOKjpOKjpOKhpDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iNTEyLjQiIHk9IjY4LjgiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMikiPuKigDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMiIgeD0iNTI0LjYiIHk9IjY4LjgiIHRleHRMZW5ndGg9IjQyNyIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0yKSI+4qCk4qGk4qCk4qCk4qCk4qGk4qCk4qGk4qKk4qKg4qKk4qCk4qCk4qCk4qKk4qGk4qCk4qCk4qCk4qCk4qKk4qGk4qOk4qOk4qCk4qCk4qCk4qCk4qCk4qKk4qCk4qOk4qGg4qCk4qKkPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI5NTEuNiIgeT0iNjguOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0yKSI+4qGAPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5NjMuOCIgeT0iNjguOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0yKSI+4pSCPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5ODguMiIgeT0iNjguOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0yKSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMCIgeT0iOTMuMiIgdGV4dExlbmd0aD0iNzMuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA74pSCJiMxNjA7PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI3My4yIiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIyNC40IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7iopXiopU8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk3LjYiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjEyMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+JiMxNjA7U01fQUNUJSYjMTYwOyYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMiIgeD0iMjE5LjYiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjI0LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMykiPuKiu+KiuDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iMjU2LjIiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjI0LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMykiPuKisOKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMiIgeD0iMjkyLjgiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjM2LjYiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMykiPuKgi+KguOKgmzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iMzQxLjYiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMykiPuKhhjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iMzY2IiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7io6A8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjIiIHg9IjM5MC40IiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7ior88L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9IjQxNC44IiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7iooA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjIiIHg9IjQyNyIgeT0iOTMuMiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+4qC4PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI0MzkuMiIgeT0iOTMuMiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+4qK4PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIyIiB4PSI0NzUuOCIgeT0iOTMuMiIgdGV4dExlbmd0aD0iMzYuNiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+4qCI4qC44qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI1MTIuNCIgeT0iOTMuMiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+4qK4PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIyIiB4PSI1MzYuOCIgeT0iOTMuMiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI1ODUuNiIgeT0iOTMuMiIgdGV4dExlbmd0aD0iMjQuNCIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+4qKg4qGGPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI2MjIuMiIgeT0iOTMuMiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+4qGEPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIyIiB4PSI2MzQuNCIgeT0iOTMuMiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0zKSI+4qGOPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI2NzEiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMykiPuKhgDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iNjk1LjQiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMykiPuKjvjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMiIgeD0iNzA3LjYiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMykiPuKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iNzY4LjYiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMykiPuKiuDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMiIgeD0iNzgwLjgiIHk9IjkzLjIiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMykiPuKggzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iNzkzIiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7iooA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjIiIHg9IjgwNS4yIiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7ioIs8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9Ijg0MS44IiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7ioqA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9Ijg2Ni4yIiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIyNC40IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7ioqDioYY8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjIiIHg9IjkwMi44IiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIyNC40IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7ioLjioYc8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjIiIHg9IjkzOS40IiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7ioLg8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9Ijk1MS42IiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7ioYc8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk2My44IiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj7ilII8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSI5My4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTMpIj4KPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSIwIiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iNzMuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+NzcuNeKUpCYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNCIgeD0iNzMuMiIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjI0LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKileKilTwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTcuNiIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjEwOS44IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTQpIj4mIzE2MDtURU5TT1IlJiMxNjA7PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSIyMDcuNCIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjczLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKioOKhhuKigOKhhOKiuOKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iMjkyLjgiIHk9IjExNy42IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTQpIj7ioYc8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9IjMxNy4yIiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+4qGAPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSIzNDEuNiIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iMzY2IiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+4qO/PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI0MTQuOCIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKjvzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iNDM5LjIiIHk9IjExNy42IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTQpIj7iorg8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9IjQ2My42IiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+4qKgPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI0ODgiIHk9IjExNy42IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTQpIj7iorA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9IjUxMi40IiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+4qK4PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI1MzYuOCIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjI0LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKisOKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iNTczLjQiIHk9IjExNy42IiB0ZXh0TGVuZ3RoPSIzNi42IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTQpIj7ioYDiorjioYc8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9IjYyMi4yIiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI2NDYuNiIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKhgDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iNjcxIiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI2OTUuNCIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKjvzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iNzE5LjgiIHk9IjExNy42IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTQpIj7io7Q8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9Ijc0NC4yIiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+4qO0PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI3NjguNiIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKiuDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iNzkzIiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+4qK4PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI4NDEuOCIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKiuDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iODY2LjIiIHk9IjExNy42IiB0ZXh0TGVuZ3RoPSIyNC40IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTQpIj7iorjioYc8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9IjkwMi44IiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMzYuNiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+4qGE4qKw4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIzIiB4PSI5NTEuNiIgeT0iMTE3LjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNCkiPuKhjzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTYzLjgiIHk9IjExNy42IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTQpIj7ilII8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSIxMTcuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS00KSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMCIgeT0iMTQyIiB0ZXh0TGVuZ3RoPSI3My4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTUpIj4mIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDvilIImIzE2MDs8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjczLjIiIHk9IjE0MiIgdGV4dExlbmd0aD0iMjQuNCIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS01KSI+4qKV4qKVPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5Ny42IiB5PSIxNDIiIHRleHRMZW5ndGg9IjEwOS44IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTUpIj4mIzE2MDtEUkFNJSYjMTYwOyYjMTYwOyYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iMjA3LjQiIHk9IjE0MiIgdGV4dExlbmd0aD0iNzU2LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNSkiPuKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKgieKggTwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTYzLjgiIHk9IjE0MiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS01KSI+4pSCPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5ODguMiIgeT0iMTQyIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTUpIj4KPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSIwIiB5PSIxNjYuNCIgdGV4dExlbmd0aD0iODUuNCIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS02KSI+NjIuMOKUpCYjMTYwOyYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iODUuNCIgeT0iMTY2LjQiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNikiPuKiuDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iMTgzIiB5PSIxNjYuNCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS02KSI+4qKwPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSIyNTYuMiIgeT0iMTY2LjQiIHRleHRMZW5ndGg9IjI0LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNikiPuKioOKhhjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iMzQxLjYiIHk9IjE2Ni40IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTYpIj7ioYA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjQzOS4yIiB5PSIxNjYuNCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS02KSI+4qKgPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI1MTIuNCIgeT0iMTY2LjQiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNikiPuKisDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iNTk3LjgiIHk9IjE2Ni40IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTYpIj7ioYA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjYyMi4yIiB5PSIxNjYuNCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS02KSI+4qGAPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI2OTUuNCIgeT0iMTY2LjQiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNikiPuKjoDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iNzY4LjYiIHk9IjE2Ni40IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTYpIj7iorA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9Ijg3OC40IiB5PSIxNjYuNCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS02KSI+4qGAPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI5NTEuNiIgeT0iMTY2LjQiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNikiPuKhhjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTYzLjgiIHk9IjE2Ni40IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTYpIj7ilII8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSIxNjYuNCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS02KSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMCIgeT0iMTkwLjgiIHRleHRMZW5ndGg9Ijg1LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNykiPiYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwO+KUgiYjMTYwOyYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMyIgeD0iODUuNCIgeT0iMTkwLjgiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNykiPuKhnDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iMTA5LjgiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7iorA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjE1OC42IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qKwPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSIxODMiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7iorg8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjIxOS42IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qGAPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSIyNDQiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIzNi42IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7ioYDiorjioYc8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjI5Mi44IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qGGPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSIzNDEuNiIgeT0iMTkwLjgiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNykiPuKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iMzY2IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qO+PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI0MTQuOCIgeT0iMTkwLjgiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNykiPuKjtDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iNDM5LjIiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7iorg8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjQ2My42IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qKAPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI0ODgiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7ioqA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjUxMi40IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qK4PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI1MzYuOCIgeT0iMTkwLjgiIHRleHRMZW5ndGg9IjI0LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNykiPuKigOKhhDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iNTg1LjYiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIyNC40IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7iorjioYc8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjYyMi4yIiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI2NzEiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7ioYY8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9IjY5NS40IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qO/PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI3MTkuOCIgeT0iMTkwLjgiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNykiPuKigDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iNzQ0LjIiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7iooA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9Ijc2OC42IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qK4PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI3OTMiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7iorA8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9Ijg0MS44IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qK4PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI4NjYuMiIgeT0iMTkwLjgiIHRleHRMZW5ndGg9IjI0LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNykiPuKiuOKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iOTE1IiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMjQuNCIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+4qKA4qGEPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI5NTEuNiIgeT0iMTkwLjgiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtNykiPuKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTYzLjgiIHk9IjE5MC44IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTcpIj7ilII8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSIxOTAuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS03KSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMCIgeT0iMjE1LjIiIHRleHRMZW5ndGg9Ijg1LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtOCkiPjQ2LjXilKQmIzE2MDsmIzE2MDs8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9Ijg1LjQiIHk9IjIxNS4yIiB0ZXh0TGVuZ3RoPSI4NzguNCIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS04KSI+4qKg4qCk4qCc4qCS4qCS4qCS4qCa4qCS4qCa4qCS4qCa4qCT4qCa4qCT4qCa4qCT4qCS4qCT4qCS4qCS4qCS4qCT4qCS4qCb4qCS4qCS4qCS4qCb4qCS4qCa4qCS4qCa4qCS4qCa4qCS4qCa4qCS4qCa4qCT4qCS4qCT4qCa4qCT4qCS4qCT4qCS4qCS4qCS4qCT4qCS4qCb4qCS4qCb4qCS4qCb4qCS4qCa4qCS4qCa4qCS4qCS4qCS4qCa4qCS4qCa4qCT4qCS4qCT4qCa4qCT4qCS4qCTPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5NjMuOCIgeT0iMjE1LjIiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtOCkiPuKUgjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTg4LjIiIHk9IjIxNS4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTgpIj4KPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSIwIiB5PSIyMzkuNiIgdGV4dExlbmd0aD0iODUuNCIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS05KSI+JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA74pSCJiMxNjA7JiMxNjA7PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI4NS40IiB5PSIyMzkuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS05KSI+4qG4PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIyIiB4PSI5NTEuNiIgeT0iMjM5LjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtOSkiPuKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTYzLjgiIHk9IjIzOS42IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTkpIj7ilII8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSIyMzkuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS05KSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMCIgeT0iMjY0IiB0ZXh0TGVuZ3RoPSI4NS40IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEwKSI+MzEuMOKUpCYjMTYwOyYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iODUuNCIgeT0iMjY0IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEwKSI+4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIyIiB4PSI5NTEuNiIgeT0iMjY0IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEwKSI+4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5NjMuOCIgeT0iMjY0IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEwKSI+4pSCPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5ODguMiIgeT0iMjY0IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEwKSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMCIgeT0iMjg4LjQiIHRleHRMZW5ndGg9Ijg1LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTEpIj4mIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDvilIImIzE2MDsmIzE2MDs8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjUiIHg9Ijg1LjQiIHk9IjI4OC40IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTExKSI+4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIyIiB4PSI5NTEuNiIgeT0iMjg4LjQiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTEpIj7ioYc8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk2My44IiB5PSIyODguNCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xMSkiPuKUgjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTg4LjIiIHk9IjI4OC40IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTExKSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMCIgeT0iMzEyLjgiIHRleHRMZW5ndGg9Ijg1LjQiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTIpIj4xNS414pSkJiMxNjA7JiMxNjA7PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI4NS40IiB5PSIzMTIuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xMikiPuKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMiIgeD0iOTUxLjYiIHk9IjMxMi44IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEyKSI+4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5NjMuOCIgeT0iMzEyLjgiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTIpIj7ilII8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSIzMTIuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xMikiPgo8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9IjAiIHk9IjMzNy4yIiB0ZXh0TGVuZ3RoPSI4NS40IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEzKSI+JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA74pSCJiMxNjA7JiMxNjA7PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSI4NS40IiB5PSIzMzcuMiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xMykiPuKhhzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMiIgeD0iOTUxLjYiIHk9IjMzNy4yIiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTEzKSI+4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5NjMuOCIgeT0iMzM3LjIiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTMpIj7ilII8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSIzMzcuMiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xMykiPgo8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9IjAiIHk9IjM2MS42IiB0ZXh0TGVuZ3RoPSI2MSIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xNCkiPiYjMTYwOzAuMOKUpDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNSIgeD0iNjEiIHk9IjM2MS42IiB0ZXh0TGVuZ3RoPSIzNi42IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTE0KSI+4qOA4qOA4qGHPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI0IiB4PSI5Ny42IiB5PSIzNjEuNiIgdGV4dExlbmd0aD0iODY2LjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTQpIj7ioKTioLTioKTioLzioKTioKTioKbioKTioKTioKTioKbioKTioKbioKTioKTioKTioKbioKTioKfioKTioLTioKTioLTioKTioL7ioKTioLTioKTioKTioKTioLTioKTioKTioKbioKTioKTioKTioKbioKTioKbioKTioKTioKTioKbioKTioKfioKTioLTioKTioKTioKTioLTioKTioLTioKTioKTioKTioLTioKTioLTioKfioKTioKbioKTioKTioKTioKbioKTioKbioKTiooQ8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk2My44IiB5PSIzNjEuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xNCkiPuKUgjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTg4LjIiIHk9IjM2MS42IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTE0KSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMCIgeT0iMzg2IiB0ZXh0TGVuZ3RoPSI5NzYiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTUpIj4mIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDvilJTilKzilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilKzilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilKzilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilKzilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilKzilJg8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSIzODYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTUpIj4KPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSIwIiB5PSI0MTAuNCIgdGV4dExlbmd0aD0iOTc2IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTE2KSI+JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7MC4wJiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7ODUuOCYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOzE3MS41JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7MjU3LjImIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDszNDMuMCYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTg4LjIiIHk9IjQxMC40IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTE2KSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMCIgeT0iNDM0LjgiIHRleHRMZW5ndGg9Ijk3NiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xNykiPnZhbHVlJiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7bWludXRlcyYjMTYwO3NpbmNlJiMxNjA7c3RhcnQmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDs8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSI0MzQuOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xNykiPgo8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9Ijk4OC4yIiB5PSI0NTkuMiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xOCkiPgo8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjYiIHg9IjAiIHk9IjQ4My42IiB0ZXh0TGVuZ3RoPSIzNDEuNiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xOSkiPi0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLSYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iMzQxLjYiIHk9IjQ4My42IiB0ZXh0TGVuZ3RoPSI0OC44IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTE5KSI+bWluJiMxNjA7PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI3IiB4PSIzOTAuNCIgeT0iNDgzLjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTkpIj4vPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI0MDIuNiIgeT0iNDgzLjYiIHRleHRMZW5ndGg9IjczLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTkpIj4mIzE2MDttZWFuJiMxNjA7PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI3IiB4PSI0NzUuOCIgeT0iNDgzLjYiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTkpIj4vPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI0ODgiIHk9IjQ4My42IiB0ZXh0TGVuZ3RoPSI2MSIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xOSkiPiYjMTYwO21heCYjMTYwOzwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNyIgeD0iNTQ5IiB5PSI0ODMuNiIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0xOSkiPi88L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjEiIHg9IjU2MS4yIiB5PSI0ODMuNiIgdGV4dExlbmd0aD0iNjEiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMTkpIj4mIzE2MDtsYXN0PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI2IiB4PSI2MjIuMiIgeT0iNDgzLjYiIHRleHRMZW5ndGg9IjM1My44IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTE5KSI+JiMxNjA7LS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLS0tLTwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTg4LjIiIHk9IjQ4My42IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTE5KSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMiIgeD0iMCIgeT0iNTA4IiB0ZXh0TGVuZ3RoPSI3NjguNiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0yMCkiPiYjMTYwOyYjMTYwO0dQVSUmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDttaW4mIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDswLjAmIzE2MDsmIzE2MDsmIzE2MDttZWFuJiMxNjA7JiMxNjA7JiMxNjA7ODUuOCYjMTYwOyYjMTYwOyYjMTYwO21heCYjMTYwOyYjMTYwOyYjMTYwOzkzLjAmIzE2MDsmIzE2MDsmIzE2MDtsYXN0JiMxNjA7JiMxNjA7JiMxNjA7NzUuMDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTg4LjIiIHk9IjUwOCIgdGV4dExlbmd0aD0iMTIuMiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0yMCkiPgo8L3RleHQ+PHRleHQgY2xhc3M9InRlcm1pbmFsLTE3NDgyNTU3ODktcjMiIHg9IjAiIHk9IjUzMi40IiB0ZXh0TGVuZ3RoPSI3NjguNiIgY2xpcC1wYXRoPSJ1cmwoI3Rlcm1pbmFsLTE3NDgyNTU3ODktbGluZS0yMSkiPiYjMTYwOyYjMTYwO1NNX0FDVCUmIzE2MDsmIzE2MDsmIzE2MDttaW4mIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDswLjAmIzE2MDsmIzE2MDsmIzE2MDttZWFuJiMxNjA7JiMxNjA7JiMxNjA7NzAuMCYjMTYwOyYjMTYwOyYjMTYwO21heCYjMTYwOyYjMTYwOyYjMTYwOzg3LjUmIzE2MDsmIzE2MDsmIzE2MDtsYXN0JiMxNjA7JiMxNjA7JiMxNjA7NzguMDwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yMSIgeD0iOTg4LjIiIHk9IjUzMi40IiB0ZXh0TGVuZ3RoPSIxMi4yIiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTIxKSI+CjwvdGV4dD48dGV4dCBjbGFzcz0idGVybWluYWwtMTc0ODI1NTc4OS1yNCIgeD0iMCIgeT0iNTU2LjgiIHRleHRMZW5ndGg9Ijc2OC42IiBjbGlwLXBhdGg9InVybCgjdGVybWluYWwtMTc0ODI1NTc4OS1saW5lLTIyKSI+JiMxNjA7JiMxNjA7VEVOU09SJSYjMTYwOyYjMTYwOyYjMTYwO21pbiYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOzAuMCYjMTYwOyYjMTYwOyYjMTYwO21lYW4mIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDsyLjEmIzE2MDsmIzE2MDsmIzE2MDttYXgmIzE2MDsmIzE2MDsmIzE2MDsmIzE2MDs0LjgmIzE2MDsmIzE2MDsmIzE2MDtsYXN0JiMxNjA7JiMxNjA7JiMxNjA7JiMxNjA7MC44PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5ODguMiIgeT0iNTU2LjgiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMjIpIj4KPC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXI1IiB4PSIwIiB5PSI1ODEuMiIgdGV4dExlbmd0aD0iNzY4LjYiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMjMpIj4mIzE2MDsmIzE2MDtEUkFNJSYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwO21pbiYjMTYwOyYjMTYwOyYjMTYwOyYjMTYwOzAuMCYjMTYwOyYjMTYwOyYjMTYwO21lYW4mIzE2MDsmIzE2MDsmIzE2MDs0Ni4wJiMxNjA7JiMxNjA7JiMxNjA7bWF4JiMxNjA7JiMxNjA7JiMxNjA7NjIuNyYjMTYwOyYjMTYwOyYjMTYwO2xhc3QmIzE2MDsmIzE2MDsmIzE2MDs0Ny43PC90ZXh0Pjx0ZXh0IGNsYXNzPSJ0ZXJtaW5hbC0xNzQ4MjU1Nzg5LXIxIiB4PSI5ODguMiIgeT0iNTgxLjIiIHRleHRMZW5ndGg9IjEyLjIiIGNsaXAtcGF0aD0idXJsKCN0ZXJtaW5hbC0xNzQ4MjU1Nzg5LWxpbmUtMjMpIj4KPC90ZXh0PgogICAgPC9nPgogICAgPC9nPgo8L3N2Zz4K" alt="per-job DCGM time series, one panel per metric"></div>
+          <div class="shot-cap">One panel per GPU, every metric on a shared axis, with min / mean / max / last beneath. <b>GPU% averages 85.8 and SM_ACT% 70.0 while TENSOR% averages 2.1</b> — a card worked hard by kernels that never touch the tensor pipes.</div>
+        </div>
+      </div>
+
+      <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- SLIDE 7 -->
+    <section class="slide s-tri" aria-label="Triage and verdicts">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">Triage</div>
+          <h2>A partition sorted, and one job explained</h2>
+        </div>
+        <div class="legend">
+          <span class="item"><span class="sw" style="background:var(--tier-cloud)"></span>--eff</span>
+          <span class="item"><span class="sw" style="background:var(--tier-data)"></span>--verify</span>
+        </div>
+      </div>
+
+      <div class="tri-body">
+        <div class="stack">
+          <div class="term-cap">Which jobs, worst first</div>
+          <div class="term tiny"><span class="p">$</span> <span class="w">jobscope -p kempner_h100 --ts 10m --eff</span>
+  <span class="dim">142 jobs, by best of GPU%, SM_ACT%, OCC%, TENSOR%, DRAM% (POWER_W caps the verdict when idle)</span>
+
+  <span class="r">wasteful (GPU% &lt;2%, SM_ACT% &lt;2%, ...)  15 jobs</span>
+    <span class="dim">JOBID       NODES  GPUS  USER   GPU%  SM_ACT%  POWER_W</span>
+    36229482    1      2     bob     <span class="r">0.0</span>      <span class="r">0.0</span>       <span class="r">70</span>
+  <span class="g">good (best of ...: &gt;40%)  98 jobs</span>
+    <span class="dim">(--eff all to list them)</span></div>
+          <div class="note"><b>Each heading states the rule it applied</b>, so the criteria never has to be looked up. <code>good</code> collapses to a count by default — on a healthy partition it is most of the output and none of the point.</div>
+          <div class="note"><code>--eff</code> rides on <code>--ts WINDOW</code>, so the categories are the <code>timeslice</code> bands rather than the whole-runtime ones. <code>--csv</code> gives one row per job, carrying <code>GMEM%</code> and <code>POWER_W</code> even though neither votes on the label: a row you will sort or join on should say what was measured.</div>
+        </div>
+
+        <div class="stack">
+          <div class="term-cap">Is it idle, and since when</div>
+          <div class="term tiny"><span class="p">$</span> <span class="w">jobscope -j 36664692 --verify 4h</span>
+  <span class="hd">Job:</span>      36664692  alice  4 unit(s)  NVIDIA H200
+  <span class="hd">Window:</span>   13:50 .. 17:51   4h01m
+  <span class="hd">Samples:</span>  241 expected at 60s; 241 measured (100%)
+
+<span class="w">GPU%</span>  <span class="dim">(idle below 2, drawn against 0-100)</span>
+  n1:0  <span class="g">▆▅▅▃▅▅▅▆▅▅▅▃▅▅▅▆▅▅▅▃▅▅▅▆▅▅▅▃▅</span><span class="dim">...........................</span>
+  n1:1  <span class="dim">...........................................................</span>
+  <span class="dim">cell 2m  ────┬─────────────┬────────────┬────────────┬──────────
+              14:00         15:00        16:00        17:00</span>
+
+             <span class="dim">MEASURED     ACTIVE            IDLE       LONGEST IDLE</span>
+  n1:0          4h01m      1h34m  39%      <span class="y">2h27m  61%</span>  1h58m
+  n1:1          4h01m         0s   0%      <span class="r">4h01m 100%</span>  <span class="r">4h01m</span>
+
+<span class="dim">Graded by best of GPU%, SM_ACT%.</span>
+<span class="r">Verdict: wasteful (&lt;2%) -- 3 of 4 units never cleared 2</span>
+  n1:0  ran, then stopped: last sustained work at 15:52, idle at
+        every scrape since -- 1h58m
+  n1:1  never ran: no GPU% sample reached 2 anywhere in this window</div>
+          <div class="note"><code>--verify</code> needs <code>-j</code>: it fetches every scrape of one job's series, which is right for a job you are about to <code>scancel</code> and wrong for a partition. <b><code>--full</code> adds where each metric's time went</b> — a band split per metric, a timeline and per-unit idle split for each voting metric, and the per-rung ladder. On a one-GPU job that is 94 lines against 19.</div>
+        </div>
+      </div>
+
+      <div class="tri-rules" style="grid-template-columns:repeat(4, 1fr)">
+        <div class="card">
+          <div class="label"><span class="m" style="background:var(--primary)"></span>Judged on its best metric</div>
+          <p>The same rule as "every metric is below X", read from the other end: <code>GPU%</code>, <code>SM_ACT%</code>, <code>TENSOR%</code>, <code>DRAM%</code>, <code>CPU%</code> — and <code>CPU%</code> can vote no higher than <i>inefficient</i>.</p>
+        </div>
+        <div class="card">
+          <div class="label"><span class="m" style="background:var(--tier-data)"></span>Two columns do not vote</div>
+          <p><code>GMEM%</code> sits out: reserving 80 GB and computing nothing is still computing nothing. <code>POWER_W</code> is graded in watts against a per-model floor and can only <i>lower</i> a verdict.</p>
+        </div>
+        <div class="card">
+          <div class="label"><span class="m" style="background:var(--tier-compute)"></span>Withheld, not guessed</div>
+          <p>Under 30 scrapes in the window, or fewer than half arriving, and no verdict is given. It is qualified when the metric moves faster than it is sampled, since no mean of such a series is reproducible.</p>
+        </div>
+        <div class="card">
+          <div class="label"><span class="m" style="background:var(--tier-cloud)"></span>Measured time only</div>
+          <p>Every duration is samples times the scrape interval, never the wall clock. The job line is the instants <b>every</b> unit was idle together, so an outage on one card is not the job being idle.</p>
+        </div>
+      </div>
+
+      <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- SLIDE 8 -->
+    <section class="slide s-cmd" aria-label="Command surface">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">The command surface</div>
+          <h2>One axis per level</h2>
+        </div>
+        <div class="legend">
+          <span class="item"><span class="sw" style="background:var(--primary)"></span>default</span>
+        </div>
+      </div>
+
+      <div class="cmdline">
+        <span class="bin">jobscope</span>
+        <span class="ax">[MODE]</span><span class="ax">[scope]</span><span class="ax">[filters]</span><span class="ax">[granularity]</span><span class="ax">[columns]</span><span class="ax">[output]</span>
+      </div>
+
+      <div class="cmd-body">
+        <div class="panel">
+          <div class="pt">Every option composes with every selection — flags and job IDs in any order</div>
+          <div class="axis">
+            <span class="an">mode</span>
+            <span class="aopts"><span class="def">running (default)</span><span>finished</span><span>JOBID ...</span><span>-j JOBID</span></span>
+          </div>
+          <div class="axis">
+            <span class="an">scope</span>
+            <span class="aopts"><span>-D days</span><span>-N last n jobs</span><span>-S start</span><span>-E end</span></span>
+          </div>
+          <div class="axis">
+            <span class="an">filters</span>
+            <span class="aopts"><span>-p partition</span><span>-u user</span><span>-A account</span><span>-t state</span><span>--min-elapsed</span></span>
+          </div>
+          <div class="axis">
+            <span class="an">granularity</span>
+            <span class="aopts"><span class="def">--per-job</span><span>--per-node</span><span>--per-gpu</span><span>--nodename</span><span>--gpuid</span><span>--verify</span><span>--ts</span><span>--stats</span><span>--eff</span><span>--plot-ts</span><span>--plot-ts-overlay</span></span>
+          </div>
+          <div class="axis">
+            <span class="an">columns</span>
+            <span class="aopts"><span>--cpu</span><span>--gpu</span><span>--all-metrics</span><span>--show</span><span>--no-dcgm</span><span>--no-jobstats</span><span>--gpu-source</span></span>
+          </div>
+          <div class="axis">
+            <span class="an">output</span>
+            <span class="aopts"><span>--csv</span><span>-n</span><span>--step</span><span>--timeout</span><span>--workers</span><span>--no-color</span><span>-c config</span></span>
+          </div>
+          <div class="axis">
+            <span class="an">utilities</span>
+            <span class="aopts"><span>plot</span><span>describe</span><span>config</span><span>probe</span></span>
+          </div>
+        </div>
+
+        <div class="stack">
+          <div class="panel">
+            <div class="pt">The seven commands that cover most of it</div>
+            <table class="tbl">
+              <tr><td class="mono">jobscope</td><td class="dim">your running jobs</td></tr>
+              <tr><td class="mono">jobscope 36770231</td><td class="dim">one job, running or finished</td></tr>
+              <tr><td class="mono">jobscope finished -N 20</td><td class="dim">your most recent 20 completed jobs</td></tr>
+              <tr><td class="mono">jobscope finished -p kempner_h100 -D 1</td><td class="dim">one partition, the last day</td></tr>
+              <tr><td class="mono">jobscope -j 36788818_3 --plot-ts</td><td class="dim">one job charted, a panel per metric</td></tr>
+              <tr><td class="mono">jobscope -j 36770231 --per-gpu --node NODE</td><td class="dim">one node, a row per card</td></tr>
+              <tr><td class="mono">jobscope -p kempner_h100 --ts 10m --eff</td><td class="dim">a partition triaged, worst first</td></tr>
+            </table>
+          </div>
+
+          <div class="note"><b>Without a mode word, jobscope shows what is running now</b>; any of <code>-D</code>, <code>-N</code>, <code>-S</code> implies <code>finished</code>. Selections are scoped to your user until <code>-u</code> says otherwise, and <code>finished</code> means completed jobs only until <code>-t</code> asks for other endings.</div>
+
+          <div class="note"><code>jobscope --help</code> narrows the help to the command shape you are writing; <code>--help-all</code> prints every option. <code>jobscope describe</code> defines the columns, <code>jobscope config</code> prints what resolved and which file answered.</div>
+        </div>
+      </div>
+
+      <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- SLIDE 9 -->
+    <section class="slide s-site" aria-label="Site setup and config">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">Bringing up a cluster</div>
+          <h2>probe first, then policy in git</h2>
+        </div>
+        <div class="legend">
+          <span class="item"><span class="sw" style="background:var(--tier-data)"></span>tracked</span>
+          <span class="item"><span class="sw" style="background:var(--warn)"></span>git-ignored</span>
+        </div>
+      </div>
+
+      <div class="site-body">
+        <div class="stack">
+          <div class="panel">
+          <div class="pt">probe reads your cluster and, apart from --init, writes nothing</div>
+          <div class="qrow">
+            <span class="cmd">probe</span>
+            <span class="qt">Can jobscope reach Slurm and Prometheus, and how far back the data goes. <b>Each check fails independently</b>, so it is useful precisely when jobscope does not work yet.</span>
+          </div>
+          <div class="qrow">
+            <span class="cmd">probe --metrics</span>
+            <span class="qt">Every series this server carries for a real job, marked <code>ok</code>, <code>new</code> or <code>absent</code> — the one to run before editing <code>[metrics]</code> or <code>[thresholds]</code>.</span>
+          </div>
+          <div class="qrow">
+            <span class="cmd">probe --toml</span>
+            <span class="qt">That listing as an editable <code>[metrics]</code> block. Stdout is only ever TOML and diagnosis goes to stderr, which makes <code>&gt;&gt; jobscope.toml</code> safe.</span>
+          </div>
+          <div class="qrow">
+            <span class="cmd">probe --coverage</span>
+            <span class="qt">Host counts <b>per series, grouped by source</b>, and a <code>missing</code> section naming nodes that run jobs but do not publish — over five partitions here, 254 nodes reduced to the one worth acting on.</span>
+          </div>
+          <div class="qrow">
+            <span class="cmd">probe --init</span>
+            <span class="qt">Writes a config from those findings, and refuses to overwrite one. It writes the <b>git-ignored</b> tier, not the reviewed one.</span>
+          </div>
+          </div>
+
+          <div>
+            <div class="term-cap">A committable config for an endpoint that needs a token</div>
+            <div class="term tiny toml"><span class="sec">[prometheus]</span>
+<span class="key">url</span> = <span class="g">"https://prometheus.example.net/api/prom"</span>   <span class="cm"># no secret -- safe to commit</span>
+<span class="key">credentials_file</span> = <span class="g">"secrets/prom_creds"</span>           <span class="cm"># git-ignored; USER:TOKEN, one line</span></div>
+          </div>
+
+          <div class="note good">A relative path resolves against the config file's <b>own</b> directory. jobscope refuses a credentials file readable by group or other, one holding a whole URL, and a <code>url</code> that already embeds a credential. <code>$JOBSCOPE_PROM_URL</code> wins over both, and says so.</div>
+        </div>
+
+        <div class="stack">
+          <div class="panel">
+            <div class="pt">Where the config comes from — first match wins</div>
+            <div class="tier"><span class="num">1</span><div><span class="path">jobscope -c PATH</span><div class="who">one invocation</div></div></div>
+            <div class="tier"><span class="num">2</span><div><span class="path">$JOBSCOPE_CONFIG</span><div class="who">one shell, job, or module file</div></div></div>
+            <div class="tier"><span class="num">3</span><div><span class="path">&lt;repo&gt;/config.toml</span><div class="who">git-ignored — local experiments, and <code>probe --init</code></div></div></div>
+            <div class="tier tracked"><span class="num">4</span><div><span class="path">&lt;repo&gt;/jobscope.toml</span><div class="who"><b>tracked</b> — the site's policy, reviewed through pull requests</div></div></div>
+            <div class="tier"><span class="num">5</span><div><span class="path">~/.config/jobscope/config.toml</span><div class="who">a user with no checkout</div></div></div>
+          </div>
+
+          <div class="note"><b>Both repository tiers are found from jobscope's own position on disk</b>, not the working directory — so cron, whose <code>cwd</code> is <code>$HOME</code>, and an sbatch script pick the site policy up with nothing set and no flag. <code>jobscope config</code> names the file that answered.</div>
+
+          <div class="note warn"><b>The layout is matched exactly, not walked upward for <code>.git</code>.</b> A walk finds the <i>nearest</i> marker, and on a shared login node that is not necessarily ours: an empty <code>/tmp/.git</code> owned by another user — there is one on this cluster — would make <code>/tmp</code> the root, and jobscope would then read a config that user can write, naming the endpoint we authenticate to.</div>
+        </div>
+      </div>
+
+      <div class="slide-foot">Kempner Research Engineering Team <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- SLIDE 10 -->
+    <section class="slide s-state" aria-label="Where it stands">
+      <div class="head-row">
+        <div>
+          <div class="eyebrow">Where it stands</div>
+          <h2>Kept honest, and what it cannot do</h2>
+        </div>
+        <div class="legend">
+          <span class="item"><span class="sw" style="background:var(--primary)"></span>v0.1.1 &middot; beta</span>
+          <span class="item"><span class="sw" style="background:var(--warn)"></span>known limits</span>
+        </div>
+      </div>
+
+      <div class="stats">
+        <div class="stat"><div class="v">22</div><div class="l">modules, layered</div></div>
+        <div class="stat"><div class="v">17.9k</div><div class="l">lines, src</div></div>
+        <div class="stat"><div class="v">1,244</div><div class="l">tests</div></div>
+        <div class="stat"><div class="v">15.4k</div><div class="l">lines, tests</div></div>
+        <div class="stat"><div class="v">2</div><div class="l">exporters read</div></div>
+        <div class="stat"><div class="v">4</div><div class="l">reference docs</div></div>
+      </div>
+
+      <div class="state-body">
+        <div class="stack">
+          <div class="panel">
+            <div class="pt">How it is kept honest</div>
+            <ul class="bullets" style="gap:9px">
+              <li class="li"><span class="dot"></span><span><b>The import graph is asserted.</b> A new module has to be classified in <code>test_layering.py</code>, or the boundary rules would skip it in silence.</span></li>
+              <li class="li"><span class="dot"></span><span><b>The two sources were compared job for job.</b> 51 finished jobs across four allocation shapes agree within a point; memory exactly.</span></li>
+              <li class="li"><span class="dot"></span><span><b>Exporter gaps are diagnosed, not absorbed.</b> <code>probe --coverage</code> is how a hole in a metric family is told apart from a bug here.</span></li>
+              <li class="li"><span class="dot"></span><span><b>The bands are reviewed like code.</b> Site policy sits in a tracked <code>jobscope.toml</code>, so retuning a threshold is a pull request.</span></li>
+            </ul>
+          </div>
+
+          <div class="panel">
+            <div class="pt">The documentation set</div>
+            <div class="doclist">
+              <div class="doc"><span class="dp">docs/reference.md</span><span>every flag, column, threshold and plot layout</span></div>
+              <div class="doc"><span class="dp">docs/admin.md</span><span>cluster setup, <code>probe</code>, Prometheus, and config</span></div>
+              <div class="doc"><span class="dp">docs/metrics.md</span><span>how each metric is measured, reduced, and verified by hand</span></div>
+              <div class="doc"><span class="dp">CHANGELOG.md</span><span>release notes, and any change that moves a CSV column</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="pt">Known limits — stated, because a silent one is worse</div>
+          <div class="limits">
+            <div class="limit"><span class="tagm">MIG</span><span>No DCGM columns on a MIG row, and no <code>GPU%</code> at all — NVML publishes no device duty cycle once a card is partitioned. The historical views collapse sibling instances; <code>--ts</code> is the accurate view.</span></div>
+            <div class="limit"><span class="tagm">clip</span><span>DCGM columns cannot be clipped to GPU ownership, so a card that changed hands mid-window may include a neighbouring job's samples. The <code>nvidia_*</code> columns are clipped and do not have this problem.</span></div>
+            <div class="limit"><span class="tagm">cost</span><span>The running view's runtime average costs roughly <b>one query per job per metric</b> — 628 against 12 on one 110-job partition. It is paced, not capped: rows print as they land. <code>--instant</code> or <code>--min-elapsed</code> are what reduce the count.</span></div>
+            <div class="limit"><span class="tagm">short</span><span>A recomputed window is boundary-sensitive on short jobs. The preference order avoids it for finished jobs; a running job has no stored summary to prefer.</span></div>
+            <div class="limit"><span class="tagm">scope</span><span>The running view's ownership query is not scoped to a cluster, so a Prometheus serving several clusters could in principle collide on job ID.</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="startrow">
+        <div class="card">
+          <div class="label"><span class="m" style="background:var(--primary)"></span>1 &nbsp;Install</div>
+          <p><code>uv tool install jobscope</code>, or <code>pip install -e .[dev]</code> from a clone. Python 3.9+.</p>
+        </div>
+        <div class="card">
+          <div class="label"><span class="m" style="background:var(--tier-data)"></span>2 &nbsp;Check the cluster</div>
+          <p><code>jobscope probe</code>, then <code>jobscope config</code> — what this cluster exposes, and which file answered.</p>
+        </div>
+        <div class="card">
+          <div class="label"><span class="m" style="background:var(--tier-compute)"></span>3 &nbsp;Read a report</div>
+          <p><code>jobscope finished -N 20</code> for your last twenty jobs; <code>jobscope describe</code> for the columns.</p>
+        </div>
+      </div>
+
+      <div class="slide-foot">jobscope <span class="pipe">|</span> github.com/KempnerInstitute/jobscope <span class="pipe">|</span> August 19, 2026</div>
+    </section>
+
+    <!-- Deck chrome -->
+    <div class="mark" data-chrome hidden>
+      <span class="glyph"></span><span>job<span class="a">scope</span></span>
+    </div>
+    <nav class="nav" aria-label="Slide navigation">
+      <button type="button" data-prev aria-label="Previous slide">Prev</button>
+      <span class="counter" data-counter>01 / 01</span>
+      <button type="button" data-next aria-label="Next slide">Next</button>
+    </nav>
+
+  </div>
+
+<script>
+  (function () {
+    var slides = Array.prototype.slice.call(document.querySelectorAll('.slide'));
+    var total = slides.length;
+    var stage = document.getElementById('stage');
+    var counter = document.querySelector('[data-counter]');
+    var prevBtn = document.querySelector('[data-prev]');
+    var nextBtn = document.querySelector('[data-next]');
+    var mark = document.querySelector('[data-chrome]');
+    var idx = 0;
+
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+
+    function render() {
+      for (var i = 0; i < slides.length; i++) {
+        slides[i].classList.toggle('is-active', i === idx);
+      }
+      counter.textContent = pad(idx + 1) + ' / ' + pad(total);
+      prevBtn.disabled = idx === 0;
+      nextBtn.disabled = idx === total - 1;
+      mark.hidden = idx === 0;
+      var target = '#' + (idx + 1);
+      if (location.hash !== target) {
+        history.replaceState(null, '', target);
+      }
+    }
+
+    function go(n) {
+      idx = Math.max(0, Math.min(total - 1, n));
+      render();
+    }
+
+    function fromHash() {
+      var n = parseInt(location.hash.replace('#', ''), 10);
+      if (!isNaN(n)) idx = Math.max(0, Math.min(total - 1, n - 1));
+    }
+
+    function fit() {
+      var s = Math.min(window.innerWidth / 1280, window.innerHeight / 720);
+      stage.style.transform = 'scale(' + s + ')';
+    }
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ' || e.key === 'Spacebar') {
+        e.preventDefault(); go(idx + 1);
+      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+        e.preventDefault(); go(idx - 1);
+      } else if (e.key === 'Home') {
+        e.preventDefault(); go(0);
+      } else if (e.key === 'End') {
+        e.preventDefault(); go(total - 1);
+      }
+    });
+
+    prevBtn.addEventListener('click', function () { go(idx - 1); });
+    nextBtn.addEventListener('click', function () { go(idx + 1); });
+    window.addEventListener('hashchange', function () { fromHash(); render(); });
+    window.addEventListener('resize', fit);
+
+    fromHash();
+    fit();
+    render();
+  })();
+</script>
+</body>
+</html>
